@@ -11,11 +11,13 @@ learning are later phases and are not part of the current implementation.
 
 ## Current status
 
-Milestone 1 provides:
+Milestones 1 and 2 provide:
 
 - typed incident, evidence, and diagnosis models;
 - environment-based application settings;
 - a minimal FastAPI application and health endpoint;
+- asynchronous Prometheus, Jaeger, and OpenSearch clients;
+- normalization of backend responses into typed evidence;
 - unit tests for the public model and API contracts.
 
 ## Requirements

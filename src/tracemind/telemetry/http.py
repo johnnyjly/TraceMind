@@ -1,0 +1,32 @@
+from typing import Any
+
+import httpx
+
+from tracemind.telemetry.errors import TelemetryClientError
+
+
+async def request_json(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    source: str,
+    params: dict[str, str | int] | None = None,
+    json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        response = await client.request(method, url, params=params, json=json)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise TelemetryClientError(f"{source} request failed: {exc}") from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise TelemetryClientError(f"{source} returned invalid JSON") from exc
+
+    if not isinstance(payload, dict):
+        raise TelemetryClientError(f"{source} returned an unexpected JSON payload")
+
+    return payload
+

@@ -15,9 +15,9 @@ class Settings(BaseSettings):
     prometheus_url: AnyHttpUrl = "http://localhost:9090"
     jaeger_url: AnyHttpUrl = "http://localhost:16686"
     opensearch_url: AnyHttpUrl = "http://localhost:9200"
+    opensearch_logs_index: str = "otel-logs-*"
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
