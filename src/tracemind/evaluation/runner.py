@@ -1,7 +1,9 @@
+from collections.abc import Sequence
 from datetime import datetime
 from time import perf_counter
 
 import httpx
+from langchain_core.callbacks import BaseCallbackHandler
 
 from tracemind.agent import DiagnosisService, LangChainAgentRunner, create_chat_model
 from tracemind.config import Settings
@@ -16,6 +18,7 @@ async def run_live_evaluation(
     *,
     start: datetime,
     end: datetime,
+    callbacks: Sequence[BaseCallbackHandler] | None = None,
 ) -> EvaluationReport:
     model = create_chat_model(settings)
     async with httpx.AsyncClient(timeout=20) as http_client:
@@ -27,7 +30,7 @@ async def run_live_evaluation(
                 settings.opensearch_logs_index,
                 http_client,
             ),
-            LangChainAgentRunner(model),
+            LangChainAgentRunner(model, callbacks=callbacks),
             recursion_limit=settings.agent_recursion_limit,
         )
         started = perf_counter()

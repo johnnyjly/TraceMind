@@ -4,6 +4,7 @@ from typing import Protocol
 from uuid import UUID
 
 from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -50,8 +51,14 @@ class AgentRunner(Protocol):
 
 
 class LangChainAgentRunner:
-    def __init__(self, model: BaseChatModel) -> None:
+    def __init__(
+        self,
+        model: BaseChatModel,
+        *,
+        callbacks: Sequence[BaseCallbackHandler] | None = None,
+    ) -> None:
         self._model = model
+        self._callbacks = list(callbacks or ())
 
     async def run(
         self,
@@ -68,7 +75,10 @@ class LangChainAgentRunner:
         )
         result = await agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
-            {"recursion_limit": recursion_limit},
+            {
+                "recursion_limit": recursion_limit,
+                "callbacks": self._callbacks,
+            },
         )
         return DiagnosisDraft.model_validate(result["structured_response"])
 

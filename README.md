@@ -129,6 +129,10 @@ and deterministic ground-truth checks:
 uv run python scripts/run_evaluation.py --lookback-minutes 10
 ```
 
+Add `--verbose` to print every model input, model response, tool call, and tool
+result. Each event is limited to 12,000 characters by default; adjust the limit
+with `--verbose-max-chars`.
+
 The report is written to `artifacts/evaluations/payment-failure.json`. Stop and
 remove the scenario containers and volumes with:
 
