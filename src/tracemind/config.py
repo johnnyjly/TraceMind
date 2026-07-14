@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     prometheus_url: AnyHttpUrl = "http://localhost:9090"
-    jaeger_url: AnyHttpUrl = "http://localhost:16686"
+    jaeger_url: AnyHttpUrl = "http://localhost:16686/jaeger/ui"
     opensearch_url: AnyHttpUrl = "http://localhost:9200"
     opensearch_logs_index: str = "otel-logs-*"
     llm_provider: Literal["google", "openai"] = "google"

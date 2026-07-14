@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from tracemind.agent.errors import DiagnosisError
 from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
-from tracemind.models import Diagnosis, DiagnosisStatus, Incident
+from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
 from tracemind.telemetry import JaegerClient, OpenSearchClient, PrometheusClient
 
 
@@ -27,6 +27,16 @@ class DiagnosisDraft(BaseModel):
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
+
+
+class DiagnosisRun(BaseModel):
+    diagnosis: Diagnosis
+    evidence: list[Evidence]
+    tool_calls: dict[str, int]
+
+    @property
+    def tool_call_count(self) -> int:
+        return sum(self.tool_calls.values())
 
 
 class AgentRunner(Protocol):
@@ -86,6 +96,16 @@ class DiagnosisService:
         start: datetime,
         end: datetime,
     ) -> Diagnosis:
+        run = await self.diagnose_with_evidence(incident, start=start, end=end)
+        return run.diagnosis
+
+    async def diagnose_with_evidence(
+        self,
+        incident: Incident,
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> DiagnosisRun:
         if end <= start:
             raise ValueError("investigation end must be after its start")
 
@@ -116,7 +136,11 @@ class DiagnosisService:
         if draft.status is DiagnosisStatus.COMPLETE and not draft.evidence_ids:
             raise DiagnosisError("a complete diagnosis must cite telemetry evidence")
 
-        return Diagnosis(
-            incident_id=incident.id,
-            **draft.model_dump(),
+        return DiagnosisRun(
+            diagnosis=Diagnosis(
+                incident_id=incident.id,
+                **draft.model_dump(),
+            ),
+            evidence=collector.evidence,
+            tool_calls=collector.tool_calls,
         )

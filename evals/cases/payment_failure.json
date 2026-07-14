@@ -1,0 +1,20 @@
+{
+  "id": "payment_failure",
+  "description": "Payment charge requests fail and surface as checkout failures.",
+  "incident": {
+    "title": "Checkout requests are returning HTTP 500",
+    "description": "Customers cannot complete checkout; investigate the downstream cause.",
+    "severity": "high",
+    "affected_services": ["checkout"]
+  },
+  "fault": {
+    "feature_flag": "paymentFailure",
+    "variant": "100%"
+  },
+  "ground_truth": {
+    "root_cause_service": "payment",
+    "root_cause_terms": ["charge", "failure", "error"],
+    "required_evidence_source": "trace"
+  },
+  "max_tool_calls": 12
+}

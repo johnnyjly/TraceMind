@@ -28,7 +28,7 @@ Milestones 1 through 3 provide:
 
 - Python 3.12 or newer
 - `uv`
-- Docker Compose for the later OpenTelemetry Demo integration
+- Podman and `podman-compose` for the OpenTelemetry Demo integration
 
 ## Local setup
 
@@ -99,5 +99,39 @@ repos/
 ```
 
 TraceMind connects to the Demo's Prometheus, Jaeger, and OpenSearch APIs via the
-URLs in `.env`. A pinned Demo revision and reproducible injected-fault run are
-the next milestone. The Demo's built-in agentic mode is not used.
+URLs in `.env`. The evaluation environment is pinned to OpenTelemetry Demo
+`3.1.0` at commit `dedc0178918e260823323b8d95005a8cb924b007`. The Demo's
+built-in agentic mode is not used.
+
+On Ubuntu or WSL, install the rootless container runtime and Compose provider:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y podman podman-compose
+systemctl --user enable --now podman.socket
+podman info
+```
+
+The first evaluation case injects `paymentFailure=100%`. Its generated flagd
+configuration is written under ignored `artifacts/`; the upstream Demo checkout
+is not modified.
+
+```bash
+uv run python scripts/demo_scenario.py prepare
+uv run python scripts/demo_scenario.py start
+uv run python scripts/demo_scenario.py status
+```
+
+After the load generator has produced checkout failures, run the live diagnosis
+and deterministic ground-truth checks:
+
+```bash
+uv run python scripts/run_evaluation.py --lookback-minutes 10
+```
+
+The report is written to `artifacts/evaluations/payment-failure.json`. Stop and
+remove the scenario containers and volumes with:
+
+```bash
+uv run python scripts/demo_scenario.py stop
+```

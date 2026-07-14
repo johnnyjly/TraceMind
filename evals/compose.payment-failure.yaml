@@ -1,0 +1,10 @@
+services:
+  flagd:
+    volumes:
+      - ${TRACEMIND_FLAGD_CONFIG}:/etc/flagd/demo.flagd.json:ro
+  jaeger:
+    ports:
+      - "16686:16686"
+  opensearch:
+    ports:
+      - "9200:9200"

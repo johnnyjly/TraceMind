@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -39,6 +40,35 @@ class JaegerClient:
             raise TelemetryClientError("Jaeger response is missing trace results")
 
         return [self._to_evidence(trace, service) for trace in traces]
+
+    async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
+        payload = await request_json(
+            self._http_client,
+            "GET",
+            f"{self._base_url}/api/traces/{quote(trace_id, safe='')}",
+            source="Jaeger",
+        )
+
+        traces = payload.get("data")
+        if not isinstance(traces, list) or len(traces) != 1:
+            raise TelemetryClientError("Jaeger response is missing the requested trace")
+
+        trace = traces[0]
+        if not isinstance(trace, dict):
+            raise TelemetryClientError("Jaeger returned an invalid trace")
+
+        spans = trace.get("spans")
+        processes = trace.get("processes")
+        if not isinstance(spans, list) or not isinstance(processes, dict):
+            raise TelemetryClientError("Jaeger trace detail is incomplete")
+
+        evidence: list[Evidence] = []
+        for span in spans:
+            if _span_has_error(span):
+                evidence.append(
+                    self._error_span_to_evidence(span, processes, trace_id)
+                )
+        return evidence
 
     @staticmethod
     def _to_evidence(trace: Any, service: str) -> Evidence:
@@ -80,6 +110,53 @@ class JaegerClient:
             },
         )
 
+    @staticmethod
+    def _error_span_to_evidence(
+        span: Any,
+        processes: dict[str, Any],
+        trace_id: str,
+    ) -> Evidence:
+        if not isinstance(span, dict):
+            raise TelemetryClientError("Jaeger returned an invalid span")
+
+        process = processes.get(span.get("processID"))
+        if not isinstance(process, dict) or not isinstance(
+            process.get("serviceName"), str
+        ):
+            raise TelemetryClientError("Jaeger span is missing its service")
+
+        try:
+            observed_at = datetime.fromtimestamp(
+                int(span["startTime"]) / 1_000_000,
+                tz=UTC,
+            )
+            duration_ms = int(span["duration"]) / 1_000
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            raise TelemetryClientError("Jaeger returned an invalid span timestamp") from exc
+
+        operation = str(span.get("operationName", "unknown operation"))
+        tags = _tags_by_key(span)
+        service = process["serviceName"]
+
+        attributes: dict[str, Any] = {
+            "trace_id": trace_id,
+            "span_id": str(span.get("spanID", "")),
+            "operation": operation,
+            "duration_ms": duration_ms,
+        }
+        for key in ("error.type", "otel.status_description", "status.message"):
+            if key in tags:
+                attributes[key.replace(".", "_")] = tags[key]
+
+        return Evidence(
+            source=EvidenceSource.TRACE,
+            summary=f"Error span in {service}: {operation}",
+            observed_at=observed_at,
+            service=service,
+            query=f"trace_id={trace_id}",
+            attributes=attributes,
+        )
+
 
 def _span_has_error(span: Any) -> bool:
     if not isinstance(span, dict):
@@ -100,3 +177,13 @@ def _span_has_error(span: Any) -> bool:
             return True
     return False
 
+
+def _tags_by_key(span: dict[str, Any]) -> dict[str, Any]:
+    tags = span.get("tags", [])
+    if not isinstance(tags, list):
+        return {}
+    return {
+        str(tag["key"]): tag.get("value")
+        for tag in tags
+        if isinstance(tag, dict) and "key" in tag
+    }

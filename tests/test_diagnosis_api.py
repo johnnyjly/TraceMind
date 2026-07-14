@@ -3,7 +3,8 @@ from datetime import UTC, datetime
 
 from httpx import ASGITransport, AsyncClient
 
-from tracemind.api.app import app, get_diagnosis_service
+from tracemind.api.app import app, get_diagnosis_service, get_request_settings
+from tracemind.config import Settings
 from tracemind.models import Diagnosis, DiagnosisStatus
 
 
@@ -84,6 +85,9 @@ def test_diagnosis_endpoint_rejects_reversed_window() -> None:
 
 
 def test_diagnosis_endpoint_requires_selected_provider_key() -> None:
+    async def override_settings():
+        return Settings(_env_file=None, google_api_key=None)
+
     async def request_diagnosis():
         transport = ASGITransport(app=app)
         async with AsyncClient(
@@ -102,7 +106,11 @@ def test_diagnosis_endpoint_requires_selected_provider_key() -> None:
                 },
             )
 
-    response = asyncio.run(request_diagnosis())
+    app.dependency_overrides[get_request_settings] = override_settings
+    try:
+        response = asyncio.run(request_diagnosis())
+    finally:
+        app.dependency_overrides.clear()
 
     assert response.status_code == 503
     assert "TRACEMIND_GOOGLE_API_KEY" in response.json()["detail"]

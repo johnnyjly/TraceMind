@@ -1,0 +1,57 @@
+from tracemind.agent import DiagnosisRun
+from tracemind.models import DiagnosisStatus
+from tracemind.evaluation.models import EvaluationCase, EvaluationResult
+
+
+def evaluate_diagnosis(
+    case: EvaluationCase,
+    run: DiagnosisRun,
+    *,
+    elapsed_ms: float,
+) -> EvaluationResult:
+    diagnosis = run.diagnosis
+    normalized_root_cause = diagnosis.root_cause.casefold()
+    expected_service = case.ground_truth.root_cause_service.casefold()
+    service_match = expected_service in normalized_root_cause
+    term_match = any(
+        term.casefold() in normalized_root_cause
+        for term in case.ground_truth.root_cause_terms
+    )
+
+    evidence_by_id = {item.id: item for item in run.evidence}
+    grounded = all(item_id in evidence_by_id for item_id in diagnosis.evidence_ids)
+    cited_evidence = [
+        evidence_by_id[item_id]
+        for item_id in diagnosis.evidence_ids
+        if item_id in evidence_by_id
+    ]
+    required_evidence_match = any(
+        item.source is case.ground_truth.required_evidence_source
+        and item.service is not None
+        and item.service.casefold() == expected_service
+        for item in cited_evidence
+    )
+    within_tool_budget = run.tool_call_count <= case.max_tool_calls
+    passed = all(
+        (
+            diagnosis.status is DiagnosisStatus.COMPLETE,
+            service_match,
+            term_match,
+            required_evidence_match,
+            grounded,
+            within_tool_budget,
+        )
+    )
+
+    return EvaluationResult(
+        case_id=case.id,
+        diagnosis_status=diagnosis.status,
+        root_cause_service_match=service_match,
+        root_cause_term_match=term_match,
+        required_evidence_match=required_evidence_match,
+        evidence_grounded=grounded,
+        tool_call_count=run.tool_call_count,
+        within_tool_budget=within_tool_budget,
+        elapsed_ms=elapsed_ms,
+        passed=passed,
+    )

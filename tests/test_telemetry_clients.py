@@ -104,13 +104,70 @@ def test_jaeger_search_returns_trace_evidence() -> None:
     assert evidence[0].attributes["duration_ms"] == 250.0
 
 
+def test_jaeger_trace_detail_returns_error_span_evidence() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/traces/trace-123"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "traceID": "trace-123",
+                        "processes": {
+                            "p1": {"serviceName": "checkout"},
+                            "p2": {"serviceName": "payment"},
+                        },
+                        "spans": [
+                            {
+                                "spanID": "span-ok",
+                                "operationName": "PlaceOrder",
+                                "processID": "p1",
+                                "startTime": 1_725_192_000_000_000,
+                                "duration": 300_000,
+                                "tags": [],
+                            },
+                            {
+                                "spanID": "span-error",
+                                "operationName": "Charge",
+                                "processID": "p2",
+                                "startTime": 1_725_192_000_050_000,
+                                "duration": 100_000,
+                                "tags": [
+                                    {"key": "otel.status_code", "value": "ERROR"},
+                                    {
+                                        "key": "error.type",
+                                        "value": "PaymentFailureError",
+                                    },
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+
+    async def get_detail():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await JaegerClient("http://jaeger", http).get_trace_detail(
+                "trace-123"
+            )
+
+    evidence = asyncio.run(get_detail())
+
+    assert len(evidence) == 1
+    assert evidence[0].source is EvidenceSource.TRACE
+    assert evidence[0].service == "payment"
+    assert evidence[0].summary == "Error span in payment: Charge"
+    assert evidence[0].attributes["error_type"] == "PaymentFailureError"
+
+
 def test_opensearch_query_returns_log_evidence() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/otel-logs-*/_search"
         request_body = json.loads(request.content)
         filters = request_body["query"]["bool"]["filter"]
         assert filters[0] == {
-            "term": {"resource.attributes.service.name": "payment"}
+            "term": {"resource.service.name.keyword": "payment"}
         }
         return httpx.Response(
             200,
@@ -121,12 +178,11 @@ def test_opensearch_query_returns_log_evidence() -> None:
                             "_id": "log-123",
                             "_source": {
                                 "@timestamp": "2024-09-01T00:30:00Z",
-                                "severity_text": "ERROR",
-                                "severity_number": 17,
+                                "severity": {"text": "ERROR", "number": 17},
                                 "body": "Payment request timed out",
                                 "traceId": "trace-123",
                                 "spanId": "span-123",
-                                "resource.attributes.service.name": "payment",
+                                "resource": {"service.name": "payment"},
                             },
                         }
                     ]
@@ -152,5 +208,6 @@ def test_opensearch_query_returns_log_evidence() -> None:
     assert len(evidence) == 1
     assert evidence[0].source is EvidenceSource.LOG
     assert evidence[0].summary == "Payment request timed out"
+    assert evidence[0].attributes["severity_text"] == "ERROR"
+    assert evidence[0].attributes["severity_number"] == 17
     assert evidence[0].attributes["trace_id"] == "trace-123"
-

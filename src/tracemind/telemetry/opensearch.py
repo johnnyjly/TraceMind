@@ -31,7 +31,7 @@ class OpenSearchClient:
         limit: int = 100,
     ) -> list[Evidence]:
         filters: list[dict[str, Any]] = [
-            {"term": {"resource.attributes.service.name": service}},
+            {"term": {"resource.service.name.keyword": service}},
             {
                 "range": {
                     "@timestamp": {
@@ -80,10 +80,13 @@ class OpenSearchClient:
             raise TelemetryClientError("OpenSearch log has an invalid timestamp") from exc
 
         summary = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+        severity = source.get("severity")
+        if not isinstance(severity, dict):
+            severity = {}
         attributes = {
             "document_id": str(hit.get("_id", "")),
-            "severity_text": source.get("severity_text"),
-            "severity_number": source.get("severity_number"),
+            "severity_text": severity.get("text"),
+            "severity_number": severity.get("number"),
             "trace_id": source.get("traceId"),
             "span_id": source.get("spanId"),
         }
@@ -96,4 +99,3 @@ class OpenSearchClient:
             query=f"service={service}" + (f" text={text}" if text else ""),
             attributes={key: value for key, value in attributes.items() if value is not None},
         )
-
