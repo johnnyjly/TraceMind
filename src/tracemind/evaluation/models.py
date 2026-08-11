@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, EvidenceSource, Incident
+from tracemind.models.run import RunState
 
 
 class FaultInjection(BaseModel):
@@ -53,3 +54,4 @@ class EvaluationReport(BaseModel):
     diagnosis: Diagnosis
     evidence: list[Evidence]
     result: EvaluationResult
+    run_state: RunState | None = None

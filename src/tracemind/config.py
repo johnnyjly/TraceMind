@@ -1,8 +1,11 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from tracemind.models.run import TOOL_NAMES, RunLimits, ToolName
 
 
 class Settings(BaseSettings):
@@ -22,6 +25,25 @@ class Settings(BaseSettings):
     google_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     agent_recursion_limit: int = Field(default=12, ge=2, le=50)
+    agent_max_model_calls: int = Field(default=8, ge=1)
+    agent_max_tool_calls: int = Field(default=12, ge=1)
+    agent_max_identical_tool_calls: int = Field(default=2, ge=1)
+    agent_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
+    agent_model_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    agent_tool_timeout_seconds: float = Field(default=20, gt=0, allow_inf_nan=False)
+    agent_allowed_tools: tuple[ToolName, ...] = TOOL_NAMES
+    agent_trace_directory: Path | None = Path("artifacts/runs")
+
+    @property
+    def run_limits(self) -> RunLimits:
+        return RunLimits(
+            model_calls=self.agent_max_model_calls,
+            tool_calls=self.agent_max_tool_calls,
+            identical_tool_calls=self.agent_max_identical_tool_calls,
+            duration_seconds=self.agent_timeout_seconds,
+            model_timeout_seconds=self.agent_model_timeout_seconds,
+            tool_timeout_seconds=self.agent_tool_timeout_seconds,
+        )
 
 
 @lru_cache

@@ -5,9 +5,11 @@ microservices. It will investigate synthetic incidents in the OpenTelemetry
 Demo by querying metrics, traces, and logs, then return a structured diagnosis
 with supporting evidence.
 
-The first implementation phase intentionally starts with a single-agent
-baseline. Multi-agent orchestration, MCP, RAG, human approval, and reinforcement
-learning are later phases and are not part of the current implementation.
+The first implementation phase starts with a single-agent baseline. The next
+priority is its context management, execution controls, recovery, persistence,
+and tracing; see [the single-agent design](DESIGN.md). Multi-agent orchestration,
+MCP, RAG, human approval, and reinforcement learning are later phases and are
+not part of the current implementation.
 
 ## Current status
 
@@ -86,6 +88,44 @@ Run the tests with:
 ```bash
 uv run pytest
 ```
+
+## Single-agent execution controls (S1)
+
+API and evaluation runs use one harness for tool authorization, budgets, and
+termination. Defaults are 8 model calls, 12 admitted telemetry calls, at most
+2 calls with identical tool arguments, and 120 seconds per run. Model and tool
+timeouts are 60 and 20 seconds. The graph recursion limit remains a separate
+guard and can stop a run earlier. Configure these values using the
+`TRACEMIND_AGENT_*` settings in [.env.example](.env.example).
+
+`TRACEMIND_AGENT_ALLOWED_TOOLS` is a JSON array of tool names. The harness filters
+visible tools and checks authorization again before execution. This is a
+tool-name policy; it does not provide service or tenant isolation. SDK retries
+are disabled in S1 so hidden retries cannot multiply calls. Failed calls are
+counted; calls rejected before backend execution are not admitted tool calls.
+
+Budget/repetition/recursion stops produce an `inconclusive` diagnosis. Operational
+timeouts return HTTP 504; tool/model failures and invalid diagnoses return 502.
+Error `detail` remains a string. Responses for completed or failed runs include
+`X-TraceMind-Run-ID` and `X-TraceMind-Stop-Reason` headers. Investigation
+timestamps require timezones. Final citations must be unique, observed, and
+inside the investigation window; these checks do not prove causal correctness.
+
+Structured events are written to `artifacts/runs/<run_id>.jsonl` by default.
+They contain call relationships, durations, hashed arguments, evidence IDs,
+usage when the provider reports it, and a terminal status. Unreported usage is
+tracked separately from reported token totals. Raw prompts, queries, results,
+and exception messages are not included in these event files. The optional
+`--verbose` console callback remains a separate development debugging facility.
+Trace file open/write/close failures emit a server warning without replacing
+the diagnosis result or its original error. Events remain available in memory;
+the file can be missing or incomplete. Expected provider and telemetry errors
+are classified separately from unexpected code errors (`internal_error`).
+
+Evaluation reports include `run_state` with counters, events, and stop reason.
+The run state is currently in memory; JSONL events are not resumable checkpoints.
+Context compression, automatic retries/fallback, and persistent recovery are
+subsequent stages in [DESIGN.md](DESIGN.md).
 
 ## OpenTelemetry Demo
 

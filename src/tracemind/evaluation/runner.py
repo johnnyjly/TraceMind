@@ -21,6 +21,8 @@ async def run_live_evaluation(
     callbacks: Sequence[BaseCallbackHandler] | None = None,
 ) -> EvaluationReport:
     model = create_chat_model(settings)
+    limits = settings.run_limits
+    limits.tool_calls = min(limits.tool_calls, case.max_tool_calls)
     async with httpx.AsyncClient(timeout=20) as http_client:
         service = DiagnosisService(
             PrometheusClient(str(settings.prometheus_url), http_client),
@@ -32,6 +34,9 @@ async def run_live_evaluation(
             ),
             LangChainAgentRunner(model, callbacks=callbacks),
             recursion_limit=settings.agent_recursion_limit,
+            limits=limits,
+            allowed_tools=settings.agent_allowed_tools,
+            event_directory=settings.agent_trace_directory,
         )
         started = perf_counter()
         run = await service.diagnose_with_evidence(
@@ -51,4 +56,5 @@ async def run_live_evaluation(
         diagnosis=run.diagnosis,
         evidence=run.evidence,
         result=result,
+        run_state=run.state,
     )

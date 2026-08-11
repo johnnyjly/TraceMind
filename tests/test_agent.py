@@ -44,6 +44,7 @@ class EvidenceUsingRunner:
         tools: Sequence[BaseTool],
         *,
         recursion_limit: int,
+        harness,
     ) -> DiagnosisDraft:
         assert "checkout errors" in prompt
         assert recursion_limit == 8
@@ -61,7 +62,7 @@ class EvidenceUsingRunner:
 
 
 class HallucinatingRunner:
-    async def run(self, prompt, tools, *, recursion_limit):
+    async def run(self, prompt, tools, *, recursion_limit, harness):
         return DiagnosisDraft(
             status=DiagnosisStatus.COMPLETE,
             root_cause="Unsupported conclusion",
@@ -123,6 +124,7 @@ def test_model_factory_supports_google_and_openai() -> None:
 
     assert isinstance(google, ChatGoogleGenerativeAI)
     assert isinstance(openai, ChatOpenAI)
+    assert google.max_retries == openai.max_retries == 0
 
 
 def test_model_factory_requires_selected_provider_key() -> None:

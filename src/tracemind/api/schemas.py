@@ -1,14 +1,12 @@
-from datetime import datetime
-
-from pydantic import BaseModel, model_validator
+from pydantic import AwareDatetime, BaseModel, model_validator
 
 from tracemind.models import Incident
 
 
 class DiagnosisRequest(BaseModel):
     incident: Incident
-    investigation_start: datetime
-    investigation_end: datetime
+    investigation_start: AwareDatetime
+    investigation_end: AwareDatetime
 
     @model_validator(mode="after")
     def validate_window(self) -> "DiagnosisRequest":
