@@ -12,6 +12,8 @@ from tracemind.agent.harness import RunHarness
 
 
 class HarnessMiddleware(AgentMiddleware):
+    """Adapt LangChain model/tool hooks to a single run's harness controls."""
+
     def __init__(self, harness: RunHarness) -> None:
         self.harness = harness
 
@@ -20,6 +22,12 @@ class HarnessMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
+        """Append remaining budgets and execute through the run harness.
+
+        Override the request's system message without mutating graph
+        message history. The harness owns model-call admission, timeout
+        handling, and usage recording.
+        """
         state = self.harness.state
         budget = (
             f"\nRemaining budget including the next call: "
@@ -45,8 +53,13 @@ class HarnessMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        # Also intercept hallucinated/hidden tool names,
-        # before framework dispatch.
+        """Authorize dispatch and trace framework argument errors.
+
+        The tool executor performs budget reservation and rechecks
+        authorization. Framework validation errors are returned to the
+        agent for bounded repair.
+        """
+        # Also intercept hallucinated/hidden tool names before dispatch.
         self.harness.authorize_tool(request.tool_call["name"])
         result = await handler(request)
         if isinstance(result, ToolMessage) and result.status == "error":

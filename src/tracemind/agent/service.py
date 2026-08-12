@@ -70,6 +70,8 @@ class DiagnosisRun(BaseModel):
 
 
 class AgentRunner(Protocol):
+    """Define the asynchronous diagnosis runner used by the service."""
+
     async def run(
         self,
         prompt: str,
@@ -81,6 +83,12 @@ class AgentRunner(Protocol):
 
 
 class LangChainAgentRunner:
+    """Run a LangChain tool loop with structured diagnosis output.
+
+    Each invocation builds a fresh graph using the supplied run harness.
+    Persistent checkpoints and cross-run memory are not configured.
+    """
+
     def __init__(
         self,
         model: BaseChatModel,
@@ -98,6 +106,12 @@ class LangChainAgentRunner:
         recursion_limit: int,
         harness: RunHarness,
     ) -> DiagnosisDraft:
+        """Execute the bounded loop and parse its structured diagnosis
+        proposal.
+
+        Evidence provenance and completion checks are performed by the
+        service after this method returns.
+        """
         agent = create_agent(
             model=self._model,
             tools=tools,
@@ -116,6 +130,8 @@ class LangChainAgentRunner:
 
 
 class DiagnosisService:
+    """Own investigation setup, completion validation, and terminal cleanup."""
+
     def __init__(
         self,
         prometheus: PrometheusClient,
@@ -144,6 +160,12 @@ class DiagnosisService:
         start: datetime,
         end: datetime,
     ) -> Diagnosis:
+        """Run an investigation and return only its accepted or partial
+        diagnosis.
+
+        Use diagnose_with_evidence when evidence and execution state are
+        needed. Investigation failures propagate as DiagnosisError.
+        """
         run = await self.diagnose_with_evidence(incident, start=start, end=end)
         return run.diagnosis
 
@@ -154,6 +176,14 @@ class DiagnosisService:
         start: datetime,
         end: datetime,
     ) -> DiagnosisRun:
+        """Investigate a fixed, timezone-aware window with isolated run state.
+
+        Return evidence and a diagnosis, including an inconclusive result
+        for budget, repetition, or recursion exhaustion. Operational and
+        contract failures raise DiagnosisError with partial evidence and
+        state. Cancellation propagates. Once execution starts, terminal
+        cleanup drains tools and finalizes the run.
+        """
         if start.utcoffset() is None or end.utcoffset() is None:
             raise ValueError(
                 "investigation timestamps must include a timezone"
@@ -276,6 +306,14 @@ class DiagnosisService:
         start: datetime,
         end: datetime,
     ) -> None:
+        """Reject unsupported citations, blank explanations, and invalid
+        times.
+
+        A complete result must cite evidence; all citations must be unique
+        and refer to observations in the inclusive investigation window.
+        These checks establish provenance and time relevance, not causal
+        correctness.
+        """
         observed = {item.id: item for item in evidence}
         if set(draft.evidence_ids) - observed.keys():
             raise DiagnosisError(

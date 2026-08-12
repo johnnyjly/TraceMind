@@ -22,20 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 class RunStopped(DiagnosisError):
+    """Signal a harness-enforced stop with its machine-readable reason."""
+
     def __init__(self, reason: StopReason) -> None:
         super().__init__(f"Diagnosis stopped: {reason.value}")
         self.reason = reason
 
 
 class RunHarness:
-    (
-        "Per-run control plane; admission is synchronous before any awaited "
-        "work.\n\n"
-        "    A harness belongs to one asyncio event loop. Counters and stop "
-        "decisions\n"
-        "    are never delegated to the model. S1 event files are not "
-        "recovery checkpoints.\n    "
-    )
+    """Enforce per-run admission, budgets, deadlines, and lifecycle events.
+
+    One harness belongs to one asyncio event loop. Call reservations happen
+    before awaiting work, so concurrent tools share a budget. The first
+    stop reason is latched; the service drains tools and finalizes the run.
+    JSONL events are best-effort diagnostics, not recovery checkpoints.
+    """
 
     def __init__(
         self, state: RunState, *, event_directory: Path | None = None
@@ -80,6 +81,12 @@ class RunHarness:
         parent_span_id: UUID | None = None, duration_ms: float | None = None,
         data: dict | None = None,
     ) -> None:
+        """Append ordered operational metadata and attempt a JSONL write.
+
+        Callers must supply sanitized metadata; this method does not redact
+        it. File I/O errors disable the file sink while retaining in-memory
+        events.
+        """
         event = RunEvent(
             run_id=self.state.id, sequence=len(self.state.events) + 1,
             kind=kind,
@@ -110,6 +117,12 @@ class RunHarness:
                                self.state.id, type(exc).__name__)
 
     def stop(self, reason: StopReason) -> NoReturn:
+        """Latch the first stop reason and raise RunStopped on every
+        invocation.
+
+        This blocks further admission; it does not finalize state or cancel
+        tasks. The service owns draining and terminal status selection.
+        """
         if self._stop is None:
             self._stop = reason
             self.emit("policy.stopped", parent_span_id=self.state.id,
@@ -117,6 +130,7 @@ class RunHarness:
         raise RunStopped(self._stop)
 
     def check_active(self) -> None:
+        """Raise RunStopped if stopped, finalized, or past the run deadline."""
         if self._stop is not None:
             raise RunStopped(self._stop)
         if self.state.status is not RunStatus.RUNNING:
@@ -127,6 +141,12 @@ class RunHarness:
             self.stop(StopReason.DEADLINE)
 
     def authorize_tool(self, name: str) -> None:
+        """Check run activity and the trusted tool-name allowlist.
+
+        Unknown or hidden names stop the run before tool execution. This
+        check does not implement service-level or tenant-level
+        authorization.
+        """
         self.check_active()
         if name not in self.state.allowed_tools:
             self.stop(StopReason.TOOL_DENIED)
@@ -134,6 +154,14 @@ class RunHarness:
     async def model_call(
         self, call: Callable[[], Awaitable[T]], *, model_name: str
     ) -> T:
+        """Reserve one model call, enforce its timeout, and record
+        usage/events.
+
+        Failed admitted calls consume budget. Missing provider usage is
+        recorded as unknown. Expected provider errors and timeouts stop the
+        run; cancellation and unexpected exceptions propagate. No retries
+        are made.
+        """
         self.check_active()
         if self.state.model_calls >= self.state.limits.model_calls:
             self.stop(StopReason.MODEL_BUDGET)
@@ -205,6 +233,15 @@ class RunHarness:
         self, name: str, arguments: dict[str, object],
         call: Callable[[], Awaitable[Sequence[Evidence]]], *, max_results: int,
     ) -> list[Evidence]:
+        """Authorize and reserve a tool call before awaiting its
+        implementation.
+
+        Count admitted calls, including failures, against shared and
+        identical-argument limits. Cap returned observations at max_results
+        and record IDs and timing. Telemetry errors and timeouts stop the
+        run; unexpected errors and cancellation propagate. The caller
+        stores the returned evidence.
+        """
         self.authorize_tool(name)
         if sum(self.state.tool_calls.values()) >= self.state.limits.tool_calls:
             self.stop(StopReason.TOOL_BUDGET)
@@ -269,6 +306,12 @@ class RunHarness:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     def finish(self, status: RunStatus, reason: StopReason) -> None:
+        """Finalize a running state, emit its terminal event, and close the
+        sink.
+
+        Repeated calls leave terminal state unchanged. Callers must drain
+        active tools first; this method does not cancel or await them.
+        """
         if self.state.status is not RunStatus.RUNNING:
             return
         self.state.status = status

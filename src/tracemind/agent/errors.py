@@ -10,7 +10,13 @@ class ModelConfigurationError(ValueError):
 
 
 class DiagnosisError(RuntimeError):
-    """Raised when an agent result violates the diagnosis contract."""
+    """Represent a diagnosis contract violation or an investigation failure.
+
+    Optional state and evidence preserve the run outcome and partial
+    findings for API error handling. The service may attach them while
+    unwinding; underlying exceptions are retained through exception
+    chaining.
+    """
 
     def __init__(
         self,

@@ -18,6 +18,11 @@ _SENSITIVE_KEYS = {
 
 
 def _redact(value: Any) -> Any:
+    """Recursively mask values under known sensitive dictionary keys.
+
+    Free-text secrets and secrets embedded in serialized strings are not
+    recognized by this key-based filter.
+    """
     if isinstance(value, dict):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
@@ -35,6 +40,13 @@ def _redact(value: Any) -> Any:
 
 
 class ConsoleTraceCallback(BaseCallbackHandler):
+    """Print development model/tool payloads with per-event truncation.
+
+    This callback is separate from the harness metadata trace. Key-based
+    redaction is limited; free-text payloads may still contain sensitive
+    data. Truncation affects console output only, not the model context.
+    """
+
     def __init__(
         self,
         *,

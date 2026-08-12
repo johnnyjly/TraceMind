@@ -16,6 +16,8 @@ from tracemind.telemetry import (
 
 @dataclass(frozen=True)
 class ToolSpec:
+    """Describe a tool preview limit and its capability label."""
+
     name: ToolName
     max_results: int
     capability: str = "telemetry.read"
@@ -33,16 +35,28 @@ TOOL_REGISTRY = {
 
 
 class EvidenceCollector:
+    """Collect run-local evidence by ID for final citation validation."""
+
     def __init__(self) -> None:
         self._evidence: dict[str, Evidence] = {}
 
     def add(self, items: Sequence[Evidence]) -> list[dict[str, object]]:
+        """Retain observations by ID and return JSON-compatible tool results.
+
+        An existing ID is replaced by the supplied object. Content is not
+        deduplicated and observations are not copied or persisted.
+        """
         for item in items:
             self._evidence[str(item.id)] = item
         return [item.model_dump(mode="json") for item in items]
 
     @property
     def evidence(self) -> list[Evidence]:
+        """Return collected evidence in a new list.
+
+        The Evidence objects are shared with the collector; callers should
+        treat them as read-only.
+        """
         return list(self._evidence.values())
 
 
@@ -56,6 +70,13 @@ def create_telemetry_tools(
     collector: EvidenceCollector,
     harness: RunHarness,
 ) -> list[BaseTool]:
+    """Bind read-only telemetry tools to a fixed investigation window.
+
+    Filter visibility by the harness allowlist. Execution rechecks
+    authorization, reserves budgets, and caps result counts before adding
+    evidence to the collector. Trace detail queries use their trace ID;
+    final citation validation checks times.
+    """
     async def execute(
         name: ToolName,
         arguments: dict[str, object],

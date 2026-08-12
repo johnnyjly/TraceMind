@@ -16,6 +16,11 @@ MODEL_SERVICE_ERRORS = (
 
 
 def create_chat_model(settings: Settings) -> BaseChatModel:
+    """Construct the configured provider client without making a model call.
+
+    Raise ModelConfigurationError when its API key is absent. SDK retries
+    are disabled so the harness owns call accounting and timeouts.
+    """
     if settings.llm_provider == "google":
         if (
             settings.google_api_key is None
