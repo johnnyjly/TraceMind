@@ -48,7 +48,10 @@ SYSTEM_PROMPT = (
     "contradicting observations. Do not repeat identical queries without a "
     "reason. The application\n"
     "enforces call and time budgets and validates your final evidence "
-    "references."
+    "references. Tool results may be truncated previews; use read_evidence "
+    "when available to list stored evidence or retrieve its JSON in pages. "
+    "Compression indexes are not new observations. Missing detail does not "
+    "mean an error or a contradiction is absent."
 )
 
 
@@ -198,8 +201,8 @@ class DiagnosisService:
         """Investigate a fixed, timezone-aware window with isolated run state.
 
         Return evidence and a diagnosis, including an inconclusive result
-        for budget, repetition, or recursion exhaustion. Operational and
-        contract failures raise DiagnosisError with partial evidence and
+        for budget, repetition, recursion, or context exhaustion. Operational
+        and contract failures raise DiagnosisError with partial evidence and
         state. Cancellation propagates. Once execution starts, terminal
         cleanup drains tools and finalizes the run.
         """
@@ -218,7 +221,7 @@ class DiagnosisService:
             allowed_tools=self._allowed_tools,
         )
         harness = RunHarness(state, event_directory=self._event_directory)
-        collector = EvidenceCollector()
+        collector = EvidenceCollector(max_bytes=state.limits.observation_bytes)
         tools = create_telemetry_tools(
             self._prometheus,
             self._jaeger,
@@ -271,6 +274,7 @@ class DiagnosisService:
             if reason in {
                 StopReason.MODEL_BUDGET, StopReason.TOOL_BUDGET,
                 StopReason.REPEATED_TOOL_CALL, StopReason.RECURSION_LIMIT,
+                StopReason.CONTEXT_LIMIT,
             }:
                 terminal_status = RunStatus.INCONCLUSIVE
                 draft = DiagnosisDraft(

@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -14,7 +14,6 @@ from uuid import UUID, uuid4
 
 from tracemind.agent.errors import DiagnosisError
 from tracemind.agent.llm import MODEL_SERVICE_ERRORS
-from tracemind.models import Evidence
 from tracemind.models.run import RunEvent, RunState, RunStatus, StopReason
 from tracemind.telemetry.errors import TelemetryClientError
 
@@ -243,16 +242,14 @@ class RunHarness:
 
     async def tool_call(
         self, name: str, arguments: dict[str, object],
-        call: Callable[[], Awaitable[Sequence[Evidence]]], *, max_results: int,
-    ) -> list[Evidence]:
-        """Authorize and reserve a tool call before awaiting its
-        implementation.
+        call: Callable[[], Awaitable[list[dict[str, object]]]],
+    ) -> list[dict[str, object]]:
+        """Authorize and reserve a tool call before awaiting its result.
 
         Count admitted calls, including failures, against shared and
-        identical-argument limits. Cap returned observations at max_results
-        and record IDs and timing. Telemetry errors and timeouts stop the
-        run; unexpected errors and cancellation propagate. The caller
-        stores the returned evidence.
+        identical-argument limits. The callback stores evidence and selects
+        bounded results. Record returned IDs and timing; telemetry errors
+        and timeouts stop the run. Other errors and cancellation propagate.
         """
         self.authorize_tool(name)
         if sum(self.state.tool_calls.values()) >= self.state.limits.tool_calls:
@@ -279,12 +276,15 @@ class RunHarness:
                   data={"tool": name, "arguments_sha256": signature})
         try:
             async with asyncio.timeout(self.state.limits.tool_timeout_seconds):
-                result = list(await call())[:max_results]
+                result = await call()
             self.check_active()
             self.emit("tool.completed", span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"tool": name, "result_count": len(result),
-                            "evidence_ids": [str(item.id) for item in result]})
+                            "evidence_ids": [
+                                str(item["id"]) for item in result
+                                if "id" in item
+                            ]})
             return result
         except TimeoutError:
             self.emit("tool.failed", span_id=span, parent_span_id=parent,

@@ -124,8 +124,72 @@ are classified separately from unexpected code errors (`internal_error`).
 
 Evaluation reports include `run_state` with counters, events, and stop reason.
 The run state is currently in memory; JSONL events are not resumable checkpoints.
-Context compression, automatic retries/fallback, and persistent recovery are
-subsequent stages in [DESIGN.md](DESIGN.md).
+S2 context controls are described below. Automatic retries/fallback and
+persistent recovery remain subsequent stages in [DESIGN.md](DESIGN.md).
+
+## Bounded context and evidence retrieval (S2)
+
+Each run stores complete normalized observations in memory. Exact duplicates
+(excluding their generated UUID, including source, timestamp, service, query,
+and all attributes) share the first evidence ID. Similar messages at different
+times or with different error details remain separate observations. This is
+conservative deduplication, not semantic grouping or a causal judgment.
+
+Tools return previews: small observations remain complete; large observations
+return their ID, source, time, bounded service/summary, and a truncation marker.
+All observations returned by a backend are stored before selecting the limited
+preview batch. Omitted previews are counted explicitly. Backend queries can
+still limit which observations are retrieved in the first place.
+
+The new read-only `read_evidence` tool can:
+
+- list stored previews with no `evidence_id` (20 entries per page);
+- retrieve an observation's complete JSON in 2,048-character pages by ID;
+- continue either operation using the returned `next_offset`.
+
+Reads are isolated to the current run and consume the same tool-call,
+repetition, and timeout budgets as telemetry queries. Explicit existing
+`TRACEMIND_AGENT_ALLOWED_TOOLS` lists must add `read_evidence` to enable it.
+Without that permission, compressed details are unavailable to the agent.
+
+Before every model call, middleware budgets the system message, conversation,
+tool schemas, and diagnosis schema, plus an output reservation. The initial
+estimator (`utf8-bytes-v1`) counts serialized UTF-8 bytes plus 1,024 units of
+framing allowance. It deliberately overestimates ordinary text/JSON tokens;
+it is not a provider tokenizer or a guarantee about billing or model limits.
+Provider-reported usage remains separately recorded.
+
+Defaults in `.env.example` are:
+
+| Setting suffix (`TRACEMIND_AGENT_`) | Default | Meaning |
+| --- | --- | --- |
+| `CONTEXT_TOKENS` | 32768 | Estimated input plus reserved output allowance |
+| `OUTPUT_TOKENS` | 4096 | Output reservation and provider output cap |
+| `OBSERVATION_BYTES` | 8388608 | Maximum stored serialized evidence bytes |
+
+When input exceeds its allowance, the oldest tool results are replaced with
+compact evidence indexes first. Every displayed evidence ID and every
+assistant tool-call/result pair is retained. System instructions, incident
+information, and assistant messages are preserved. A newly requested detail
+page reaches the model intact. Compression changes the model input view, not
+the stored observations or graph message history; no summarization LLM is used.
+
+If the remaining input cannot fit, or the evidence store reaches its byte
+limit, the run returns `inconclusive` with `context_limit` and retains partial
+evidence. The byte limit bounds serialized retained observations, not Python
+heap usage or HTTP response buffering. This is not a persistent artifact store.
+
+`context.selected` events record input estimates before/after reduction,
+reduced-message counts, output reservation, and admission outcome.
+`observations.stored` events record received/new/duplicate/omitted-preview
+counts and stored bytes. `observations.limit` distinguishes store exhaustion.
+These events contain no raw observation payloads. Evaluation reports already
+include these events through `run_state`; reports also contain full evidence.
+
+Scripted real-loop tests cover large results, omitted counterevidence retrieval,
+read budgets/permissions, and context exhaustion. Unit tests cover parallel
+message pairing, lossless Unicode pagination, exact deduplication, isolation,
+output settings for both providers, and schema-inclusive estimates. Use live evaluations to assess diagnostic quality.
 
 ## OpenTelemetry Demo
 
@@ -169,8 +233,8 @@ and deterministic ground-truth checks:
 uv run python scripts/run_evaluation.py --lookback-minutes 10
 ```
 
-Add `--verbose` to print every model input, model response, tool call, and tool
-result. Each event is limited to 12,000 characters by default; adjust the limit
+Add `--verbose` to log every model input, model response, tool call, and tool
+result through Python standard `logging` at DEBUG level. Each event is limited to 12,000 characters by default; adjust the limit
 with `--verbose-max-chars`.
 
 The report is written to `artifacts/evaluations/payment-failure.json`. Stop and
@@ -179,3 +243,18 @@ remove the scenario containers and volumes with:
 ```bash
 uv run python scripts/demo_scenario.py stop
 ```
+
+### Terminal logging
+
+The evaluation CLI writes standard logging output to stderr. Evaluation
+summaries use INFO, model/tool payloads use DEBUG, and callback failures use
+ERROR. `--verbose` enables DEBUG only for the trace callback, not third-party
+HTTP clients. Records include timestamps, logger names, and LangChain callback
+`run_id`/`parent_run_id`; these identify framework calls rather than the
+harness investigation ID. Existing key redaction and character limits remain.
+
+The callback installs no handlers; embedded applications configure logging
+through their own entry point. An explicitly supplied `write=` callable remains
+supported for compatibility. Harness `emit()` still records structured run
+state and JSONL events independently of console log levels. Trace-file warnings
+already use standard logging.

@@ -14,7 +14,13 @@ and structured JSONL events. API and evaluation use the same controls; the
 case's tool budget also constrains execution. Scripted-model tests exercise the
 real agent loop, parallel admission, cancellation, isolation, and failure paths.
 
-There is no context-token budget, resumable checkpoint, cross-incident memory,
+S2 adds a per-run observation store with exact deduplication, bounded previews,
+a budgeted read_evidence tool, deterministic input reduction, and a conservative
+input estimate plus enforced provider output cap. Compression retains evidence
+references and tool-call/result pairing; oversized fixed input stops explicitly.
+Store size limits retain partial evidence with a context_limit outcome.
+
+There is no resumable checkpoint, cross-incident memory,
 service/tenant authorization, automatic retry/fallback, or full payload trace
 yet. S1 disables SDK retries and records provider usage when available. Its
 event files contain operational metadata and evidence IDs, not full observations
@@ -214,13 +220,18 @@ mock telemetry, plus relevant live scenarios. The following are planned gates.
 | Increment | Deliverable | Acceptance criterion |
 | --- | --- | --- |
 | S1: controlled loop (implemented) | Run state, registry/executor, completion gate, call/deadline budgets, structured events | Repeating model, parallel calls, invalid evidence, denied tool, and timeout terminate predictably; denied calls never reach the backend |
-| S2: bounded context | Observation store, evidence selection, context assembly, compression | Large/noisy results fit context allowance; critical/contradictory evidence stays retrievable; tool messages remain valid |
+| S2: bounded context (implemented) | Observation store, evidence selection, context assembly, compression | Large/noisy results fit context allowance; critical/contradictory evidence stays retrievable; tool messages remain valid |
 | S3: recovery | Error taxonomy, retry ownership, fallback, no-progress detection | Injected 429/5xx/timeout/malformed output has bounded attempts, accounted usage, and useful terminal results |
 | S4: persistence | Checkpoints, run store, resume/cancel, scheduling recovery | Restart retains evidence and budgets; concurrent resume is controlled; cancellation stops new work |
 | S5: evaluation and operations | Broader cases, replay fixtures, metrics report, trace export, shared-service controls | Report accuracy, false completion, attempts, latency, usage/cost, and recovery; verify run isolation and trace coverage |
 | S6: optional memory | Confirmed records, scoped retrieval, provenance and expiry | Memory-on/off comparison on held-out cases; reject stale/unconfirmed records and prevent ground-truth leakage |
 
-S2 is the next implementation slice. S1 has deterministic execution tests;
+S3 is the next implementation slice. S1 and S2 have deterministic execution
+tests. S2 uses exact-content deduplication and oldest-result reduction; it does
+not perform semantic ranking, hypothesis extraction, or LLM summarization.
+All original observations remain in the run-local store within its serialized
+byte cap. The input estimator uses UTF-8 bytes plus framing allowance, not an
+exact provider tokenizer. See README for configuration and limitations.
 Use live evaluations to measure diagnostic quality after changes. Preserve that report with code/model/tool
 versions. Expand evaluation during each increment.
 Include missing telemetry, misleading upstream symptoms, conflicting evidence,

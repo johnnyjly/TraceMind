@@ -11,16 +11,21 @@ from tracemind.models.incident import Incident
 
 
 ToolName = Literal[
-    "query_metrics", "search_traces", "get_trace_detail", "search_logs"
+    "query_metrics", "search_traces", "get_trace_detail", "search_logs",
+    "read_evidence"
 ]
 TOOL_NAMES: tuple[ToolName, ...] = (
-    "query_metrics", "search_traces", "get_trace_detail", "search_logs"
+    "query_metrics", "search_traces", "get_trace_detail", "search_logs",
+    "read_evidence"
 )
 
 
 class RunLimits(BaseModel):
-    """Positive call-count and timeout bounds for one investigation."""
+    """Call, time, context, output, and evidence-size limits for one run."""
 
+    context_tokens: int = Field(default=32768, ge=1)
+    output_tokens: int = Field(default=4096, ge=1)
+    observation_bytes: int = Field(default=8_388_608, ge=1)
     model_calls: int = Field(default=8, ge=1)
     tool_calls: int = Field(default=12, ge=1)
     identical_tool_calls: int = Field(default=2, ge=1)
@@ -46,6 +51,7 @@ class StopReason(StrEnum):
 
     COMPLETED = "completed"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    CONTEXT_LIMIT = "context_limit"
     MODEL_BUDGET = "model_budget"
     TOOL_BUDGET = "tool_budget"
     REPEATED_TOOL_CALL = "repeated_tool_call"
@@ -99,7 +105,7 @@ class RunState(BaseModel):
     investigation_end: datetime
     limits: RunLimits
     allowed_tools: tuple[ToolName, ...]
-    prompt_version: str = "single-agent-v2"
+    prompt_version: str = "single-agent-v3"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

@@ -1,6 +1,7 @@
 """Development callbacks for bounded model and tool console output."""
 
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
@@ -8,6 +9,9 @@ from uuid import UUID
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import LLMResult
+
+
+logger = logging.getLogger(__name__)
 
 
 _SENSITIVE_KEYS = {
@@ -42,7 +46,7 @@ def _redact(value: Any) -> Any:
 
 
 class ConsoleTraceCallback(BaseCallbackHandler):
-    """Print development model/tool payloads with per-event truncation.
+    """Log development model/tool payloads with per-event truncation.
 
     This callback is separate from the harness metadata trace. Key-based
     redaction is limited; free-text payloads may still contain sensitive
@@ -53,10 +57,12 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         self,
         *,
         max_chars: int = 12_000,
-        write: Callable[[str], None] = print,
+        write: Callable[[str], None] | None = None,
     ) -> None:
-        """Configure a positive per-event character limit and output
-        writer.
+        """Configure truncation and an optional legacy output writer.
+
+        By default, use the module logger. An explicit writer preserves the
+        earlier callback interface and bypasses logging configuration.
         """
         if max_chars < 1:
             raise ValueError("max_chars must be positive")
@@ -79,6 +85,7 @@ class ConsoleTraceCallback(BaseCallbackHandler):
                 [message.model_dump(mode="json") for message in batch]
                 for batch in messages
             ],
+            run_id=run_id, parent_run_id=parent_run_id,
         )
 
     def on_llm_end(
@@ -102,7 +109,8 @@ class ConsoleTraceCallback(BaseCallbackHandler):
                         getattr(generation, "text", str(generation))
                     )
             replies.append(rendered_batch)
-        self._emit("MODEL RESPONSE", replies)
+        self._emit("MODEL RESPONSE", replies,
+                   run_id=run_id, parent_run_id=parent_run_id)
 
     def on_llm_error(
         self,
@@ -116,6 +124,7 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         self._emit(
             "MODEL ERROR",
             {"type": type(error).__name__, "message": str(error)},
+            run_id=run_id, parent_run_id=parent_run_id, level=logging.ERROR,
         )
 
     def on_tool_start(
@@ -135,6 +144,7 @@ class ConsoleTraceCallback(BaseCallbackHandler):
                 "name": serialized.get("name", "unknown"),
                 "input": inputs if inputs is not None else input_str,
             },
+            run_id=run_id, parent_run_id=parent_run_id,
         )
 
     def on_tool_end(
@@ -148,12 +158,35 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         """Render a tool result, serializing message objects as JSON data."""
         if isinstance(output, BaseMessage):
             output = output.model_dump(mode="json")
-        self._emit("TOOL RESULT", output)
+        self._emit("TOOL RESULT", output,
+                   run_id=run_id, parent_run_id=parent_run_id)
 
-    def _emit(self, label: str, payload: Any) -> None:
-        """Redact known keys, serialize and truncate a payload, then write
-        it.
+    def on_tool_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Log a failed tool call with its callback span identifiers."""
+        self._emit(
+            "TOOL ERROR",
+            {"type": type(error).__name__, "message": str(error)},
+            run_id=run_id, parent_run_id=parent_run_id, level=logging.ERROR,
+        )
+
+    def _emit(
+        self, label: str, payload: Any, *, run_id: UUID,
+        parent_run_id: UUID | None, level: int = logging.DEBUG,
+    ) -> None:
+        """Log a bounded payload with LangChain callback run/parent IDs.
+
+        These IDs identify framework calls, not the harness investigation ID.
+        Skip rendering when the logger filters the event out.
         """
+        if self._write is None and not logger.isEnabledFor(level):
+            return
         rendered = json.dumps(
             _redact(payload),
             indent=2,
@@ -166,4 +199,12 @@ class ConsoleTraceCallback(BaseCallbackHandler):
                 f"{rendered[: self._max_chars]}\n"
                 f"... <{omitted} characters omitted>"
             )
-        self._write(f"\n=== {label} ===\n{rendered}")
+        if self._write is not None:
+            self._write(f"\n=== {label} ===\n{rendered}")
+        else:
+            logger.log(
+                level, "=== %s ===\n%s", label, rendered,
+                extra={"event": label, "run_id": str(run_id),
+                       "parent_run_id": (str(parent_run_id)
+                                         if parent_run_id else "-")},
+            )

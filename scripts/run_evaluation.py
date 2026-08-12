@@ -1,11 +1,15 @@
 import argparse
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tracemind.agent import ConsoleTraceCallback
 from tracemind.config import get_settings
 from tracemind.evaluation import EvaluationCase, run_live_evaluation
+
+
+logger = logging.getLogger("tracemind.evaluation.cli")
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,8 +39,23 @@ async def run(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report.model_dump_json(indent=2) + "\n")
-    print(f"Evaluation passed: {report.result.passed}")
-    print(f"Report: {output_path.resolve()}")
+    logger.info("Evaluation passed: %s", report.result.passed)
+    logger.info("Report: %s", output_path.resolve())
+
+
+def configure_logging(*, verbose: bool) -> None:
+    """Configure CLI output without enabling third-party debug payloads."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s "
+        "[run=%(run_id)s parent=%(parent_run_id)s] %(message)s",
+        defaults={"run_id": "-", "parent_run_id": "-"},
+    ))
+    logging.basicConfig(level=logging.WARNING, handlers=[handler])
+    logging.getLogger("tracemind").setLevel(logging.INFO)
+    logging.getLogger("tracemind.agent.console_trace").setLevel(
+        logging.DEBUG if verbose else logging.INFO
+    )
 
 
 def main() -> None:
@@ -68,6 +87,7 @@ def main() -> None:
         parser.error("--lookback-minutes must be at least 1")
     if args.verbose_max_chars < 1:
         parser.error("--verbose-max-chars must be at least 1")
+    configure_logging(verbose=args.verbose)
     asyncio.run(
         run(
             args.case,

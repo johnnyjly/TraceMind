@@ -205,11 +205,19 @@ def test_loop_limits_are_enforced_before_execution(
     assert run.state.stop_reason is reason
     assert model.calls == model_calls
     assert len(telemetry.calls) == run.tool_call_count == tool_calls
-    assert len(run.evidence) == tool_calls
+    # Identical observations share a citation even across repeated queries.
+    assert len(run.evidence) == 1
+    completed = [event for event in run.state.events
+                 if event.kind == "tool.completed"]
+    assert len(completed) == tool_calls
+    assert all(event.data["evidence_ids"] == [str(run.evidence[0].id)]
+               for event in completed)
     assert run.diagnosis.confidence == 0
 
 
-@pytest.mark.parametrize("name", ["search_logs", "unregistered_tool"])
+@pytest.mark.parametrize("name", [
+    "search_logs", "read_evidence", "unregistered_tool",
+])
 def test_hidden_and_unknown_tools_are_denied_in_real_loop(tmp_path, name):
     model = ScriptedModel(
         respond=lambda messages, calls: tool_call(name, {"service": "payment"})
@@ -541,3 +549,112 @@ def test_trace_open_failure_warns_and_keeps_in_memory_events(
     assert run.state.events[-1].kind == "run.finished"
     assert "cannot open trace file" in caplog.text
     assert "private-filesystem-error" not in caplog.text
+
+
+def test_large_results_compress_and_omitted_counterevidence_is_retrievable(
+    tmp_path,
+):
+    records = [Evidence(
+        source=EvidenceSource.LOG, summary=f"Payment error {i}",
+        service="payment", observed_at=END,
+        attributes={"details": "x" * 850},
+    ) for i in range(59)]
+    counterevidence = Evidence(
+        source=EvidenceSource.LOG, summary="Payment succeeded",
+        service="payment", observed_at=END,
+        attributes={"conflicting_signal": "SUCCESS", "details": "y" * 4000},
+    )
+    records.append(counterevidence)
+
+    class LargeTelemetry(Telemetry):
+        async def query(self, expression, *, at=None):
+            return records
+
+    def respond(messages, calls):
+        if calls == 1:
+            return tool_call()
+        last = next(
+            m for m in reversed(messages) if isinstance(m, ToolMessage)
+        )
+        content = json.loads(last.content)
+        if calls == 2:
+            assert last.artifact is not None
+            assert content[-1]["omitted_count"] == 10
+            assert content[0]["truncated"] is True
+            return tool_call("read_evidence", {"offset": 40})
+        if calls == 3:
+            assert any(x.get("id") == str(counterevidence.id) for x in content)
+            return tool_call("read_evidence", {
+                "evidence_id": str(counterevidence.id), "offset": 0,
+            })
+        assert "SUCCESS" in content[0]["content"]
+        return diagnosis(messages)
+
+    model = ScriptedModel(respond=respond)
+    run = run_service(make_service(model, LargeTelemetry(), tmp_path))
+    assert run.state.status is RunStatus.SUCCEEDED
+    assert len(run.evidence) == 60
+    assert run.diagnosis.evidence_ids == [counterevidence.id]
+    assert run.tool_calls == {"query_metrics": 1, "read_evidence": 2}
+    selections = [event.data for event in run.state.events
+                  if event.kind == "context.selected"]
+    assert any(event["reduced_messages"] > 0 for event in selections)
+    assert all(event["estimated_input_after"] + event["output_reserved"]
+               <= run.state.limits.context_tokens for event in selections)
+    assert records[-1].attributes == run.evidence[-1].attributes
+    assert "SUCCESS" not in json.dumps(events_at(tmp_path))
+
+
+def test_context_limit_stops_before_provider_and_keeps_terminal_event(
+    tmp_path,
+):
+    model = ScriptedModel(respond=normal_response)
+    run = run_service(make_service(
+        model, Telemetry(), tmp_path,
+        limits=RunLimits(context_tokens=4200, output_tokens=4096),
+    ))
+    assert model.calls == run.state.model_calls == 0
+    assert run.state.stop_reason is StopReason.CONTEXT_LIMIT
+    assert run.state.status is RunStatus.INCONCLUSIVE
+    assert run.state.usage.reported_model_calls == 0
+    assert run.state.usage.unreported_model_calls == 0
+    assert events_at(tmp_path)[-1]["data"]["reason"] == "context_limit"
+
+
+def test_observation_capacity_retains_partial_evidence_and_stops(tmp_path):
+    class OversizeTelemetry(Telemetry):
+        async def query(self, expression, *, at=None):
+            return [
+                Evidence(source=EvidenceSource.LOG, summary="small",
+                         observed_at=END),
+                Evidence(source=EvidenceSource.LOG, summary="large" * 1000,
+                         observed_at=END),
+            ]
+
+    model = ScriptedModel(respond=normal_response)
+    run = run_service(make_service(
+        model, OversizeTelemetry(), tmp_path,
+        limits=RunLimits(observation_bytes=1000),
+    ))
+    assert model.calls == 1
+    assert run.state.stop_reason is StopReason.CONTEXT_LIMIT
+    assert [item.summary for item in run.evidence] == ["small"]
+    assert run.state.evidence_ids == [run.evidence[0].id]
+    assert any(
+        event.kind == "observations.limit" for event in run.state.events
+    )
+
+
+def test_detail_reads_consume_shared_tool_budget(tmp_path):
+    def respond(messages, calls):
+        if calls == 1:
+            return tool_call()
+        return tool_call("read_evidence", {"offset": 0})
+
+    model = ScriptedModel(respond=respond)
+    run = run_service(make_service(
+        model, Telemetry(), tmp_path, limits=RunLimits(tool_calls=2)
+    ))
+    assert run.state.stop_reason is StopReason.TOOL_BUDGET
+    assert run.tool_calls == {"query_metrics": 1, "read_evidence": 1}
+    assert len(run.evidence) == 1

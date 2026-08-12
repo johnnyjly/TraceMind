@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     google_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     agent_recursion_limit: int = Field(default=12, ge=2, le=50)
+    agent_context_tokens: int = Field(default=32768, ge=1)
+    agent_output_tokens: int = Field(default=4096, ge=1)
+    agent_observation_bytes: int = Field(default=8_388_608, ge=1)
     agent_max_model_calls: int = Field(default=8, ge=1)
     agent_max_tool_calls: int = Field(default=12, ge=1)
     agent_max_identical_tool_calls: int = Field(default=2, ge=1)
@@ -48,6 +51,9 @@ class Settings(BaseSettings):
     def run_limits(self) -> RunLimits:
         """Build fresh execution limits from the configured agent controls."""
         return RunLimits(
+            context_tokens=self.agent_context_tokens,
+            output_tokens=self.agent_output_tokens,
+            observation_bytes=self.agent_observation_bytes,
             model_calls=self.agent_max_model_calls,
             tool_calls=self.agent_max_tool_calls,
             identical_tool_calls=self.agent_max_identical_tool_calls,

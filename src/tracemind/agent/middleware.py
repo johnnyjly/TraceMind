@@ -1,16 +1,20 @@
 """LangChain interception hooks for harness-controlled execution."""
 
 from collections.abc import Awaitable, Callable
+
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelRequest,
     ModelResponse,
 )
 from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from tracemind.agent.context import select_context
 from tracemind.agent.harness import RunHarness
+from tracemind.models.run import StopReason
 
 
 class HarnessMiddleware(AgentMiddleware):
@@ -25,12 +29,13 @@ class HarnessMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        """Append remaining budgets and execute through the run harness.
+        """Build a bounded request and execute through the run harness.
 
-        Override the request's system message without mutating graph
-        message history. The harness owns model-call admission, timeout
-        handling, and usage recording.
+        Add remaining budgets, reduce tool results when needed, and reserve
+        output space. Stop before model admission if the input cannot fit.
+        Bind the provider output cap without mutating graph message history.
         """
+        self.harness.check_active()
         state = self.harness.state
         budget = (
             f"\nRemaining budget including the next call: "
@@ -44,6 +49,28 @@ class HarnessMiddleware(AgentMiddleware):
         request = request.override(
             system_message=SystemMessage(content=system + budget)
         )
+        selection = select_context(
+            request, state.limits.context_tokens - state.limits.output_tokens
+        )
+        self.harness.emit(
+            "context.selected", parent_span_id=state.id,
+            data={"estimator": "utf8-bytes-v1",
+                  "estimated_input_before": selection.before,
+                  "estimated_input_after": selection.after,
+                  "reduced_messages": selection.reduced_messages,
+                  "output_reserved": state.limits.output_tokens,
+                  "fits": selection.fits},
+        )
+        if not selection.fits:
+            self.harness.stop(StopReason.CONTEXT_LIMIT)
+        output_key = (
+            "max_output_tokens"
+            if isinstance(request.model, ChatGoogleGenerativeAI)
+            else "max_tokens"
+        )
+        request = selection.request.override(model_settings={
+            **request.model_settings, output_key: state.limits.output_tokens,
+        })
         model_name = getattr(request.model, "model_name", None) or getattr(
             request.model, "model", type(request.model).__name__
         )

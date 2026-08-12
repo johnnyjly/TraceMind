@@ -1,14 +1,18 @@
 """Read-only telemetry tool bindings and run-local evidence collection."""
 
+import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Annotated
 
 from langchain_core.tools import BaseTool, tool
+from pydantic import Field
 
+from tracemind.agent.context import json_text
 from tracemind.agent.harness import RunHarness
 from tracemind.models import Evidence
-from tracemind.models.run import ToolName
+from tracemind.models.run import StopReason, ToolName
 from tracemind.telemetry import (
     JaegerClient,
     OpenSearchClient,
@@ -32,26 +36,101 @@ TOOL_REGISTRY = {
         ToolSpec("search_traces", 20),
         ToolSpec("get_trace_detail", 100),
         ToolSpec("search_logs", 100),
+        ToolSpec("read_evidence", 20, capability="evidence.read"),
     )
 }
 
 
-class EvidenceCollector:
-    """Collect run-local evidence by ID for final citation validation."""
+class EvidenceCapacityError(Exception):
+    """Signal that retaining an observation would exceed the byte limit."""
 
-    def __init__(self) -> None:
-        """Initialize an empty evidence index for one investigation."""
+
+class EvidenceCollector:
+    """Store run-local observations with exact deduplication and stable IDs.
+
+    The byte limit covers serialized evidence, not total Python memory or
+    backend response buffers. Stored observations are not persistent.
+    """
+
+    def __init__(self, *, max_bytes: int = 8_388_608) -> None:
+        """Initialize an evidence index with a serialized-byte capacity."""
         self._evidence: dict[str, Evidence] = {}
+        self._fingerprints: dict[str, str] = {}
+        self._documents: dict[str, str] = {}
+        self._max_bytes = max_bytes
+        self.bytes_used = 0
 
     def add(self, items: Sequence[Evidence]) -> list[dict[str, object]]:
-        """Retain observations by ID and return JSON-compatible tool results.
+        """Store observations and return previews with canonical IDs.
 
-        An existing ID is replaced by the supplied object. Content is not
-        deduplicated and observations are not copied or persisted.
+        Exact content matches excluding the generated ID reuse the first ID.
+        New observations are copied. On EvidenceCapacityError, earlier items
+        in the batch remain stored; insertion is not transactional.
         """
+        ids = []
         for item in items:
-            self._evidence[str(item.id)] = item
-        return [item.model_dump(mode="json") for item in items]
+            data = item.model_dump(mode="json", exclude={"id"})
+            fingerprint = hashlib.sha256(json_text(data).encode()).hexdigest()
+            evidence_id = self._fingerprints.get(fingerprint)
+            if evidence_id is None:
+                evidence_id = str(item.id)
+                document = json_text(item.model_dump(mode="json"))
+                size = len(document.encode())
+                if self.bytes_used + size > self._max_bytes:
+                    raise EvidenceCapacityError
+                # Own the stored observation; external mutation must not change
+                # the evidence behind a previously issued citation.
+                self._evidence[evidence_id] = item.model_copy(deep=True)
+                self._documents[evidence_id] = document
+                self._fingerprints[fingerprint] = evidence_id
+                self.bytes_used += size
+            if evidence_id not in ids:
+                ids.append(evidence_id)
+        return [self.preview(key) for key in ids]
+
+    def preview(self, evidence_id: str) -> dict[str, object]:
+        """Return complete evidence or a marked preview for a known ID."""
+        item = self._evidence[evidence_id]
+        document = self._documents[evidence_id]
+        if len(document.encode()) <= 1200:
+            return item.model_dump(mode="json")
+        return {
+            "id": evidence_id,
+            "source": item.source.value,
+            "service": item.service[:120] if item.service else None,
+            "observed_at": item.observed_at.isoformat(),
+            "summary": item.summary[:240],
+            "truncated": True,
+            "detail_chars": len(document),
+        }
+
+    def read(self, evidence_id: str | None, offset: int) -> list[dict]:
+        """Page previews by entry offset or JSON by character offset.
+
+        Callers validate nonnegative offsets. Unknown IDs and out-of-range
+        detail offsets return error records; next_offset=None ends paging.
+        """
+        if evidence_id is None:
+            ids = list(self._evidence)
+            end = offset + TOOL_REGISTRY["read_evidence"].max_results
+            result = [self.preview(key) for key in ids[offset:end]]
+            result.append({
+                "total_evidence": len(ids),
+                "next_offset": end if end < len(ids) else None,
+            })
+            return result
+        document = self._documents.get(evidence_id)
+        if document is None:
+            return [{"error": "unknown_evidence_id"}]
+        if offset >= len(document):
+            return [{"error": "offset_out_of_range"}]
+        end = min(offset + 2048, len(document))
+        return [{
+            "id": evidence_id, "offset": offset,
+            "content": document[offset:end],
+            "next_offset": end if end < len(document) else None,
+            "total_chars": len(document),
+        }]
 
     @property
     def evidence(self) -> list[Evidence]:
@@ -61,6 +140,25 @@ class EvidenceCollector:
         treat them as read-only.
         """
         return list(self._evidence.values())
+
+
+def context_index(items: list[dict]) -> dict:
+    """Build application-owned compact references for context reduction."""
+    # Artifact is application-owned metadata, not parsed model/backend text.
+    index = []
+    for item in items:
+        if "id" in item:
+            entry = {key: item[key] for key in
+                     ("id", "source", "observed_at", "offset", "next_offset")
+                     if key in item}
+            if item.get("service") is not None:
+                entry["service"] = str(item["service"])[:120]
+            entry["summary"] = str(item.get("summary", "Stored detail"))[:80]
+            entry["truncated"] = True
+            index.append(entry)
+        else:
+            index.append(item)
+    return {"context_index": index}
 
 
 def create_telemetry_tools(
@@ -76,26 +174,56 @@ def create_telemetry_tools(
     """Bind read-only telemetry tools to a fixed investigation window.
 
     Filter visibility by the harness allowlist. Execution rechecks
-    authorization, reserves budgets, and caps result counts before adding
-    evidence to the collector. Trace detail queries use their trace ID;
-    final citation validation checks times.
+    authorization and reserves budgets. Store observations before selecting
+    bounded previews, retaining omitted details for paginated retrieval.
+    Final citation validation checks observation times.
     """
     async def execute(
         name: ToolName,
         arguments: dict[str, object],
         call: Callable[[], Awaitable[Sequence[Evidence]]],
-    ) -> list[dict[str, object]]:
-        """Run an admitted query and register its bounded evidence results."""
+    ) -> tuple[list[dict], dict]:
+        """Execute a query and return previews with a compact index."""
         spec = TOOL_REGISTRY[name]
-        evidence = await harness.tool_call(
-            name, arguments, call, max_results=spec.max_results
-        )
-        result = collector.add(evidence)
-        harness.state.evidence_ids = [item.id for item in collector.evidence]
-        return result
 
-    @tool
-    async def query_metrics(expression: str) -> list[dict[str, object]]:
+        async def collect() -> list[dict]:
+            """Store observations, select previews, and trace retention."""
+            observations = await call()
+            harness.check_active()
+            before = len(collector.evidence)
+            try:
+                previews = collector.add(observations)
+            except EvidenceCapacityError:
+                harness.emit("observations.limit",
+                             parent_span_id=harness.state.id,
+                             data={"stored_bytes": collector.bytes_used})
+                harness.stop(StopReason.CONTEXT_LIMIT)
+            finally:
+                harness.state.evidence_ids = [e.id for e in collector.evidence]
+            result = previews[:spec.max_results]
+            omitted = len(previews) - len(result)
+            if omitted:
+                result.append({
+                    "omitted_count": omitted,
+                    "retrieval": "read_evidence without evidence_id lists all",
+                })
+            harness.emit("observations.stored",
+                         parent_span_id=harness.state.id,
+                         data={"received": len(observations),
+                               "added": len(collector.evidence) - before,
+                               "duplicates": (
+                                   len(observations)
+                                   - (len(collector.evidence) - before)
+                               ),
+                               "omitted_previews": omitted,
+                               "stored_bytes": collector.bytes_used})
+            return result
+
+        result = await harness.tool_call(name, arguments, collect)
+        return result, context_index(result)
+
+    @tool(response_format="content_and_artifact")
+    async def query_metrics(expression: str) -> tuple[list[dict], dict]:
         (
             "Run an instant PromQL query and return normalized metric "
             "evidence."
@@ -105,16 +233,16 @@ def create_telemetry_tools(
             lambda: prometheus.query(expression, at=end),
         )
 
-    @tool
-    async def search_traces(service: str) -> list[dict[str, object]]:
+    @tool(response_format="content_and_artifact")
+    async def search_traces(service: str) -> tuple[list[dict], dict]:
         """Find recent Jaeger traces for one service in the incident window."""
         return await execute(
             "search_traces", {"service": service},
             lambda: jaeger.search_traces(service, start=start, end=end),
         )
 
-    @tool
-    async def get_trace_detail(trace_id: str) -> list[dict[str, object]]:
+    @tool(response_format="content_and_artifact")
+    async def get_trace_detail(trace_id: str) -> tuple[list[dict], dict]:
         (
             "Inspect one Jaeger trace and return its normalized error-span "
             "evidence."
@@ -124,11 +252,11 @@ def create_telemetry_tools(
             lambda: jaeger.get_trace_detail(trace_id),
         )
 
-    @tool
+    @tool(response_format="content_and_artifact")
     async def search_logs(
         service: str,
         text: str | None = None,
-    ) -> list[dict[str, object]]:
+    ) -> tuple[list[dict], dict]:
         """Find OpenSearch logs for one service, optionally matching text."""
         return await execute(
             "search_logs", {"service": service, "text": text},
@@ -137,9 +265,34 @@ def create_telemetry_tools(
             ),
         )
 
+    @tool(response_format="content_and_artifact")
+    async def read_evidence(
+        evidence_id: str | None = None,
+        offset: Annotated[int, Field(ge=0)] = 0,
+    ) -> tuple[list[dict], dict]:
+        """List stored previews, or page evidence JSON by ID.
+
+        Follow next_offset to request the next page.
+
+        Without an ID, offset counts evidence entries. With an ID it counts
+        characters in the stored JSON. Only this run's evidence is visible.
+        """
+        async def read() -> list[dict]:
+            """Read a page from this run's evidence collector."""
+            return collector.read(evidence_id, offset)
+
+        result = await harness.tool_call(
+            "read_evidence",
+            {"evidence_id": evidence_id, "offset": offset}, read
+        )
+        artifact = context_index(result)
+        artifact["detail_page"] = evidence_id is not None
+        return result, artifact
+
     return [
         item for item in (
-            query_metrics, search_traces, get_trace_detail, search_logs
+            query_metrics, search_traces, get_trace_detail, search_logs,
+            read_evidence,
         )
         if item.name in harness.state.allowed_tools
     ]
