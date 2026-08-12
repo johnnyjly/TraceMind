@@ -1,3 +1,5 @@
+"""Development callbacks for bounded model and tool console output."""
+
 import json
 from collections.abc import Callable
 from typing import Any
@@ -53,6 +55,9 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         max_chars: int = 12_000,
         write: Callable[[str], None] = print,
     ) -> None:
+        """Configure a positive per-event character limit and output
+        writer.
+        """
         if max_chars < 1:
             raise ValueError("max_chars must be positive")
         self._max_chars = max_chars
@@ -67,6 +72,7 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        """Render the message batches about to be sent to the model."""
         self._emit(
             "MODEL INPUT",
             [
@@ -83,6 +89,7 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        """Render returned chat messages or text generations by batch."""
         replies: list[list[Any]] = []
         for batch in response.generations:
             rendered_batch: list[Any] = []
@@ -105,6 +112,7 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        """Render the exception type and message for a failed model call."""
         self._emit(
             "MODEL ERROR",
             {"type": type(error).__name__, "message": str(error)},
@@ -120,6 +128,7 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         inputs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        """Render the tool name and structured inputs when available."""
         self._emit(
             "TOOL CALL",
             {
@@ -136,11 +145,15 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        """Render a tool result, serializing message objects as JSON data."""
         if isinstance(output, BaseMessage):
             output = output.model_dump(mode="json")
         self._emit("TOOL RESULT", output)
 
     def _emit(self, label: str, payload: Any) -> None:
+        """Redact known keys, serialize and truncate a payload, then write
+        it.
+        """
         rendered = json.dumps(
             _redact(payload),
             indent=2,

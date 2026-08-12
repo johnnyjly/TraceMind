@@ -1,3 +1,5 @@
+"""Jaeger trace search and error-span evidence normalization."""
+
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
@@ -10,7 +12,10 @@ from tracemind.telemetry.http import request_json
 
 
 class JaegerClient:
+    """Normalize Jaeger trace-search and trace-detail API responses."""
+
     def __init__(self, base_url: str, http_client: httpx.AsyncClient) -> None:
+        """Configure the endpoint using an HTTP client owned by the caller."""
         self._base_url = base_url.rstrip("/")
         self._http_client = http_client
 
@@ -22,6 +27,12 @@ class JaegerClient:
         end: datetime,
         limit: int = 20,
     ) -> list[Evidence]:
+        """Query service traces within a window and normalize each result.
+
+        Send start/end as epoch microseconds and request a backend
+        result limit. Return trace summaries; this method does not
+        locally truncate the response.
+        """
         payload = await request_json(
             self._http_client,
             "GET",
@@ -44,6 +55,9 @@ class JaegerClient:
         return [self._to_evidence(trace, service) for trace in traces]
 
     async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
+        """Fetch one trace and return evidence for spans carrying error
+        tags.
+        """
         payload = await request_json(
             self._http_client,
             "GET",
@@ -76,6 +90,9 @@ class JaegerClient:
 
     @staticmethod
     def _to_evidence(trace: Any, service: str) -> Evidence:
+        """Summarize trace duration, span counts, and earliest observed
+        time.
+        """
         if not isinstance(trace, dict):
             raise TelemetryClientError("Jaeger returned an invalid trace")
 
@@ -126,6 +143,9 @@ class JaegerClient:
         processes: dict[str, Any],
         trace_id: str,
     ) -> Evidence:
+        """Resolve a span service and normalize timing, operation, and
+        error tags.
+        """
         if not isinstance(span, dict):
             raise TelemetryClientError("Jaeger returned an invalid span")
 
@@ -171,6 +191,9 @@ class JaegerClient:
 
 
 def _span_has_error(span: Any) -> bool:
+    """Recognize error=True or an ERROR OpenTelemetry status among span
+    tags.
+    """
     if not isinstance(span, dict):
         return False
 
@@ -191,6 +214,9 @@ def _span_has_error(span: Any) -> bool:
 
 
 def _tags_by_key(span: dict[str, Any]) -> dict[str, Any]:
+    """Index valid tag entries by string key, keeping the last repeated
+    key.
+    """
     tags = span.get("tags", [])
     if not isinstance(tags, list):
         return {}

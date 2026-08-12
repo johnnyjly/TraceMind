@@ -1,3 +1,5 @@
+"""FastAPI routes and request-scoped diagnosis dependencies."""
+
 from collections.abc import AsyncIterator
 from typing import Annotated, Literal
 
@@ -24,16 +26,22 @@ from tracemind.telemetry import (
 
 
 class HealthResponse(BaseModel):
+    """Liveness response containing the literal status ok."""
+
     status: Literal["ok"]
 
 
 async def get_request_settings() -> Settings:
+    """Expose cached settings as an overridable FastAPI dependency."""
     return get_settings()
 
 
 async def get_agent_runner(
     settings: Annotated[Settings, Depends(get_request_settings)],
 ) -> LangChainAgentRunner:
+    """Build a model runner; report missing provider configuration as HTTP
+    503.
+    """
     try:
         return LangChainAgentRunner(create_chat_model(settings))
     except ModelConfigurationError as exc:
@@ -47,6 +55,9 @@ async def get_diagnosis_service(
     settings: Annotated[Settings, Depends(get_request_settings)],
     runner: Annotated[LangChainAgentRunner, Depends(get_agent_runner)],
 ) -> AsyncIterator[DiagnosisService]:
+    """Yield a configured service and close its HTTP client after the
+    request.
+    """
     async with httpx.AsyncClient(timeout=20) as http_client:
         yield DiagnosisService(
             PrometheusClient(str(settings.prometheus_url), http_client),
@@ -65,6 +76,7 @@ async def get_diagnosis_service(
 
 
 def create_app() -> FastAPI:
+    """Build the application with health and synchronous diagnosis routes."""
     application = FastAPI(
         title="TraceMind",
         description="Evidence-driven incident diagnosis for microservices.",
@@ -73,6 +85,9 @@ def create_app() -> FastAPI:
 
     @application.get("/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
+        """Return process liveness without checking model or backend
+        availability.
+        """
         return HealthResponse(status="ok")
 
     @application.post(
@@ -85,6 +100,12 @@ def create_app() -> FastAPI:
         response: Response,
         service: Annotated[DiagnosisService, Depends(get_diagnosis_service)],
     ) -> Diagnosis:
+        """Investigate the request and return a diagnosis with run headers.
+
+        Translate operational timeouts to HTTP 504 and other diagnosis
+        failures to HTTP 502. Error detail remains a string; available
+        run metadata is returned in headers.
+        """
         try:
             run = await service.diagnose_with_evidence(
                 request.incident,

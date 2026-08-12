@@ -1,3 +1,5 @@
+"""Run lifecycle, execution limits, operational events, and token usage."""
+
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
@@ -17,6 +19,8 @@ TOOL_NAMES: tuple[ToolName, ...] = (
 
 
 class RunLimits(BaseModel):
+    """Positive call-count and timeout bounds for one investigation."""
+
     model_calls: int = Field(default=8, ge=1)
     tool_calls: int = Field(default=12, ge=1)
     identical_tool_calls: int = Field(default=2, ge=1)
@@ -26,6 +30,8 @@ class RunLimits(BaseModel):
 
 
 class RunStatus(StrEnum):
+    """Execution lifecycle status, separate from diagnostic certainty."""
+
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     INCONCLUSIVE = "inconclusive"
@@ -34,6 +40,10 @@ class RunStatus(StrEnum):
 
 
 class StopReason(StrEnum):
+    """Machine-readable reason why an investigation reached a terminal
+    state.
+    """
+
     COMPLETED = "completed"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     MODEL_BUDGET = "model_budget"
@@ -52,6 +62,8 @@ class StopReason(StrEnum):
 
 
 class RunEvent(BaseModel):
+    """Ordered operational metadata for a run and its related spans."""
+
     run_id: UUID
     sequence: int
     kind: str
@@ -67,6 +79,8 @@ class RunEvent(BaseModel):
 
 
 class TokenUsage(BaseModel):
+    """Provider-reported totals and counts of calls with missing usage."""
+
     reported_model_calls: int = 0
     unreported_model_calls: int = 0
     reported_input_tokens: int = 0
@@ -75,6 +89,10 @@ class TokenUsage(BaseModel):
 
 
 class RunState(BaseModel):
+    """Mutable in-memory investigation state, counters, evidence IDs, and
+    events.
+    """
+
     id: UUID = Field(default_factory=uuid4)
     incident: Incident
     investigation_start: datetime

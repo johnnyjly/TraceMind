@@ -1,3 +1,5 @@
+"""Live diagnosis execution followed by external ground-truth scoring."""
+
 from collections.abc import Sequence
 from datetime import datetime
 from time import perf_counter
@@ -28,6 +30,12 @@ async def run_live_evaluation(
     end: datetime,
     callbacks: Sequence[BaseCallbackHandler] | None = None,
 ) -> EvaluationReport:
+    """Run a live investigation and score its result against the case.
+
+    Constrain tool calls by both application and case limits. Ground
+    truth is used only after diagnosis. Return an in-memory report;
+    model/backend errors propagate and no report file is written here.
+    """
     model = create_chat_model(settings)
     limits = settings.run_limits
     limits.tool_calls = min(limits.tool_calls, case.max_tool_calls)

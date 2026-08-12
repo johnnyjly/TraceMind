@@ -1,3 +1,5 @@
+"""Prometheus instant-vector queries and metric normalization."""
+
 from datetime import UTC, datetime
 from typing import Any
 
@@ -9,7 +11,10 @@ from tracemind.telemetry.http import request_json
 
 
 class PrometheusClient:
+    """Query instant Prometheus vectors and normalize metric observations."""
+
     def __init__(self, base_url: str, http_client: httpx.AsyncClient) -> None:
+        """Configure the endpoint using an HTTP client owned by the caller."""
         self._base_url = base_url.rstrip("/")
         self._http_client = http_client
 
@@ -20,6 +25,13 @@ class PrometheusClient:
         at: datetime | None = None,
         limit: int = 50,
     ) -> list[Evidence]:
+        """Run instant PromQL at the supplied time or the backend default
+        time.
+
+        Request the backend result limit and require a successful vector
+        response. Normalize samples without local truncation. HTTP and
+        malformed response errors are reported as TelemetryClientError.
+        """
         params: dict[str, str | int] = {
             "query": expression,
             "limit": limit,
@@ -56,6 +68,9 @@ class PrometheusClient:
 
     @staticmethod
     def _to_evidence(item: Any, expression: str) -> Evidence:
+        """Normalize one vector sample with its labels, value, and UTC
+        timestamp.
+        """
         if not isinstance(item, dict):
             raise TelemetryClientError(
                 "Prometheus returned an invalid vector sample"

@@ -1,3 +1,5 @@
+"""Provider client construction and expected model-service error types."""
+
 import httpx
 from langchain_core.exceptions import ModelError
 from langchain_core.language_models import BaseChatModel

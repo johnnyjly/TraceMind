@@ -1,3 +1,5 @@
+"""Configuration and diagnosis failures shared across service boundaries."""
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,6 +27,9 @@ class DiagnosisError(RuntimeError):
         state: "RunState | None" = None,
         evidence: "list[Evidence] | None" = None,
     ) -> None:
+        """Attach a message and optional partial evidence and execution
+        state.
+        """
         super().__init__(message)
         self.state = state
         self.evidence = evidence or []

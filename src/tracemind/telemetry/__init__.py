@@ -1,3 +1,5 @@
+"""Backend clients that normalize metrics, traces, and logs as evidence."""
+
 from tracemind.telemetry.errors import TelemetryClientError
 from tracemind.telemetry.jaeger import JaegerClient
 from tracemind.telemetry.opensearch import OpenSearchClient

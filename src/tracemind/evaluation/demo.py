@@ -1,3 +1,5 @@
+"""Pinned OpenTelemetry Demo configuration and Podman command helpers."""
+
 import json
 import os
 import subprocess
@@ -14,6 +16,12 @@ def prepare_flag_config(
     feature_flag: str,
     variant: str,
 ) -> Path:
+    """Write a copy of Demo flag configuration with one default changed.
+
+    Reject unknown flags or variants, create the output directory, and
+    return the resolved output path. Other flags retain their source
+    configuration.
+    """
     source = demo_path / "src" / "flagd" / "demo.flagd.json"
     document = json.loads(source.read_text())
     flag = document["flags"].get(feature_flag)
@@ -30,6 +38,7 @@ def prepare_flag_config(
 
 
 def verify_demo_commit(demo_path: Path) -> None:
+    """Reject a Demo checkout whose HEAD differs from the pinned commit."""
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=demo_path,
@@ -48,6 +57,13 @@ def compose_command(
     override_path: Path,
     action: str,
 ) -> list[str]:
+    """Build, but do not execute, a Podman Compose command for the
+    scenario.
+
+    Support start, stop, and status; reject other actions. The stop
+    command includes volume removal, while start recreates containers
+    without building.
+    """
     files = [
         demo_path / "compose.yaml",
         demo_path / "compose.observability.yaml",
@@ -82,6 +98,7 @@ def compose_command(
 
 
 def podman_environment(flag_config: Path) -> dict[str, str]:
+    """Copy the process environment and add pinned Demo/Podman settings."""
     environment = os.environ.copy()
     runtime_dir = environment.get(
         "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"

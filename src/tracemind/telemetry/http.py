@@ -1,3 +1,5 @@
+"""Shared HTTP and JSON error translation for telemetry requests."""
+
 from typing import Any
 
 import httpx
@@ -14,6 +16,12 @@ async def request_json(
     params: dict[str, str | int] | None = None,
     json: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Perform one HTTP request and require a JSON object response.
+
+    Translate HTTP failures, invalid JSON, and non-object payloads to
+    TelemetryClientError with backend context. Client settings own
+    transport timeouts; this helper adds no retries.
+    """
     try:
         response = await client.request(method, url, params=params, json=json)
         response.raise_for_status()

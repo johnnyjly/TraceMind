@@ -1,3 +1,5 @@
+"""Deterministic diagnosis checks against held-out case expectations."""
+
 from tracemind.agent import DiagnosisRun
 from tracemind.models import DiagnosisStatus
 from tracemind.evaluation.models import EvaluationCase, EvaluationResult
@@ -9,6 +11,14 @@ def evaluate_diagnosis(
     *,
     elapsed_ms: float,
 ) -> EvaluationResult:
+    """Score a run using deterministic case checks without model calls.
+
+    Match service and root-cause terms by case-insensitive substring,
+    verify citation membership and required source/service, and check
+    tool usage. Passing also requires a complete diagnosis. These
+    heuristics do not prove causality; elapsed_ms is supplied by the
+    caller.
+    """
     diagnosis = run.diagnosis
     normalized_root_cause = diagnosis.root_cause.casefold()
     expected_service = case.ground_truth.root_cause_service.casefold()

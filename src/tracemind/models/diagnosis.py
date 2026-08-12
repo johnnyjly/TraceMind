@@ -1,3 +1,5 @@
+"""Structured diagnostic conclusions and uncertainty status."""
+
 from enum import StrEnum
 from uuid import UUID
 
@@ -5,11 +7,17 @@ from pydantic import BaseModel, Field
 
 
 class DiagnosisStatus(StrEnum):
+    """Whether the diagnostic result is complete or inconclusive."""
+
     COMPLETE = "complete"
     INCONCLUSIVE = "inconclusive"
 
 
 class Diagnosis(BaseModel):
+    """Incident-linked conclusion with confidence, citations, and
+    remediation.
+    """
+
     incident_id: UUID
     status: DiagnosisStatus
     root_cause: str = Field(min_length=1)

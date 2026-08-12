@@ -1,3 +1,5 @@
+"""Fault-case loading, live execution, and deterministic result scoring."""
+
 from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.evaluation.models import (
     EvaluationCase,

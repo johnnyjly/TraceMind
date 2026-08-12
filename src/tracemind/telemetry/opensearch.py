@@ -1,3 +1,5 @@
+"""OpenSearch incident-window log queries and evidence normalization."""
+
 import json
 from datetime import datetime
 from typing import Any
@@ -11,12 +13,17 @@ from tracemind.telemetry.http import request_json
 
 
 class OpenSearchClient:
+    """Query SS4O log documents and normalize them as evidence."""
+
     def __init__(
         self,
         base_url: str,
         logs_index: str,
         http_client: httpx.AsyncClient,
     ) -> None:
+        """Configure an encoded index pattern and a caller-owned HTTP
+        client.
+        """
         self._base_url = base_url.rstrip("/")
         self._logs_index = quote(logs_index, safe="*,-_.")
         self._http_client = http_client
@@ -30,6 +37,12 @@ class OpenSearchClient:
         text: str | None = None,
         limit: int = 100,
     ) -> list[Evidence]:
+        """Search service logs in an inclusive window, newest first.
+
+        Optionally match body text and request at most limit hits from
+        the backend. Normalize returned hits without local truncation;
+        backend and response errors propagate as TelemetryClientError.
+        """
         filters: list[dict[str, Any]] = [
             {"term": {"resource.service.name.keyword": service}},
             {
@@ -70,6 +83,9 @@ class OpenSearchClient:
 
     @staticmethod
     def _to_evidence(hit: Any, service: str, text: str | None) -> Evidence:
+        """Normalize a log body, timestamp, severity, and trace/span
+        references.
+        """
         if (
             not isinstance(hit, dict)
             or not isinstance(hit.get("_source"), dict)

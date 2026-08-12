@@ -1,3 +1,5 @@
+"""Diagnosis orchestration, structured proposals, and completion checks."""
+
 import asyncio
 from collections.abc import Sequence
 from datetime import datetime
@@ -51,6 +53,10 @@ SYSTEM_PROMPT = (
 
 
 class DiagnosisDraft(BaseModel):
+    """Diagnostic proposal with status, confidence, citations, and
+    remediation.
+    """
+
     status: DiagnosisStatus
     root_cause: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
@@ -59,6 +65,10 @@ class DiagnosisDraft(BaseModel):
 
 
 class DiagnosisRun(BaseModel):
+    """Diagnosis result bundled with evidence, tool counts, and optional
+    state.
+    """
+
     diagnosis: Diagnosis
     evidence: list[Evidence]
     tool_calls: dict[str, int]
@@ -66,6 +76,7 @@ class DiagnosisRun(BaseModel):
 
     @property
     def tool_call_count(self) -> int:
+        """Return the total admitted tool calls reported for this run."""
         return sum(self.tool_calls.values())
 
 
@@ -79,7 +90,11 @@ class AgentRunner(Protocol):
         *,
         recursion_limit: int,
         harness: RunHarness,
-    ) -> DiagnosisDraft: ...
+    ) -> DiagnosisDraft:
+        """Produce a structured proposal using the supplied tools and
+        harness.
+        """
+        ...
 
 
 class LangChainAgentRunner:
@@ -95,6 +110,9 @@ class LangChainAgentRunner:
         *,
         callbacks: Sequence[BaseCallbackHandler] | None = None,
     ) -> None:
+        """Retain a model and optional callbacks for subsequent
+        investigations.
+        """
         self._model = model
         self._callbacks = list(callbacks or ())
 
@@ -144,6 +162,7 @@ class DiagnosisService:
         allowed_tools: tuple[ToolName, ...] = TOOL_NAMES,
         event_directory: Path | None = None,
     ) -> None:
+        """Configure telemetry dependencies, runner, and per-run controls."""
         self._prometheus = prometheus
         self._jaeger = jaeger
         self._opensearch = opensearch

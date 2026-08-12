@@ -1,3 +1,5 @@
+"""Environment-backed application settings and run-limit construction."""
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -9,6 +11,8 @@ from tracemind.models.run import TOOL_NAMES, RunLimits, ToolName
 
 
 class Settings(BaseSettings):
+    """Load TRACEMIND_ settings from environment variables and .env."""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="TRACEMIND_",
@@ -42,6 +46,7 @@ class Settings(BaseSettings):
 
     @property
     def run_limits(self) -> RunLimits:
+        """Build fresh execution limits from the configured agent controls."""
         return RunLimits(
             model_calls=self.agent_max_model_calls,
             tool_calls=self.agent_max_tool_calls,
@@ -54,4 +59,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return cached application settings; clear the cache to reload them."""
     return Settings()

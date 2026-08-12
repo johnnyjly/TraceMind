@@ -1,3 +1,5 @@
+"""LangChain interception hooks for harness-controlled execution."""
+
 from collections.abc import Awaitable, Callable
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -15,6 +17,7 @@ class HarnessMiddleware(AgentMiddleware):
     """Adapt LangChain model/tool hooks to a single run's harness controls."""
 
     def __init__(self, harness: RunHarness) -> None:
+        """Bind all interception hooks to the supplied run harness."""
         self.harness = harness
 
     async def awrap_model_call(

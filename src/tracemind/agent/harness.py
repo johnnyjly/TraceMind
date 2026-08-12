@@ -1,3 +1,5 @@
+"""Per-run execution budgets, lifecycle controls, and metadata events."""
+
 import asyncio
 import hashlib
 import json
@@ -25,6 +27,9 @@ class RunStopped(DiagnosisError):
     """Signal a harness-enforced stop with its machine-readable reason."""
 
     def __init__(self, reason: StopReason) -> None:
+        """Attach the stop reason to an investigation control-flow
+        exception.
+        """
         super().__init__(f"Diagnosis stopped: {reason.value}")
         self.reason = reason
 
@@ -41,6 +46,9 @@ class RunHarness:
     def __init__(
         self, state: RunState, *, event_directory: Path | None = None
     ) -> None:
+        """Start a run timer and optionally open an exclusive JSONL trace
+        file.
+        """
         self.state = state
         self._started = monotonic()
         self._stop: StopReason | None = None
@@ -71,6 +79,9 @@ class RunHarness:
 
     @property
     def remaining_seconds(self) -> float:
+        """Return the nonnegative run time remaining on the monotonic
+        clock.
+        """
         return max(
             0,
             self.state.limits.duration_seconds - (monotonic() - self._started),
@@ -108,6 +119,7 @@ class RunHarness:
                 self._close_trace()
 
     def _close_trace(self) -> None:
+        """Detach and close the trace stream, logging close failures."""
         stream, self._stream = self._stream, None
         if stream is not None:
             try:

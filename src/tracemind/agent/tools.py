@@ -1,3 +1,5 @@
+"""Read-only telemetry tool bindings and run-local evidence collection."""
+
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,6 +40,7 @@ class EvidenceCollector:
     """Collect run-local evidence by ID for final citation validation."""
 
     def __init__(self) -> None:
+        """Initialize an empty evidence index for one investigation."""
         self._evidence: dict[str, Evidence] = {}
 
     def add(self, items: Sequence[Evidence]) -> list[dict[str, object]]:
@@ -82,6 +85,7 @@ def create_telemetry_tools(
         arguments: dict[str, object],
         call: Callable[[], Awaitable[Sequence[Evidence]]],
     ) -> list[dict[str, object]]:
+        """Run an admitted query and register its bounded evidence results."""
         spec = TOOL_REGISTRY[name]
         evidence = await harness.tool_call(
             name, arguments, call, max_results=spec.max_results
