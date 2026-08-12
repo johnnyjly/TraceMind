@@ -1,4 +1,5 @@
 import argparse
+import logging
 import shutil
 import subprocess
 import time
@@ -13,6 +14,9 @@ from tracemind.evaluation.demo import (
     verify_demo_commit,
 )
 from tracemind.evaluation.models import EvaluationCase
+
+
+logger = logging.getLogger("tracemind.evaluation.demo_cli")
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +62,10 @@ def main() -> None:
     )
     parser.add_argument("--demo-path", type=Path, default=DEFAULT_DEMO_PATH)
     args = parser.parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
     case = EvaluationCase.load(CASE_PATH)
     verify_demo_commit(args.demo_path)
@@ -69,7 +77,7 @@ def main() -> None:
     )
 
     if args.action == "prepare":
-        print(f"Prepared {flag_config}")
+        logger.info("Prepared %s", flag_config)
         return
 
     if shutil.which("podman") is None:
@@ -86,7 +94,7 @@ def main() -> None:
     )
     if args.action == "start":
         wait_for_backends()
-        print("Prometheus, Jaeger, and OpenSearch are ready")
+        logger.info("Prometheus, Jaeger, and OpenSearch are ready")
 
 
 if __name__ == "__main__":

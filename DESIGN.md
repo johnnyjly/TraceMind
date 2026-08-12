@@ -24,7 +24,8 @@ There is no resumable checkpoint, cross-incident memory,
 service/tenant authorization, automatic retry/fallback, or full payload trace
 yet. S1 disables SDK retries and records provider usage when available. Its
 event files contain operational metadata and evidence IDs, not full observations
-or recoverable graph state. Console truncation only affects printed output.
+or recoverable graph state. Optional DEBUG logging exposes the same sanitized
+event metadata in the terminal without changing persisted events.
 Trace file I/O failures produce a server warning while preserving in-memory
 events and the primary run outcome. Expected external errors are classified as
 model/tool errors; unexpected implementation errors retain `internal_error`

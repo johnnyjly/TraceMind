@@ -115,8 +115,8 @@ Structured events are written to `artifacts/runs/<run_id>.jsonl` by default.
 They contain call relationships, durations, hashed arguments, evidence IDs,
 usage when the provider reports it, and a terminal status. Unreported usage is
 tracked separately from reported token totals. Raw prompts, queries, results,
-and exception messages are not included in these event files. The optional
-`--verbose` console callback remains a separate development debugging facility.
+and exception messages are not included in these event files. `--verbose`
+also logs this safe event metadata to the terminal at DEBUG level.
 Trace file open/write/close failures emit a server warning without replacing
 the diagnosis result or its original error. Events remain available in memory;
 the file can be missing or incomplete. Expected provider and telemetry errors
@@ -233,9 +233,9 @@ and deterministic ground-truth checks:
 uv run python scripts/run_evaluation.py --lookback-minutes 10
 ```
 
-Add `--verbose` to log every model input, model response, tool call, and tool
-result through Python standard `logging` at DEBUG level. Each event is limited to 12,000 characters by default; adjust the limit
-with `--verbose-max-chars`.
+Add `--verbose` to show structured run, model, tool, and context events in the
+terminal. The event payload contains operational metadata, not raw model
+messages or telemetry results.
 
 The report is written to `artifacts/evaluations/payment-failure.json`. Stop and
 remove the scenario containers and volumes with:
@@ -247,14 +247,12 @@ uv run python scripts/demo_scenario.py stop
 ### Terminal logging
 
 The evaluation CLI writes standard logging output to stderr. Evaluation
-summaries use INFO, model/tool payloads use DEBUG, and callback failures use
-ERROR. `--verbose` enables DEBUG only for the trace callback, not third-party
-HTTP clients. Records include timestamps, logger names, and LangChain callback
-`run_id`/`parent_run_id`; these identify framework calls rather than the
-harness investigation ID. Existing key redaction and character limits remain.
+summaries use INFO. `--verbose` enables DEBUG for the harness event logger
+without enabling third-party HTTP client debug output. Records include
+timestamps and logger names; verbose event JSON carries the investigation
+run ID and span relationships. Queries, prompts, telemetry payloads, and raw
+exception messages are excluded from these events.
 
-The callback installs no handlers; embedded applications configure logging
-through their own entry point. An explicitly supplied `write=` callable remains
-supported for compatibility. Harness `emit()` still records structured run
-state and JSONL events independently of console log levels. Trace-file warnings
-already use standard logging.
+`RunHarness.emit()` records events in run state and JSONL regardless of terminal
+log level. Applications embedding TraceMind can attach their own logging
+handlers. Trace-file warnings use standard logging.

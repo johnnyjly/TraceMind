@@ -1,6 +1,5 @@
 """Single-agent diagnosis execution and public service interfaces."""
 
-from tracemind.agent.console_trace import ConsoleTraceCallback
 from tracemind.agent.errors import DiagnosisError, ModelConfigurationError
 from tracemind.agent.llm import create_chat_model
 from tracemind.agent.service import (
@@ -10,7 +9,6 @@ from tracemind.agent.service import (
 )
 
 __all__ = [
-    "ConsoleTraceCallback",
     "DiagnosisError",
     "DiagnosisRun",
     "DiagnosisService",

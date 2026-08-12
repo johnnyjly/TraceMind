@@ -104,6 +104,13 @@ class RunHarness:
             duration_ms=duration_ms, data=data or {},
         )
         self.state.events.append(event)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "%s", event.model_dump_json(),
+                extra={"run_id": str(event.run_id),
+                       "span_id": str(event.span_id),
+                       "event_kind": event.kind},
+            )
         if self._stream is not None:
             operation = "write"
             try:
