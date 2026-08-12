@@ -16,4 +16,3 @@ class Diagnosis(BaseModel):
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
-

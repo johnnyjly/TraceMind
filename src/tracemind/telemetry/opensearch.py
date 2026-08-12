@@ -58,28 +58,46 @@ class OpenSearchClient:
         )
 
         hits = payload.get("hits")
-        if not isinstance(hits, dict) or not isinstance(hits.get("hits"), list):
-            raise TelemetryClientError("OpenSearch response is missing log hits")
+        if (
+            not isinstance(hits, dict)
+            or not isinstance(hits.get("hits"), list)
+        ):
+            raise TelemetryClientError(
+                "OpenSearch response is missing log hits"
+            )
 
         return [self._to_evidence(hit, service, text) for hit in hits["hits"]]
 
     @staticmethod
     def _to_evidence(hit: Any, service: str, text: str | None) -> Evidence:
-        if not isinstance(hit, dict) or not isinstance(hit.get("_source"), dict):
-            raise TelemetryClientError("OpenSearch returned an invalid log hit")
+        if (
+            not isinstance(hit, dict)
+            or not isinstance(hit.get("_source"), dict)
+        ):
+            raise TelemetryClientError(
+                "OpenSearch returned an invalid log hit"
+            )
 
         source = hit["_source"]
         timestamp = source.get("@timestamp")
         body = source.get("body")
         if not isinstance(timestamp, str) or body is None:
-            raise TelemetryClientError("OpenSearch log is missing timestamp or body")
+            raise TelemetryClientError(
+                "OpenSearch log is missing timestamp or body"
+            )
 
         try:
-            observed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            observed_at = datetime.fromisoformat(
+                timestamp.replace("Z", "+00:00")
+            )
         except ValueError as exc:
-            raise TelemetryClientError("OpenSearch log has an invalid timestamp") from exc
+            raise TelemetryClientError(
+                "OpenSearch log has an invalid timestamp"
+            ) from exc
 
-        summary = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+        summary = (
+            body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+        )
         severity = source.get("severity")
         if not isinstance(severity, dict):
             severity = {}
@@ -97,5 +115,8 @@ class OpenSearchClient:
             observed_at=observed_at,
             service=service,
             query=f"service={service}" + (f" text={text}" if text else ""),
-            attributes={key: value for key, value in attributes.items() if value is not None},
+            attributes={
+                key: value for key, value in attributes.items()
+                if value is not None
+            },
         )

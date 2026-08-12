@@ -11,5 +11,7 @@ class DiagnosisRequest(BaseModel):
     @model_validator(mode="after")
     def validate_window(self) -> "DiagnosisRequest":
         if self.investigation_end <= self.investigation_start:
-            raise ValueError("investigation_end must be after investigation_start")
+            raise ValueError(
+                "investigation_end must be after investigation_start"
+            )
         return self

@@ -20,4 +20,3 @@ class Incident(BaseModel):
     severity: IncidentSeverity = IncidentSeverity.UNKNOWN
     affected_services: list[str] = Field(default_factory=list)
     started_at: datetime | None = None
-

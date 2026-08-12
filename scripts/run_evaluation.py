@@ -29,7 +29,8 @@ async def run(
         start=start,
         end=end,
         callbacks=(
-            [ConsoleTraceCallback(max_chars=verbose_max_chars)] if verbose else None
+            [ConsoleTraceCallback(max_chars=verbose_max_chars)]
+            if verbose else None
         ),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +40,9 @@ async def run(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run an TraceMind evaluation case")
+    parser = argparse.ArgumentParser(
+        description="Run an TraceMind evaluation case"
+    )
     parser.add_argument("--case", type=Path, default=DEFAULT_CASE_PATH)
     parser.add_argument("--lookback-minutes", type=int, default=10)
     parser.add_argument(
@@ -56,7 +59,9 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=PROJECT_ROOT / "artifacts" / "evaluations" / "payment-failure.json",
+        default=(
+            PROJECT_ROOT / "artifacts" / "evaluations" / "payment-failure.json"
+        ),
     )
     args = parser.parse_args()
     if args.lookback_minutes < 1:

@@ -28,9 +28,15 @@ class Settings(BaseSettings):
     agent_max_model_calls: int = Field(default=8, ge=1)
     agent_max_tool_calls: int = Field(default=12, ge=1)
     agent_max_identical_tool_calls: int = Field(default=2, ge=1)
-    agent_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
-    agent_model_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
-    agent_tool_timeout_seconds: float = Field(default=20, gt=0, allow_inf_nan=False)
+    agent_timeout_seconds: float = Field(
+        default=120, gt=0, allow_inf_nan=False
+    )
+    agent_model_timeout_seconds: float = Field(
+        default=60, gt=0, allow_inf_nan=False
+    )
+    agent_tool_timeout_seconds: float = Field(
+        default=20, gt=0, allow_inf_nan=False
+    )
     agent_allowed_tools: tuple[ToolName, ...] = TOOL_NAMES
     agent_trace_directory: Path | None = Path("artifacts/runs")
 

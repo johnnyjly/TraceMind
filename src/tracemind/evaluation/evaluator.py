@@ -19,7 +19,9 @@ def evaluate_diagnosis(
     )
 
     evidence_by_id = {item.id: item for item in run.evidence}
-    grounded = all(item_id in evidence_by_id for item_id in diagnosis.evidence_ids)
+    grounded = all(
+        item_id in evidence_by_id for item_id in diagnosis.evidence_ids
+    )
     cited_evidence = [
         evidence_by_id[item_id]
         for item_id in diagnosis.evidence_ids

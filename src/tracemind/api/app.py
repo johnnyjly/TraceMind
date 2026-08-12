@@ -16,7 +16,11 @@ from tracemind.api.schemas import DiagnosisRequest
 from tracemind.config import Settings, get_settings
 from tracemind.models import Diagnosis
 from tracemind.models.run import StopReason
-from tracemind.telemetry import JaegerClient, OpenSearchClient, PrometheusClient
+from tracemind.telemetry import (
+    JaegerClient,
+    OpenSearchClient,
+    PrometheusClient,
+)
 
 
 class HealthResponse(BaseModel):
@@ -89,12 +93,16 @@ def create_app() -> FastAPI:
             )
             if run.state is not None and run.state.stop_reason is not None:
                 response.headers["X-TraceMind-Run-ID"] = str(run.state.id)
-                response.headers["X-TraceMind-Stop-Reason"] = run.state.stop_reason.value
+                response.headers["X-TraceMind-Stop-Reason"] = (
+                    run.state.stop_reason.value
+                )
             return run.diagnosis
         except DiagnosisError as exc:
             reason = exc.state.stop_reason if exc.state else None
             timed_out = reason in {
-                StopReason.DEADLINE, StopReason.MODEL_TIMEOUT, StopReason.TOOL_TIMEOUT,
+                StopReason.DEADLINE,
+                StopReason.MODEL_TIMEOUT,
+                StopReason.TOOL_TIMEOUT,
             }
             headers = {}
             if exc.state is not None:

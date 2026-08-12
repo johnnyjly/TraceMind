@@ -7,7 +7,11 @@ from langchain_core.tools import BaseTool, tool
 from tracemind.agent.harness import RunHarness
 from tracemind.models import Evidence
 from tracemind.models.run import ToolName
-from tracemind.telemetry import JaegerClient, OpenSearchClient, PrometheusClient
+from tracemind.telemetry import (
+    JaegerClient,
+    OpenSearchClient,
+    PrometheusClient,
+)
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,10 @@ def create_telemetry_tools(
 
     @tool
     async def query_metrics(expression: str) -> list[dict[str, object]]:
-        """Run an instant PromQL query and return normalized metric evidence."""
+        (
+            "Run an instant PromQL query and return normalized metric "
+            "evidence."
+        )
         return await execute(
             "query_metrics", {"expression": expression},
             lambda: prometheus.query(expression, at=end),
@@ -83,7 +90,10 @@ def create_telemetry_tools(
 
     @tool
     async def get_trace_detail(trace_id: str) -> list[dict[str, object]]:
-        """Inspect one Jaeger trace and return its normalized error-span evidence."""
+        (
+            "Inspect one Jaeger trace and return its normalized error-span "
+            "evidence."
+        )
         return await execute(
             "get_trace_detail", {"trace_id": trace_id},
             lambda: jaeger.get_trace_detail(trace_id),
@@ -97,10 +107,14 @@ def create_telemetry_tools(
         """Find OpenSearch logs for one service, optionally matching text."""
         return await execute(
             "search_logs", {"service": service, "text": text},
-            lambda: opensearch.search_logs(service, start=start, end=end, text=text),
+            lambda: opensearch.search_logs(
+                service, start=start, end=end, text=text
+            ),
         )
 
     return [
-        item for item in (query_metrics, search_traces, get_trace_detail, search_logs)
+        item for item in (
+            query_metrics, search_traces, get_trace_detail, search_logs
+        )
         if item.name in harness.state.allowed_tools
     ]

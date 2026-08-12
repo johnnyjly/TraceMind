@@ -57,7 +57,10 @@ class ConsoleTraceCallback(BaseCallbackHandler):
     ) -> None:
         self._emit(
             "MODEL INPUT",
-            [[message.model_dump(mode="json") for message in batch] for batch in messages],
+            [
+                [message.model_dump(mode="json") for message in batch]
+                for batch in messages
+            ],
         )
 
     def on_llm_end(
@@ -76,7 +79,9 @@ class ConsoleTraceCallback(BaseCallbackHandler):
                 if isinstance(message, BaseMessage):
                     rendered_batch.append(message.model_dump(mode="json"))
                 else:
-                    rendered_batch.append(getattr(generation, "text", str(generation)))
+                    rendered_batch.append(
+                        getattr(generation, "text", str(generation))
+                    )
             replies.append(rendered_batch)
         self._emit("MODEL RESPONSE", replies)
 
@@ -132,5 +137,8 @@ class ConsoleTraceCallback(BaseCallbackHandler):
         )
         if len(rendered) > self._max_chars:
             omitted = len(rendered) - self._max_chars
-            rendered = f"{rendered[: self._max_chars]}\n... <{omitted} characters omitted>"
+            rendered = (
+                f"{rendered[: self._max_chars]}\n"
+                f"... <{omitted} characters omitted>"
+            )
         self._write(f"\n=== {label} ===\n{rendered}")

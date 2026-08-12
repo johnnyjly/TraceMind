@@ -17,11 +17,26 @@ from pydantic import Field
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from openai import APIConnectionError
 
-from tracemind.agent import DiagnosisError, DiagnosisService, LangChainAgentRunner
+from tracemind.agent import (
+    DiagnosisError,
+    DiagnosisService,
+    LangChainAgentRunner,
+)
 from tracemind.agent.harness import RunHarness, RunStopped
 from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
-from tracemind.models import DiagnosisStatus, Evidence, EvidenceSource, Incident
-from tracemind.models.run import TOOL_NAMES, RunLimits, RunState, RunStatus, StopReason
+from tracemind.models import (
+    DiagnosisStatus,
+    Evidence,
+    EvidenceSource,
+    Incident,
+)
+from tracemind.models.run import (
+    TOOL_NAMES,
+    RunLimits,
+    RunState,
+    RunStatus,
+    StopReason,
+)
 from tracemind.telemetry.errors import TelemetryClientError
 
 
@@ -31,7 +46,10 @@ INCIDENT = Incident(title="checkout errors", description="HTTP 500 spike")
 
 
 class ScriptedModel(BaseChatModel):
-    """Uses the real create_agent loop and tool dispatch, without a provider."""
+    (
+        "Uses the real create_agent loop and tool dispatch, "
+        "without a provider."
+    )
 
     respond: Callable
     calls: int = 0
@@ -44,7 +62,8 @@ class ScriptedModel(BaseChatModel):
 
     def bind_tools(self, tools, **kwargs):
         self.bindings.append([
-            tool.name if hasattr(tool, "name") else tool.get("function", tool)["name"]
+            tool.name if hasattr(tool, "name")
+            else tool.get("function", tool)["name"]
             for tool in tools
         ])
         return self
@@ -52,7 +71,9 @@ class ScriptedModel(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         raise AssertionError("tests must use the async model path")
 
-    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+    async def _agenerate(
+        self, messages, stop=None, run_manager=None, **kwargs
+    ):
         self.calls += 1
         self.inputs.append(messages)
         response = self.respond(messages, self.calls)
@@ -62,9 +83,17 @@ class ScriptedModel(BaseChatModel):
 
 
 def tool_call(name="query_metrics", arguments=None) -> AIMessage:
-    return AIMessage(content="", tool_calls=[{
-        "name": name, "args": arguments or {"expression": "up"}, "id": str(uuid4()),
-    }], usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "name": name,
+            "args": arguments or {"expression": "up"},
+            "id": str(uuid4()),
+        }],
+        usage_metadata={
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+        },
+    )
 
 
 def diagnosis(messages, *, override=None) -> AIMessage:
@@ -120,7 +149,9 @@ def make_service(model, telemetry, tmp_path, **kwargs):
 
 
 def run_service(service):
-    return asyncio.run(service.diagnose_with_evidence(INCIDENT, start=START, end=END))
+    return asyncio.run(
+        service.diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
 
 
 def events_at(tmp_path):
@@ -144,11 +175,18 @@ def test_real_loop_success_records_usage_evidence_and_terminal_event(tmp_path):
     assert "8 model calls" in model.inputs[0][0].text
     assert "7 model calls" in model.inputs[1][0].text
     events = events_at(tmp_path)
-    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
+    assert [event["sequence"] for event in events] == list(
+        range(1, len(events) + 1)
+    )
     assert events[-1]["kind"] == "run.finished"
     assert events[-1]["data"]["reason"] == "completed"
-    model_spans = {event["span_id"] for event in events if event["kind"] == "model.started"}
-    tool_start = next(event for event in events if event["kind"] == "tool.started")
+    model_spans = {
+        event["span_id"] for event in events
+        if event["kind"] == "model.started"
+    }
+    tool_start = next(
+        event for event in events if event["kind"] == "tool.started"
+    )
     assert tool_start["parent_span_id"] in model_spans
 
 
@@ -173,10 +211,14 @@ def test_loop_limits_are_enforced_before_execution(
 
 @pytest.mark.parametrize("name", ["search_logs", "unregistered_tool"])
 def test_hidden_and_unknown_tools_are_denied_in_real_loop(tmp_path, name):
-    model = ScriptedModel(respond=lambda messages, calls: tool_call(name, {"service": "payment"}))
+    model = ScriptedModel(
+        respond=lambda messages, calls: tool_call(name, {"service": "payment"})
+    )
     telemetry = Telemetry()
     with pytest.raises(DiagnosisError) as caught:
-        run_service(make_service(model, telemetry, tmp_path, allowed_tools=("query_metrics",)))
+        run_service(make_service(
+            model, telemetry, tmp_path, allowed_tools=("query_metrics",)
+        ))
     assert caught.value.state.stop_reason is StopReason.TOOL_DENIED
     assert caught.value.state.status is RunStatus.FAILED
     assert telemetry.calls == []
@@ -186,12 +228,17 @@ def test_hidden_and_unknown_tools_are_denied_in_real_loop(tmp_path, name):
 
 def test_executor_rechecks_policy_even_when_tool_was_previously_visible():
     async def scenario():
-        state = RunState(incident=INCIDENT, investigation_start=START, investigation_end=END,
-                         limits=RunLimits(), allowed_tools=TOOL_NAMES)
+        state = RunState(
+            incident=INCIDENT,
+            investigation_start=START, investigation_end=END,
+            limits=RunLimits(), allowed_tools=TOOL_NAMES,
+        )
         harness = RunHarness(state)
         telemetry = Telemetry()
-        tools = create_telemetry_tools(telemetry, telemetry, telemetry, start=START, end=END,
-                                       collector=EvidenceCollector(), harness=harness)
+        tools = create_telemetry_tools(
+            telemetry, telemetry, telemetry, start=START, end=END,
+            collector=EvidenceCollector(), harness=harness,
+        )
         state.allowed_tools = ()
         with pytest.raises(RunStopped):
             await tools[0].ainvoke({"expression": "up"})
@@ -204,11 +251,15 @@ def test_parallel_calls_share_budget_and_cancel_started_sibling(tmp_path):
     def respond(messages, calls):
         first = tool_call(arguments={"expression": "first"})
         second = tool_call(arguments={"expression": "second"})
-        return AIMessage(content="", tool_calls=first.tool_calls + second.tool_calls)
+        return AIMessage(
+            content="", tool_calls=first.tool_calls + second.tool_calls
+        )
 
     telemetry = Telemetry(block=True)
     model = ScriptedModel(respond=respond)
-    run = run_service(make_service(model, telemetry, tmp_path, limits=RunLimits(tool_calls=1)))
+    run = run_service(make_service(
+        model, telemetry, tmp_path, limits=RunLimits(tool_calls=1)
+    ))
     assert run.state.stop_reason is StopReason.TOOL_BUDGET
     assert len(telemetry.calls) == 1
     assert telemetry.cancelled
@@ -222,7 +273,9 @@ def test_parallel_calls_share_budget_and_cancel_started_sibling(tmp_path):
     (RunLimits(tool_timeout_seconds=0.02), StopReason.TOOL_TIMEOUT),
     (RunLimits(duration_seconds=0.05), StopReason.DEADLINE),
 ])
-def test_tool_timeout_and_run_deadline_cancel_backend(tmp_path, limits, reason):
+def test_tool_timeout_and_run_deadline_cancel_backend(
+    tmp_path, limits, reason,
+):
     telemetry = Telemetry(block=True)
     model = ScriptedModel(respond=lambda messages, calls: tool_call())
     with pytest.raises(DiagnosisError) as caught:
@@ -239,12 +292,16 @@ def test_model_timeout_records_unknown_usage(tmp_path):
 
     model = ScriptedModel(respond=respond)
     with pytest.raises(DiagnosisError) as caught:
-        run_service(make_service(model, Telemetry(), tmp_path,
-                                limits=RunLimits(model_timeout_seconds=0.02)))
+        run_service(make_service(
+            model, Telemetry(), tmp_path,
+            limits=RunLimits(model_timeout_seconds=0.02),
+        ))
     assert caught.value.state.stop_reason is StopReason.MODEL_TIMEOUT
     assert caught.value.state.usage.unreported_model_calls == 1
     assert caught.value.state.usage.reported_model_calls == 0
-    assert any(event["kind"] == "model.failed" for event in events_at(tmp_path))
+    assert any(
+        event["kind"] == "model.failed" for event in events_at(tmp_path)
+    )
 
 
 @pytest.mark.parametrize("override, observed_at, message", [
@@ -253,11 +310,19 @@ def test_model_timeout_records_unknown_usage(tmp_path):
     ({"root_cause": "   "}, END, "must explain"),
     ({}, START - timedelta(seconds=1), "outside the investigation window"),
 ])
-def test_completion_gate_rejects_unsupported_final_result(tmp_path, override, observed_at, message):
-    model = ScriptedModel(respond=lambda messages, calls:
-                          tool_call() if calls == 1 else diagnosis(messages, override=override))
+def test_completion_gate_rejects_unsupported_final_result(
+    tmp_path, override, observed_at, message,
+):
+    model = ScriptedModel(
+        respond=lambda messages, calls: (
+            tool_call() if calls == 1
+            else diagnosis(messages, override=override)
+        )
+    )
     with pytest.raises(DiagnosisError, match=message) as caught:
-        run_service(make_service(model, Telemetry(observed_at=observed_at), tmp_path))
+        run_service(make_service(
+            model, Telemetry(observed_at=observed_at), tmp_path
+        ))
     assert caught.value.state.stop_reason is StopReason.INVALID_DIAGNOSIS
     assert len(caught.value.evidence) == 1
     assert events_at(tmp_path)[-1]["data"]["status"] == "failed"
@@ -281,7 +346,9 @@ def test_cancellation_writes_terminal_event_and_stops_backend(tmp_path):
         telemetry = Telemetry(block=True)
         model = ScriptedModel(respond=lambda messages, calls: tool_call())
         service = make_service(model, telemetry, tmp_path)
-        task = asyncio.create_task(service.diagnose_with_evidence(INCIDENT, start=START, end=END))
+        task = asyncio.create_task(
+            service.diagnose_with_evidence(INCIDENT, start=START, end=END)
+        )
         await asyncio.wait_for(telemetry.entered.wait(), timeout=2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -293,12 +360,19 @@ def test_cancellation_writes_terminal_event_and_stops_backend(tmp_path):
 
 def test_concurrent_runs_do_not_share_evidence_or_budgets(tmp_path):
     def respond(messages, calls):
-        return diagnosis(messages) if any(isinstance(m, ToolMessage) for m in messages) else tool_call()
+        return (
+            diagnosis(messages)
+            if any(isinstance(m, ToolMessage) for m in messages)
+            else tool_call()
+        )
 
     async def scenario():
-        service = make_service(ScriptedModel(respond=respond), Telemetry(), tmp_path)
+        service = make_service(
+            ScriptedModel(respond=respond), Telemetry(), tmp_path
+        )
         return await asyncio.gather(*[
-            service.diagnose_with_evidence(INCIDENT, start=START, end=END) for _ in range(2)
+            service.diagnose_with_evidence(INCIDENT, start=START, end=END)
+            for _ in range(2)
         ])
     first, second = asyncio.run(scenario())
     assert first.state.id != second.state.id
@@ -310,8 +384,9 @@ def test_concurrent_runs_do_not_share_evidence_or_budgets(tmp_path):
 def test_framework_schema_repairs_cannot_bypass_model_budget(tmp_path):
     model = ScriptedModel(respond=lambda messages, calls:
                           tool_call("DiagnosisDraft", {"status": "invalid"}))
-    run = run_service(make_service(model, Telemetry(), tmp_path,
-                                  limits=RunLimits(model_calls=2)))
+    run = run_service(make_service(
+        model, Telemetry(), tmp_path, limits=RunLimits(model_calls=2)
+    ))
     assert run.state.stop_reason is StopReason.MODEL_BUDGET
     assert model.calls == 2
     assert run.tool_call_count == 0
@@ -321,16 +396,21 @@ def test_invalid_tool_arguments_are_traced_and_bounded(tmp_path):
     model = ScriptedModel(respond=lambda messages, calls:
                           tool_call(arguments={"expression": None}))
     telemetry = Telemetry()
-    run = run_service(make_service(model, telemetry, tmp_path,
-                                  limits=RunLimits(model_calls=2)))
+    run = run_service(make_service(
+        model, telemetry, tmp_path, limits=RunLimits(model_calls=2)
+    ))
     assert run.state.stop_reason is StopReason.MODEL_BUDGET
     assert telemetry.calls == []
-    assert sum(event.kind == "tool.rejected" for event in run.state.events) == 2
+    assert sum(
+        event.kind == "tool.rejected" for event in run.state.events
+    ) == 2
 
 
 def test_recursion_limit_has_explicit_terminal_result(tmp_path):
     model = ScriptedModel(respond=lambda messages, calls: tool_call())
-    run = run_service(make_service(model, Telemetry(), tmp_path, recursion_limit=1))
+    run = run_service(make_service(
+        model, Telemetry(), tmp_path, recursion_limit=1
+    ))
     assert run.state.stop_reason is StopReason.RECURSION_LIMIT
     assert run.state.status is RunStatus.INCONCLUSIVE
     assert events_at(tmp_path)[-1]["kind"] == "run.finished"
@@ -339,7 +419,9 @@ def test_recursion_limit_has_explicit_terminal_result(tmp_path):
 @pytest.mark.parametrize("error", [
     ModelAPIError("private-provider-error"),
     ChatGoogleGenerativeAIError("private-provider-error"),
-    APIConnectionError(request=httpx.Request("POST", "https://provider.invalid")),
+    APIConnectionError(
+        request=httpx.Request("POST", "https://provider.invalid")
+    ),
     httpx.ConnectError("private-provider-error"),
 ])
 def test_provider_failure_preserves_previous_evidence(tmp_path, error):
@@ -349,7 +431,9 @@ def test_provider_failure_preserves_previous_evidence(tmp_path, error):
         return tool_call()
 
     with pytest.raises(DiagnosisError) as caught:
-        run_service(make_service(ScriptedModel(respond=respond), Telemetry(), tmp_path))
+        run_service(make_service(
+            ScriptedModel(respond=respond), Telemetry(), tmp_path
+        ))
     assert caught.value.state.stop_reason is StopReason.MODEL_ERROR
     assert len(caught.value.evidence) == 1
     assert caught.value.state.evidence_ids == [caught.value.evidence[0].id]
@@ -358,7 +442,9 @@ def test_provider_failure_preserves_previous_evidence(tmp_path, error):
 
 @pytest.mark.parametrize("stage", ["model", "tool"])
 @pytest.mark.parametrize("error_type", [AttributeError, RuntimeError])
-def test_programming_errors_remain_internal_errors(tmp_path, stage, error_type):
+def test_programming_errors_remain_internal_errors(
+    tmp_path, stage, error_type,
+):
     error = error_type("private-implementation-error")
 
     def respond(messages, calls):
@@ -368,13 +454,18 @@ def test_programming_errors_remain_internal_errors(tmp_path, stage, error_type):
 
     telemetry = Telemetry(error=error if stage == "tool" else None)
     with pytest.raises(DiagnosisError) as caught:
-        run_service(make_service(ScriptedModel(respond=respond), telemetry, tmp_path))
+        run_service(make_service(
+            ScriptedModel(respond=respond), telemetry, tmp_path
+        ))
     assert caught.value.state.stop_reason is StopReason.INTERNAL_ERROR
     assert caught.value.state.status is RunStatus.FAILED
     assert caught.value.__cause__ is error
     events = events_at(tmp_path)
     assert events[-1]["data"]["reason"] == "internal_error"
-    assert any(event["data"].get("error_type") == error_type.__name__ for event in events)
+    assert any(
+        event["data"].get("error_type") == error_type.__name__
+        for event in events
+    )
     assert "private-implementation-error" not in json.dumps(events)
 
 
@@ -415,7 +506,9 @@ def test_trace_io_failure_preserves_run_outcome(
     monkeypatch.setattr(os, "fdopen", failing_fdopen)
     telemetry = Telemetry(error=TelemetryClientError("private-backend-error")
                           if backend_failed else None)
-    service = make_service(ScriptedModel(respond=normal_response), telemetry, tmp_path)
+    service = make_service(
+        ScriptedModel(respond=normal_response), telemetry, tmp_path
+    )
     if backend_failed:
         with pytest.raises(DiagnosisError) as caught:
             run_service(service)
@@ -434,12 +527,16 @@ def test_trace_io_failure_preserves_run_outcome(
     assert "private-disk-error" not in caplog.text
 
 
-def test_trace_open_failure_warns_and_keeps_in_memory_events(tmp_path, monkeypatch, caplog):
+def test_trace_open_failure_warns_and_keeps_in_memory_events(
+    tmp_path, monkeypatch, caplog,
+):
     def cannot_create_directory(*args, **kwargs):
         raise PermissionError("private-filesystem-error")
 
     monkeypatch.setattr(Path, "mkdir", cannot_create_directory)
-    run = run_service(make_service(ScriptedModel(respond=normal_response), Telemetry(), tmp_path))
+    run = run_service(make_service(
+        ScriptedModel(respond=normal_response), Telemetry(), tmp_path
+    ))
     assert run.state.status is RunStatus.SUCCEEDED
     assert run.state.events[-1].kind == "run.finished"
     assert "cannot open trace file" in caplog.text

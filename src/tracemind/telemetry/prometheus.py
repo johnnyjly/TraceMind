@@ -42,24 +42,35 @@ class PrometheusClient:
         data = payload.get("data")
         if not isinstance(data, dict) or data.get("resultType") != "vector":
             raise TelemetryClientError(
-                "Prometheus returned an unsupported result type; expected vector"
+                "Prometheus returned an unsupported result type; "
+                "expected vector"
             )
 
         results = data.get("result")
         if not isinstance(results, list):
-            raise TelemetryClientError("Prometheus response is missing vector results")
+            raise TelemetryClientError(
+                "Prometheus response is missing vector results"
+            )
 
         return [self._to_evidence(item, expression) for item in results]
 
     @staticmethod
     def _to_evidence(item: Any, expression: str) -> Evidence:
         if not isinstance(item, dict):
-            raise TelemetryClientError("Prometheus returned an invalid vector sample")
+            raise TelemetryClientError(
+                "Prometheus returned an invalid vector sample"
+            )
 
         labels = item.get("metric")
         sample = item.get("value")
-        if not isinstance(labels, dict) or not isinstance(sample, list) or len(sample) != 2:
-            raise TelemetryClientError("Prometheus returned an invalid vector sample")
+        if (
+            not isinstance(labels, dict)
+            or not isinstance(sample, list)
+            or len(sample) != 2
+        ):
+            raise TelemetryClientError(
+                "Prometheus returned an invalid vector sample"
+            )
 
         timestamp, value = sample
         try:
@@ -83,4 +94,3 @@ class PrometheusClient:
                 "value": str(value),
             },
         )
-

@@ -37,7 +37,9 @@ class JaegerClient:
 
         traces = payload.get("data")
         if not isinstance(traces, list):
-            raise TelemetryClientError("Jaeger response is missing trace results")
+            raise TelemetryClientError(
+                "Jaeger response is missing trace results"
+            )
 
         return [self._to_evidence(trace, service) for trace in traces]
 
@@ -51,7 +53,9 @@ class JaegerClient:
 
         traces = payload.get("data")
         if not isinstance(traces, list) or len(traces) != 1:
-            raise TelemetryClientError("Jaeger response is missing the requested trace")
+            raise TelemetryClientError(
+                "Jaeger response is missing the requested trace"
+            )
 
         trace = traces[0]
         if not isinstance(trace, dict):
@@ -77,7 +81,11 @@ class JaegerClient:
 
         trace_id = trace.get("traceID")
         spans = trace.get("spans")
-        if not isinstance(trace_id, str) or not isinstance(spans, list) or not spans:
+        if (
+            not isinstance(trace_id, str)
+            or not isinstance(spans, list)
+            or not spans
+        ):
             raise TelemetryClientError("Jaeger returned an incomplete trace")
 
         try:
@@ -87,7 +95,9 @@ class JaegerClient:
                 for span in spans
             ]
         except (KeyError, TypeError, ValueError) as exc:
-            raise TelemetryClientError("Jaeger returned an invalid span timestamp") from exc
+            raise TelemetryClientError(
+                "Jaeger returned an invalid span timestamp"
+            ) from exc
 
         error_span_count = sum(_span_has_error(span) for span in spans)
         duration_ms = (max(ends) - min(starts)) / 1_000
@@ -132,7 +142,9 @@ class JaegerClient:
             )
             duration_ms = int(span["duration"]) / 1_000
         except (KeyError, TypeError, ValueError, OSError) as exc:
-            raise TelemetryClientError("Jaeger returned an invalid span timestamp") from exc
+            raise TelemetryClientError(
+                "Jaeger returned an invalid span timestamp"
+            ) from exc
 
         operation = str(span.get("operationName", "unknown operation"))
         tags = _tags_by_key(span)

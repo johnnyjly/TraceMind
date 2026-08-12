@@ -23,8 +23,10 @@ class StubDiagnosisService:
                 confidence=0.2,
             ), evidence=[], tool_calls={},
             state=RunState(
-                incident=incident, investigation_start=start, investigation_end=end,
-                limits=RunLimits(), allowed_tools=(), status=RunStatus.INCONCLUSIVE,
+                incident=incident,
+                investigation_start=start, investigation_end=end,
+                limits=RunLimits(), allowed_tools=(),
+                status=RunStatus.INCONCLUSIVE,
                 stop_reason=StopReason.INSUFFICIENT_EVIDENCE,
             ),
         )
@@ -62,7 +64,9 @@ def test_diagnosis_endpoint_returns_structured_result() -> None:
     assert response.json()["status"] == "inconclusive"
     assert response.json()["root_cause"] == "Not enough telemetry"
     assert response.headers["x-tracemind-run-id"]
-    assert response.headers["x-tracemind-stop-reason"] == "insufficient_evidence"
+    assert (
+        response.headers["x-tracemind-stop-reason"] == "insufficient_evidence"
+    )
 
 
 def test_diagnosis_endpoint_rejects_reversed_window() -> None:
@@ -138,7 +142,8 @@ def test_api_exposes_safe_run_failure_metadata(reason, expected_status):
         incident=Incident(title="failure", description="test"),
         investigation_start=datetime(2024, 9, 1, tzinfo=UTC),
         investigation_end=datetime(2024, 9, 1, 1, tzinfo=UTC),
-        limits=RunLimits(), allowed_tools=(), status=RunStatus.FAILED, stop_reason=reason,
+        limits=RunLimits(), allowed_tools=(),
+        status=RunStatus.FAILED, stop_reason=reason,
     )
 
     class FailedService:
@@ -149,7 +154,9 @@ def test_api_exposes_safe_run_failure_metadata(reason, expected_status):
         return FailedService()
 
     async def request():
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
             return await client.post("/api/v1/diagnoses", json={
                 "incident": {"title": "failure", "description": "test"},
                 "investigation_start": "2024-09-01T00:00:00Z",

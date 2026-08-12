@@ -45,7 +45,9 @@ def test_console_trace_prints_model_and_tool_activity() -> None:
         inputs={"service": "payment", "google_api_key": "not-for-logs"},
     )
     callback.on_tool_end(
-        ToolMessage(content='[{"error_span_count": 1}]', tool_call_id="call-1"),
+        ToolMessage(
+            content='[{"error_span_count": 1}]', tool_call_id="call-1"
+        ),
         run_id=run_id,
     )
 

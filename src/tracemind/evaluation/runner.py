@@ -5,11 +5,19 @@ from time import perf_counter
 import httpx
 from langchain_core.callbacks import BaseCallbackHandler
 
-from tracemind.agent import DiagnosisService, LangChainAgentRunner, create_chat_model
+from tracemind.agent import (
+    DiagnosisService,
+    LangChainAgentRunner,
+    create_chat_model,
+)
 from tracemind.config import Settings
 from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.evaluation.models import EvaluationCase, EvaluationReport
-from tracemind.telemetry import JaegerClient, OpenSearchClient, PrometheusClient
+from tracemind.telemetry import (
+    JaegerClient,
+    OpenSearchClient,
+    PrometheusClient,
+)
 
 
 async def run_live_evaluation(

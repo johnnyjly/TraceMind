@@ -38,7 +38,9 @@ def verify_demo_commit(demo_path: Path) -> None:
         text=True,
     )
     if result.stdout.strip() != DEMO_COMMIT:
-        raise RuntimeError(f"OpenTelemetry Demo must be pinned to {DEMO_COMMIT}")
+        raise RuntimeError(
+            f"OpenTelemetry Demo must be pinned to {DEMO_COMMIT}"
+        )
 
 
 def compose_command(
@@ -81,7 +83,9 @@ def compose_command(
 
 def podman_environment(flag_config: Path) -> dict[str, str]:
     environment = os.environ.copy()
-    runtime_dir = environment.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    runtime_dir = environment.get(
+        "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"
+    )
     environment.update(
         {
             "DOCKER_SOCK": f"{runtime_dir}/podman/podman.sock",

@@ -11,7 +11,12 @@ from langchain_openai import ChatOpenAI
 from tracemind.agent import DiagnosisError, DiagnosisService, create_chat_model
 from tracemind.agent.service import DiagnosisDraft
 from tracemind.config import Settings
-from tracemind.models import DiagnosisStatus, Evidence, EvidenceSource, Incident
+from tracemind.models import (
+    DiagnosisStatus,
+    Evidence,
+    EvidenceSource,
+    Incident,
+)
 
 
 class StubPrometheus:
@@ -48,7 +53,9 @@ class EvidenceUsingRunner:
     ) -> DiagnosisDraft:
         assert "checkout errors" in prompt
         assert recursion_limit == 8
-        metrics_tool = next(tool for tool in tools if tool.name == "query_metrics")
+        metrics_tool = next(
+            tool for tool in tools if tool.name == "query_metrics"
+        )
         evidence = await metrics_tool.ainvoke(
             {"expression": "sum(request_errors_total)"}
         )

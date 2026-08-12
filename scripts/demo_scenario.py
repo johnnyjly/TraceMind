@@ -44,12 +44,18 @@ def wait_for_backends(timeout_seconds: int = 300) -> None:
             time.sleep(2)
     if pending:
         names = ", ".join(pending)
-        raise RuntimeError(f"timed out waiting for telemetry backends: {names}")
+        raise RuntimeError(
+            f"timed out waiting for telemetry backends: {names}"
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Manage the payment failure scenario")
-    parser.add_argument("action", choices=("prepare", "start", "status", "stop"))
+    parser = argparse.ArgumentParser(
+        description="Manage the payment failure scenario"
+    )
+    parser.add_argument(
+        "action", choices=("prepare", "start", "status", "stop")
+    )
     parser.add_argument("--demo-path", type=Path, default=DEFAULT_DEMO_PATH)
     args = parser.parse_args()
 

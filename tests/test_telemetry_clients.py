@@ -38,8 +38,12 @@ def test_prometheus_query_returns_metric_evidence() -> None:
         )
 
     async def run_query():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-            return await PrometheusClient("http://prometheus", http).query("up")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http:
+            return await PrometheusClient("http://prometheus", http).query(
+                "up"
+            )
 
     evidence = asyncio.run(run_query())
 
@@ -56,7 +60,9 @@ def test_prometheus_http_failure_has_backend_context() -> None:
         async with httpx.AsyncClient(transport=transport) as http:
             await PrometheusClient("http://prometheus", http).query("up")
 
-    with pytest.raises(TelemetryClientError, match="Prometheus request failed"):
+    with pytest.raises(
+        TelemetryClientError, match="Prometheus request failed"
+    ):
         asyncio.run(run_query())
 
 
@@ -88,7 +94,9 @@ def test_jaeger_search_returns_trace_evidence() -> None:
         )
 
     async def search_traces():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http:
             return await JaegerClient("http://jaeger", http).search_traces(
                 "checkout",
                 start=datetime(2024, 9, 1, tzinfo=UTC),
@@ -133,7 +141,10 @@ def test_jaeger_trace_detail_returns_error_span_evidence() -> None:
                                 "startTime": 1_725_192_000_050_000,
                                 "duration": 100_000,
                                 "tags": [
-                                    {"key": "otel.status_code", "value": "ERROR"},
+                                    {
+                                        "key": "otel.status_code",
+                                        "value": "ERROR",
+                                    },
                                     {
                                         "key": "error.type",
                                         "value": "PaymentFailureError",
@@ -147,7 +158,9 @@ def test_jaeger_trace_detail_returns_error_span_evidence() -> None:
         )
 
     async def get_detail():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http:
             return await JaegerClient("http://jaeger", http).get_trace_detail(
                 "trace-123"
             )
@@ -191,7 +204,9 @@ def test_opensearch_query_returns_log_evidence() -> None:
         )
 
     async def search_logs():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http:
             return await OpenSearchClient(
                 "http://opensearch",
                 "otel-logs-*",

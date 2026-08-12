@@ -26,7 +26,8 @@ async def request_json(
         raise TelemetryClientError(f"{source} returned invalid JSON") from exc
 
     if not isinstance(payload, dict):
-        raise TelemetryClientError(f"{source} returned an unexpected JSON payload")
+        raise TelemetryClientError(
+            f"{source} returned an unexpected JSON payload"
+        )
 
     return payload
-

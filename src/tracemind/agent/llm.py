@@ -10,7 +10,9 @@ from tracemind.agent.errors import ModelConfigurationError
 from tracemind.config import Settings
 
 
-MODEL_SERVICE_ERRORS = (ModelError, APIError, ChatGoogleGenerativeAIError, httpx.HTTPError)
+MODEL_SERVICE_ERRORS = (
+    ModelError, APIError, ChatGoogleGenerativeAIError, httpx.HTTPError,
+)
 
 
 def create_chat_model(settings: Settings) -> BaseChatModel:
@@ -20,7 +22,8 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             or not settings.google_api_key.get_secret_value()
         ):
             raise ModelConfigurationError(
-                "TRACEMIND_GOOGLE_API_KEY is required when LLM provider is google"
+                "TRACEMIND_GOOGLE_API_KEY is required "
+                "when LLM provider is google"
             )
         return ChatGoogleGenerativeAI(
             model=settings.llm_model,
@@ -30,7 +33,10 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             max_retries=0,
         )
 
-    if settings.openai_api_key is None or not settings.openai_api_key.get_secret_value():
+    if (
+        settings.openai_api_key is None
+        or not settings.openai_api_key.get_secret_value()
+    ):
         raise ModelConfigurationError(
             "TRACEMIND_OPENAI_API_KEY is required when LLM provider is openai"
         )

@@ -4,7 +4,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, EvidenceSource, Incident
+from tracemind.models import (
+    Diagnosis,
+    DiagnosisStatus,
+    Evidence,
+    EvidenceSource,
+    Incident,
+)
 from tracemind.models.run import RunState
 
 

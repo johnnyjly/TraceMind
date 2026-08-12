@@ -77,7 +77,9 @@ def test_payment_failure_case_rejects_checkout_only_evidence() -> None:
     assert result.required_evidence_match is False
 
 
-def test_prepare_flag_config_changes_only_selected_default(tmp_path: Path) -> None:
+def test_prepare_flag_config_changes_only_selected_default(
+    tmp_path: Path,
+) -> None:
     demo_path = tmp_path / "demo"
     source_path = demo_path / "src" / "flagd" / "demo.flagd.json"
     source_path.parent.mkdir(parents=True)

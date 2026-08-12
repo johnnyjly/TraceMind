@@ -28,13 +28,18 @@ class RunStopped(DiagnosisError):
 
 
 class RunHarness:
-    """Per-run control plane; admission is synchronous before any awaited work.
+    (
+        "Per-run control plane; admission is synchronous before any awaited "
+        "work.\n\n"
+        "    A harness belongs to one asyncio event loop. Counters and stop "
+        "decisions\n"
+        "    are never delegated to the model. S1 event files are not "
+        "recovery checkpoints.\n    "
+    )
 
-    A harness belongs to one asyncio event loop. Counters and stop decisions
-    are never delegated to the model. S1 event files are not recovery checkpoints.
-    """
-
-    def __init__(self, state: RunState, *, event_directory: Path | None = None) -> None:
+    def __init__(
+        self, state: RunState, *, event_directory: Path | None = None
+    ) -> None:
         self.state = state
         self._started = monotonic()
         self._stop: StopReason | None = None
@@ -52,8 +57,11 @@ class RunHarness:
                 )
                 self._stream = os.fdopen(fd, "w", encoding="utf-8")
             except OSError as exc:
-                logger.warning("Run %s: cannot open trace file (%s); keeping events in memory",
-                               state.id, type(exc).__name__)
+                logger.warning(
+                    "Run %s: cannot open trace file (%s); "
+                    "keeping events in memory",
+                    state.id, type(exc).__name__,
+                )
         self.emit("run.started", span_id=state.id, data={
             "prompt_version": state.prompt_version,
             "allowed_tools": list(state.allowed_tools),
@@ -62,13 +70,19 @@ class RunHarness:
 
     @property
     def remaining_seconds(self) -> float:
-        return max(0, self.state.limits.duration_seconds - (monotonic() - self._started))
+        return max(
+            0,
+            self.state.limits.duration_seconds - (monotonic() - self._started),
+        )
 
-    def emit(self, kind: str, *, span_id: UUID | None = None,
-             parent_span_id: UUID | None = None, duration_ms: float | None = None,
-             data: dict | None = None) -> None:
+    def emit(
+        self, kind: str, *, span_id: UUID | None = None,
+        parent_span_id: UUID | None = None, duration_ms: float | None = None,
+        data: dict | None = None,
+    ) -> None:
         event = RunEvent(
-            run_id=self.state.id, sequence=len(self.state.events) + 1, kind=kind,
+            run_id=self.state.id, sequence=len(self.state.events) + 1,
+            kind=kind,
             span_id=span_id or uuid4(), parent_span_id=parent_span_id,
             duration_ms=duration_ms, data=data or {},
         )
@@ -80,8 +94,10 @@ class RunHarness:
                 operation = "flush"
                 self._stream.flush()
             except OSError as exc:
-                logger.warning("Run %s: trace %s failed (%s); keeping events in memory",
-                               self.state.id, operation, type(exc).__name__)
+                logger.warning(
+                    "Run %s: trace %s failed (%s); keeping events in memory",
+                    self.state.id, operation, type(exc).__name__,
+                )
                 self._close_trace()
 
     def _close_trace(self) -> None:
@@ -104,7 +120,9 @@ class RunHarness:
         if self._stop is not None:
             raise RunStopped(self._stop)
         if self.state.status is not RunStatus.RUNNING:
-            raise RunStopped(self.state.stop_reason or StopReason.INTERNAL_ERROR)
+            raise RunStopped(
+                self.state.stop_reason or StopReason.INTERNAL_ERROR
+            )
         if self.remaining_seconds <= 0:
             self.stop(StopReason.DEADLINE)
 
@@ -113,7 +131,9 @@ class RunHarness:
         if name not in self.state.allowed_tools:
             self.stop(StopReason.TOOL_DENIED)
 
-    async def model_call(self, call: Callable[[], Awaitable[T]], *, model_name: str) -> T:
+    async def model_call(
+        self, call: Callable[[], Awaitable[T]], *, model_name: str
+    ) -> T:
         self.check_active()
         if self.state.model_calls >= self.state.limits.model_calls:
             self.stop(StopReason.MODEL_BUDGET)
@@ -126,10 +146,13 @@ class RunHarness:
         reported = False
         call_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         try:
-            async with asyncio.timeout(self.state.limits.model_timeout_seconds):
+            async with asyncio.timeout(
+                self.state.limits.model_timeout_seconds
+            ):
                 response = await call()
             self.check_active()
-            # ModelResponse contains the provider AIMessage, including usage if supplied.
+            # ModelResponse contains the provider AIMessage,
+            # including usage if supplied.
             usage = [getattr(item, "usage_metadata", None)
                      for item in getattr(response, "result", ())]
             for item in usage:
@@ -137,26 +160,36 @@ class RunHarness:
                     reported = True
                     for key in call_usage:
                         call_usage[key] += item.get(key, 0)
-                    self.state.usage.reported_input_tokens += item.get("input_tokens", 0)
-                    self.state.usage.reported_output_tokens += item.get("output_tokens", 0)
-                    self.state.usage.reported_total_tokens += item.get("total_tokens", 0)
-            self.emit("model.completed", span_id=span, parent_span_id=self.state.id,
+                    self.state.usage.reported_input_tokens += item.get(
+                        "input_tokens", 0
+                    )
+                    self.state.usage.reported_output_tokens += item.get(
+                        "output_tokens", 0
+                    )
+                    self.state.usage.reported_total_tokens += item.get(
+                        "total_tokens", 0
+                    )
+            self.emit("model.completed",
+                      span_id=span, parent_span_id=self.state.id,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"usage_reported": reported,
                             **{key: value if reported else None
                                for key, value in call_usage.items()}})
             return response
         except TimeoutError:
-            self.emit("model.failed", span_id=span, parent_span_id=self.state.id,
+            self.emit("model.failed",
+                      span_id=span, parent_span_id=self.state.id,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"error_type": "TimeoutError"})
             self.stop(StopReason.MODEL_TIMEOUT)
         except asyncio.CancelledError:
-            self.emit("model.cancelled", span_id=span, parent_span_id=self.state.id,
+            self.emit("model.cancelled",
+                      span_id=span, parent_span_id=self.state.id,
                       duration_ms=(monotonic() - started) * 1000)
             raise
         except Exception as exc:
-            self.emit("model.failed", span_id=span, parent_span_id=self.state.id,
+            self.emit("model.failed",
+                      span_id=span, parent_span_id=self.state.id,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"error_type": type(exc).__name__})
             if isinstance(exc, MODEL_SERVICE_ERRORS):
@@ -178,9 +211,13 @@ class RunHarness:
         signature = hashlib.sha256(json.dumps(
             [name, arguments], sort_keys=True, separators=(",", ":")
         ).encode()).hexdigest()
-        if self._signatures.get(signature, 0) >= self.state.limits.identical_tool_calls:
+        if (
+            self._signatures.get(signature, 0)
+            >= self.state.limits.identical_tool_calls
+        ):
             self.stop(StopReason.REPEATED_TOOL_CALL)
-        # No await before these reservations: parallel tool calls share one budget.
+        # No await before these reservations:
+        # parallel tool calls share one budget.
         self._signatures[signature] = self._signatures.get(signature, 0) + 1
         self.state.tool_calls[name] = self.state.tool_calls.get(name, 0) + 1
         span = uuid4()
@@ -222,7 +259,10 @@ class RunHarness:
 
     async def drain(self) -> None:
         """Cancel sibling tool tasks before producing a terminal snapshot."""
-        tasks = [task for task in self._active if task is not asyncio.current_task()]
+        tasks = [
+            task for task in self._active
+            if task is not asyncio.current_task()
+        ]
         for task in tasks:
             task.cancel()
         if tasks:
