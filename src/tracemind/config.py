@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     )
     agent_allowed_tools: tuple[ToolName, ...] = TOOL_NAMES
     agent_trace_directory: Path | None = Path("artifacts/runs")
+    agent_run_database: Path = Path("artifacts/runs.sqlite3")
+    agent_checkpoint_database: Path = Path("artifacts/checkpoints.sqlite3")
     agent_retry_attempts: int = Field(default=2, ge=0, le=5)
     agent_retry_backoff_seconds: float = Field(
         default=0.25, ge=0, allow_inf_nan=False

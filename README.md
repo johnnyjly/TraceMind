@@ -13,7 +13,7 @@ not part of the current implementation.
 
 ## Current status
 
-Milestones 1 through 3 provide:
+The current single-agent baseline provides:
 
 - typed incident, evidence, and diagnosis models;
 - environment-based application settings;
@@ -23,7 +23,7 @@ Milestones 1 through 3 provide:
 - a bounded LangGraph single-agent loop with read-only telemetry tools;
 - Gemini and OpenAI model providers selected through environment settings;
 - validation that a completed diagnosis cites evidence actually returned by a tool;
-- a synchronous diagnosis API endpoint;
+- synchronous diagnosis and queued persistent run API endpoints;
 - unit tests for the public model and API contracts.
 
 ## Requirements
@@ -135,9 +135,40 @@ the file can be missing or incomplete. Expected provider and telemetry errors
 are classified separately from unexpected code errors (`internal_error`).
 
 Evaluation reports include `run_state` with counters, events, and stop reason.
-The run state is currently in memory; JSONL events are not resumable checkpoints.
-S2 context controls and S3 recovery are described below. Persistent recovery
-remains the next stage in [DESIGN.md](DESIGN.md).
+The synchronous diagnosis and evaluation paths keep run state in memory. S4
+persistence applies to the queued `/api/v1/runs` path described below. JSONL
+events are diagnostic output, not resumable checkpoints.
+
+## Persistent local runs (S4)
+
+Run the API and worker in separate terminals with the same `.env`:
+
+```bash
+uv run uvicorn tracemind.api.app:app --reload
+uv run python scripts/run_worker.py
+```
+
+Submit the same JSON body shown above to `POST /api/v1/runs`. It returns 202
+and a run ID. `Idempotency-Key` is optional; repeating a request with the same
+key and body returns its existing run, while using that key for another body
+returns 409. Poll `GET /api/v1/runs/{id}` and read the diagnosis and evidence
+at `GET /api/v1/runs/{id}/result` when available. `POST
+/api/v1/runs/{id}/cancel` requests cancellation; `POST
+/api/v1/runs/{id}/resume` requeues an interrupted run after its worker lease
+expires. The worker also reclaims expired leases automatically. `--once`
+processes at most one queued run.
+
+The run ledger and evidence use `TRACEMIND_AGENT_RUN_DATABASE`; LangGraph
+checkpoints use `TRACEMIND_AGENT_CHECKPOINT_DATABASE`. Defaults are separate
+SQLite files under `artifacts/`. Back up both files together. The worker
+restores call budgets, evidence, elapsed deadline, and graph state after a
+restart. Calls interrupted between an external response and a checkpoint can
+be retried, with previous attempts still consuming budget; ambiguous in-flight
+calls are marked in the run events. Cancellation stops admission of new calls
+and interrupts the active worker task. This local setup is designed for one
+worker process, without shared-service authentication or admission controls.
+
+S2 context controls and S3 recovery are described below.
 
 ## Bounded context and evidence retrieval (S2)
 

@@ -1,0 +1,172 @@
+"""Durable local worker for queued and interrupted diagnosis runs."""
+
+import asyncio
+import logging
+import os
+from collections.abc import Callable
+from contextlib import suppress
+from datetime import UTC, datetime
+
+import httpx
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+from tracemind.agent.errors import DiagnosisError, ModelConfigurationError
+from tracemind.agent.llm import create_chat_model, create_fallback_model
+from tracemind.agent.persistence import ClaimedRun, RunConflict, RunRepository
+from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
+from tracemind.config import Settings
+from tracemind.models.run import RunStatus, StopReason
+from tracemind.telemetry import (
+    JaegerClient, OpenSearchClient, PrometheusClient,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class RunWorker:
+    """Poll SQLite, lease one run, and resume its LangGraph thread."""
+
+    def __init__(
+        self, settings: Settings, *, repository: RunRepository | None = None,
+        service_factory: Callable[[AsyncSqliteSaver, httpx.AsyncClient],
+                                  DiagnosisService] | None = None,
+    ) -> None:
+        self.settings = settings
+        self.repository = repository or RunRepository(
+            settings.agent_run_database
+        )
+        self._service_factory = service_factory
+
+    def _service(
+        self, saver: AsyncSqliteSaver, http_client: httpx.AsyncClient,
+    ) -> DiagnosisService:
+        if self._service_factory is not None:
+            return self._service_factory(saver, http_client)
+        settings = self.settings
+        return DiagnosisService(
+            PrometheusClient(str(settings.prometheus_url), http_client),
+            JaegerClient(str(settings.jaeger_url), http_client),
+            OpenSearchClient(
+                str(settings.opensearch_url),
+                settings.opensearch_logs_index, http_client,
+            ),
+            LangChainAgentRunner(
+                create_chat_model(settings),
+                fallback_model=create_fallback_model(settings),
+                checkpointer=saver,
+            ),
+            recursion_limit=settings.agent_recursion_limit,
+            limits=settings.run_limits,
+            allowed_tools=settings.agent_allowed_tools,
+            event_directory=settings.agent_trace_directory,
+        )
+
+    async def _monitor(self, claim: ClaimedRun, task: asyncio.Task) -> None:
+        """Renew ownership and deliver cancellation to the active task."""
+        while not task.done():
+            await asyncio.sleep(1)
+            if task.done():
+                break
+            try:
+                cancel = self.repository.heartbeat(
+                    claim.run.state.id, claim.owner
+                )
+            except RunConflict:
+                cancel = True
+            if cancel:
+                task.cancel()
+                break
+
+    async def run_once(self) -> bool:
+        """Execute at most one claim; return False when the queue is empty."""
+        claim = self.repository.claim_next()
+        if claim is None:
+            return False
+        state = claim.run.state
+        evidence = claim.run.evidence
+        run_id = state.id
+        checkpoint_path = self.settings.agent_checkpoint_database
+        os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            descriptor = os.open(
+                checkpoint_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600,
+            )
+        except FileExistsError:
+            pass
+        else:
+            os.close(descriptor)
+
+        try:
+            async with AsyncSqliteSaver.from_conn_string(
+                str(checkpoint_path)
+            ) as saver:
+                checkpoint = await saver.aget_tuple({
+                    "configurable": {"thread_id": str(run_id)}
+                })
+                async with httpx.AsyncClient(timeout=20) as http_client:
+                    service = self._service(saver, http_client)
+                    task = asyncio.create_task(service.run_persisted(
+                        state, evidence,
+                        persist=lambda current, items: (
+                            self.repository.save_progress(
+                                run_id, claim.owner, current, items
+                            )
+                        ),
+                        is_cancelled=lambda: self.repository.should_stop(
+                            run_id, claim.owner
+                        ),
+                        resume=claim.resuming,
+                        graph_resume=claim.resuming and checkpoint is not None,
+                    ))
+                    monitor = asyncio.create_task(self._monitor(claim, task))
+                    try:
+                        run = await task
+                        state, evidence = run.state or state, run.evidence
+                    except DiagnosisError as exc:
+                        state = exc.state or state
+                        evidence = exc.evidence
+                    except asyncio.CancelledError:
+                        state.status = RunStatus.CANCELLED
+                        state.stop_reason = StopReason.CANCELLED
+                    finally:
+                        monitor.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await monitor
+        except RunConflict:
+            logger.warning("Run %s: worker lease lost", run_id)
+            return True
+        except Exception as exc:
+            logger.error("Run %s: worker failed (%s)",
+                         run_id, type(exc).__name__)
+            state.status = RunStatus.FAILED
+            state.stop_reason = (
+                StopReason.MODEL_ERROR
+                if isinstance(exc, ModelConfigurationError)
+                else StopReason.INTERNAL_ERROR
+            )
+
+        if state.status not in {
+            RunStatus.SUCCEEDED, RunStatus.INCONCLUSIVE,
+            RunStatus.FAILED, RunStatus.CANCELLED,
+        }:
+            state.status = RunStatus.FAILED
+            state.stop_reason = StopReason.INTERNAL_ERROR
+        if state.finished_at is None:
+            state.finished_at = datetime.now(UTC)
+        try:
+            self.repository.finish(run_id, claim.owner, state, evidence)
+        except RunConflict:
+            logger.warning("Run %s: worker lease lost before finalization",
+                           run_id)
+            return True
+        logger.info("Run %s finished: %s", run_id, state.status.value)
+        return True
+
+    async def run_forever(self, *, poll_seconds: float = 1) -> None:
+        """Keep claiming work, including leases left by dead processes."""
+        while True:
+            if not await self.run_once():
+                await asyncio.sleep(poll_seconds)

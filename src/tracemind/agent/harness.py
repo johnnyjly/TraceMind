@@ -47,28 +47,37 @@ class RunHarness:
     """
 
     def __init__(
-        self, state: RunState, *, event_directory: Path | None = None
+        self, state: RunState, *, event_directory: Path | None = None,
+        persist: Callable[[RunState], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        resume: bool = False,
+        graph_resume: bool | None = None,
     ) -> None:
         """Start a run timer and optionally open an exclusive JSONL trace
         file.
         """
         self.state = state
         self._started = monotonic()
+        self._persist = persist
+        self._is_cancelled = is_cancelled
+        self.resuming = resume
+        self.graph_resuming = resume if graph_resume is None else graph_resume
         self._stop: StopReason | None = None
-        self._signatures: dict[str, int] = {}
+        self._signatures = dict(state.tool_signatures)
         self._active: set[asyncio.Task[Any]] = set()
         self._model_span: UUID | None = None
         self.validate_draft: Callable[[Any], None] | None = None
-        self._result_fingerprints: set[str] = set()
-        self._progress = 0
-        self._last_progress: int | None = None
+        self._result_fingerprints = set(state.result_fingerprints)
+        self._progress = state.progress_count
+        self._last_progress = state.last_progress
         self._stream = None
         if event_directory is not None:
             try:
                 event_directory.mkdir(parents=True, exist_ok=True)
                 fd = os.open(
                     event_directory / f"{state.id}.jsonl",
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    (os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                     if resume else os.O_WRONLY | os.O_CREAT | os.O_EXCL),
                     0o600,
                 )
                 self._stream = os.fdopen(fd, "w", encoding="utf-8")
@@ -78,21 +87,49 @@ class RunHarness:
                     "keeping events in memory",
                     state.id, type(exc).__name__,
                 )
-        self.emit("run.started", span_id=state.id, data={
-            "prompt_version": state.prompt_version,
-            "allowed_tools": list(state.allowed_tools),
-            **state.limits.model_dump(),
-        })
+        if not resume:
+            self.emit("run.started", span_id=state.id, data={
+                "prompt_version": state.prompt_version,
+                "allowed_tools": list(state.allowed_tools),
+                **state.limits.model_dump(),
+            })
+        else:
+            self.emit("run.resumed", span_id=state.id)
+            started = {
+                event.span_id: event for event in state.events
+                if event.kind in {"model.started", "tool.started"}
+            }
+            closed = {
+                event.span_id for event in state.events
+                if event.kind in {
+                    "model.completed", "model.failed", "model.cancelled",
+                    "tool.completed", "tool.failed", "tool.cancelled",
+                }
+            }
+            for span_id, event in started.items():
+                if span_id not in closed:
+                    self.emit(
+                        "recovery.ambiguous_call", span_id=span_id,
+                        parent_span_id=state.id,
+                        data={"call_kind": event.kind},
+                    )
+
+    def save(self) -> None:
+        """Persist the mutable execution ledger when a store is configured."""
+        if self._persist is not None:
+            self._persist(self.state)
 
     @property
     def remaining_seconds(self) -> float:
         """Return the nonnegative run time remaining on the monotonic
         clock.
         """
-        return max(
-            0,
-            self.state.limits.duration_seconds - (monotonic() - self._started),
-        )
+        if self.state.deadline_at is not None:
+            return max(
+                0, (self.state.deadline_at - datetime.now(UTC)).total_seconds()
+            )
+        return max(0, self.state.limits.duration_seconds -
+                   (monotonic() - self._started))
 
     def emit(
         self, kind: str, *, span_id: UUID | None = None,
@@ -112,6 +149,7 @@ class RunHarness:
             duration_ms=duration_ms, data=data or {},
         )
         self.state.events.append(event)
+        self.save()
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "%s", event.model_dump_json(),
@@ -159,6 +197,8 @@ class RunHarness:
         """Raise RunStopped if stopped, finalized, or past the run deadline."""
         if self._stop is not None:
             raise RunStopped(self._stop)
+        if self._is_cancelled is not None and self._is_cancelled():
+            self.stop(StopReason.CANCELLED)
         if self.state.status is not RunStatus.RUNNING:
             raise RunStopped(
                 self.state.stop_reason or StopReason.INTERNAL_ERROR
@@ -234,6 +274,8 @@ class RunHarness:
             ):
                 self.stop(StopReason.NO_PROGRESS)
         self._last_progress = self._progress
+        self.state.last_progress = self._last_progress
+        self.save()
 
     def repair_diagnosis(self) -> None:
         """Reserve one schema or citation repair under the run limits."""
@@ -322,6 +364,7 @@ class RunHarness:
                 self.state.usage.reported_model_calls += 1
             else:
                 self.state.usage.unreported_model_calls += 1
+            self.save()
 
     async def tool_call(
         self, name: str, arguments: dict[str, object],
@@ -338,6 +381,8 @@ class RunHarness:
         ):
             self.stop(StopReason.REPEATED_TOOL_CALL)
         self._signatures[signature] = self._signatures.get(signature, 0) + 1
+        self.state.tool_signatures = dict(self._signatures)
+        self.save()
         task = asyncio.current_task()
         assert task is not None
         self._active.add(task)
@@ -353,6 +398,11 @@ class RunHarness:
                             if fingerprint not in self._result_fingerprints:
                                 self._result_fingerprints.add(fingerprint)
                                 self._progress += 1
+                    self.state.result_fingerprints = sorted(
+                        self._result_fingerprints
+                    )
+                    self.state.progress_count = self._progress
+                    self.save()
                     return result
                 except (TimeoutError, TelemetryClientError) as exc:
                     failure = classify_failure(exc)
@@ -441,7 +491,10 @@ class RunHarness:
         self.state.status = status
         self.state.stop_reason = reason
         self.state.finished_at = datetime.now(UTC)
-        self.state.elapsed_ms = (monotonic() - self._started) * 1000
+        self.state.elapsed_ms = (
+            (datetime.now(UTC) - self.state.started_at).total_seconds()
+            * 1000
+        )
         try:
             self.emit("run.finished", span_id=self.state.id,
                       duration_ms=self.state.elapsed_ms,

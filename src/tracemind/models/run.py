@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 from tracemind.models.incident import Incident
+from tracemind.models.diagnosis import Diagnosis
 
 
 ToolName = Literal[
@@ -46,6 +47,7 @@ class RunLimits(BaseModel):
 class RunStatus(StrEnum):
     """Execution lifecycle status, separate from diagnostic certainty."""
 
+    QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     INCONCLUSIVE = "inconclusive"
@@ -105,8 +107,7 @@ class TokenUsage(BaseModel):
 
 
 class RunState(BaseModel):
-    """Mutable in-memory investigation state, counters, evidence IDs, and
-    events.
+    """Mutable investigation state, counters, evidence IDs, and events.
     """
 
     id: UUID = Field(default_factory=uuid4)
@@ -119,6 +120,7 @@ class RunState(BaseModel):
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    deadline_at: datetime | None = None
     finished_at: datetime | None = None
     elapsed_ms: float | None = None
     model_calls: int = 0
@@ -128,6 +130,11 @@ class RunState(BaseModel):
     model_switches: int = 0
     active_model: str | None = None
     tool_calls: dict[str, int] = Field(default_factory=dict)
+    tool_signatures: dict[str, int] = Field(default_factory=dict)
+    result_fingerprints: list[str] = Field(default_factory=list)
+    progress_count: int = 0
+    last_progress: int | None = None
     evidence_ids: list[UUID] = Field(default_factory=list)
+    diagnosis: Diagnosis | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
     events: list[RunEvent] = Field(default_factory=list)

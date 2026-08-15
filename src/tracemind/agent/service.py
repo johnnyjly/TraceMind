@@ -1,7 +1,7 @@
 """Diagnosis orchestration, structured proposals, and completion checks."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -12,6 +12,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, Field
 
 from tracemind.agent.errors import DiagnosisError
@@ -104,7 +105,7 @@ class LangChainAgentRunner:
     """Run a LangChain tool loop with structured diagnosis output.
 
     Each invocation builds a fresh graph using the supplied run harness.
-    Persistent checkpoints and cross-run memory are not configured.
+    A persistent worker can supply a checkpointer for graph replay.
     """
 
     def __init__(
@@ -113,6 +114,7 @@ class LangChainAgentRunner:
         *,
         callbacks: Sequence[BaseCallbackHandler] | None = None,
         fallback_model: BaseChatModel | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         """Retain a model and optional callbacks for subsequent
         investigations.
@@ -120,6 +122,7 @@ class LangChainAgentRunner:
         self._model = model
         self._callbacks = list(callbacks or ())
         self._fallback_model = fallback_model
+        self._checkpointer = checkpointer
 
     async def run(
         self,
@@ -142,13 +145,18 @@ class LangChainAgentRunner:
             system_prompt=SYSTEM_PROMPT,
             response_format=DiagnosisDraft,
             middleware=[HarnessMiddleware(harness, self._fallback_model)],
+            checkpointer=self._checkpointer,
         )
+        config = {
+            "recursion_limit": recursion_limit,
+            "callbacks": self._callbacks,
+        }
+        if self._checkpointer is not None:
+            config["configurable"] = {"thread_id": str(harness.state.id)}
         result = await agent.ainvoke(
-            {"messages": [{"role": "user", "content": prompt}]},
-            {
-                "recursion_limit": recursion_limit,
-                "callbacks": self._callbacks,
-            },
+            (None if harness.graph_resuming else
+             {"messages": [{"role": "user", "content": prompt}]}),
+            config,
         )
         return DiagnosisDraft.model_validate(result["structured_response"])
 
@@ -223,8 +231,46 @@ class DiagnosisService:
             limits=self._limits.model_copy(deep=True),
             allowed_tools=self._allowed_tools,
         )
-        harness = RunHarness(state, event_directory=self._event_directory)
         collector = EvidenceCollector(max_bytes=state.limits.observation_bytes)
+        return await self._execute(state, collector)
+
+    async def run_persisted(
+        self, state: RunState, evidence: list[Evidence], *,
+        persist: Callable[[RunState, list[Evidence]], None],
+        is_cancelled: Callable[[], bool],
+        resume: bool,
+        graph_resume: bool,
+    ) -> DiagnosisRun:
+        """Continue a leased run with its evidence and admission ledger."""
+        collector: EvidenceCollector
+        collector = EvidenceCollector(
+            max_bytes=state.limits.observation_bytes,
+            initial=evidence,
+            on_change=lambda: persist(state, collector.evidence),
+        )
+        return await self._execute(
+            state, collector, persist=persist, is_cancelled=is_cancelled,
+            resume=resume, graph_resume=graph_resume,
+        )
+
+    async def _execute(
+        self, state: RunState, collector: EvidenceCollector, *,
+        persist: Callable[[RunState, list[Evidence]], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        resume: bool = False,
+        graph_resume: bool = False,
+    ) -> DiagnosisRun:
+        """Bind run-local tools and finalize either a fresh or resumed run."""
+        incident = state.incident
+        start = state.investigation_start
+        end = state.investigation_end
+        harness = RunHarness(
+            state, event_directory=self._event_directory,
+            persist=(lambda current: persist(current, collector.evidence))
+            if persist else None,
+            is_cancelled=is_cancelled, resume=resume,
+            graph_resume=graph_resume,
+        )
         harness.validate_draft = lambda draft: self._validate_draft(
             draft, collector.evidence, start=start, end=end
         )
@@ -277,6 +323,8 @@ class DiagnosisService:
                 reason = StopReason.DEADLINE
             else:
                 reason = StopReason.RECURSION_LIMIT
+            if reason is StopReason.CANCELLED:
+                terminal_status = RunStatus.CANCELLED
             if reason in {
                 StopReason.MODEL_BUDGET, StopReason.TOOL_BUDGET,
                 StopReason.REPEATED_TOOL_CALL, StopReason.RECURSION_LIMIT,
@@ -316,13 +364,15 @@ class DiagnosisService:
         finally:
             await harness.drain()
             state.evidence_ids = [item.id for item in collector.evidence]
+            if terminal_status in {RunStatus.SUCCEEDED,
+                                   RunStatus.INCONCLUSIVE}:
+                state.diagnosis = Diagnosis(
+                    incident_id=incident.id, **draft.model_dump(),
+                )
             harness.finish(terminal_status, reason)
 
         return DiagnosisRun(
-            diagnosis=Diagnosis(
-                incident_id=incident.id,
-                **draft.model_dump(),
-            ),
+            diagnosis=state.diagnosis,
             evidence=collector.evidence,
             tool_calls=dict(state.tool_calls),
             state=state,

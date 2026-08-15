@@ -49,16 +49,24 @@ class EvidenceCollector:
     """Store run-local observations with exact deduplication and stable IDs.
 
     The byte limit covers serialized evidence, not total Python memory or
-    backend response buffers. Stored observations are not persistent.
+    backend response buffers. A persistent run can snapshot additions through
+    the on_change callback.
     """
 
-    def __init__(self, *, max_bytes: int = 8_388_608) -> None:
+    def __init__(
+        self, *, max_bytes: int = 8_388_608,
+        initial: Sequence[Evidence] = (),
+        on_change: Callable[[], None] | None = None,
+    ) -> None:
         """Initialize an evidence index with a serialized-byte capacity."""
         self._evidence: dict[str, Evidence] = {}
         self._fingerprints: dict[str, str] = {}
         self._documents: dict[str, str] = {}
         self._max_bytes = max_bytes
+        self._on_change = None
         self.bytes_used = 0
+        self.add(initial)
+        self._on_change = on_change
 
     def add(self, items: Sequence[Evidence]) -> list[dict[str, object]]:
         """Store observations and return previews with canonical IDs.
@@ -84,6 +92,8 @@ class EvidenceCollector:
                 self._documents[evidence_id] = document
                 self._fingerprints[fingerprint] = evidence_id
                 self.bytes_used += size
+                if self._on_change is not None:
+                    self._on_change()
             if evidence_id not in ids:
                 ids.append(evidence_id)
         return [self.preview(key) for key in ids]
