@@ -32,6 +32,15 @@ class RunLimits(BaseModel):
     duration_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     model_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     tool_timeout_seconds: float = Field(default=20, gt=0, allow_inf_nan=False)
+    retry_attempts: int = Field(default=2, ge=0, le=5)
+    retry_backoff_seconds: float = Field(
+        default=0.25, ge=0, allow_inf_nan=False
+    )
+    retry_max_backoff_seconds: float = Field(
+        default=4, ge=0, allow_inf_nan=False
+    )
+    diagnosis_repairs: int = Field(default=1, ge=0, le=3)
+    no_progress_rounds: int = Field(default=3, ge=1)
 
 
 class RunStatus(StrEnum):
@@ -65,6 +74,7 @@ class StopReason(StrEnum):
     INVALID_DIAGNOSIS = "invalid_diagnosis"
     INTERNAL_ERROR = "internal_error"
     CANCELLED = "cancelled"
+    NO_PROGRESS = "no_progress"
 
 
 class RunEvent(BaseModel):
@@ -112,6 +122,11 @@ class RunState(BaseModel):
     finished_at: datetime | None = None
     elapsed_ms: float | None = None
     model_calls: int = 0
+    backend_attempts: int = 0
+    diagnosis_repairs: int = 0
+    stalled_rounds: int = 0
+    model_switches: int = 0
+    active_model: str | None = None
     tool_calls: dict[str, int] = Field(default_factory=dict)
     evidence_ids: list[UUID] = Field(default_factory=list)
     usage: TokenUsage = Field(default_factory=TokenUsage)

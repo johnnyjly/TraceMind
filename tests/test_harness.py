@@ -98,7 +98,8 @@ def tool_call(name="query_metrics", arguments=None) -> AIMessage:
 
 def diagnosis(messages, *, override=None) -> AIMessage:
     observation = next(message for message in reversed(messages)
-                       if isinstance(message, ToolMessage))
+                       if isinstance(message, ToolMessage)
+                       and message.name != "DiagnosisDraft")
     evidence_id = json.loads(observation.content)[0]["id"]
     fields = {
         "status": "complete", "root_cause": "Payment Charge failed",
@@ -278,7 +279,8 @@ def test_parallel_calls_share_budget_and_cancel_started_sibling(tmp_path):
 
 
 @pytest.mark.parametrize("limits, reason", [
-    (RunLimits(tool_timeout_seconds=0.02), StopReason.TOOL_TIMEOUT),
+    (RunLimits(tool_timeout_seconds=0.02, retry_backoff_seconds=0),
+     StopReason.REPEATED_TOOL_CALL),
     (RunLimits(duration_seconds=0.05), StopReason.DEADLINE),
 ])
 def test_tool_timeout_and_run_deadline_cancel_backend(
@@ -286,10 +288,19 @@ def test_tool_timeout_and_run_deadline_cancel_backend(
 ):
     telemetry = Telemetry(block=True)
     model = ScriptedModel(respond=lambda messages, calls: tool_call())
-    with pytest.raises(DiagnosisError) as caught:
-        run_service(make_service(model, telemetry, tmp_path, limits=limits))
-    assert caught.value.state.stop_reason is reason
-    assert caught.value.state.status is RunStatus.FAILED
+    service = make_service(model, telemetry, tmp_path, limits=limits)
+    if reason is StopReason.DEADLINE:
+        with pytest.raises(DiagnosisError) as caught:
+            run_service(service)
+        state = caught.value.state
+        assert state.status is RunStatus.FAILED
+    else:
+        run = run_service(service)
+        state = run.state
+        assert run.diagnosis.status is DiagnosisStatus.INCONCLUSIVE
+        assert len(telemetry.calls) == 6
+        assert state.backend_attempts == 6
+    assert state.stop_reason is reason
     assert telemetry.cancelled
     assert events_at(tmp_path)[-1]["data"]["reason"] == reason.value
 
@@ -302,24 +313,27 @@ def test_model_timeout_records_unknown_usage(tmp_path):
     with pytest.raises(DiagnosisError) as caught:
         run_service(make_service(
             model, Telemetry(), tmp_path,
-            limits=RunLimits(model_timeout_seconds=0.02),
+            limits=RunLimits(
+                model_timeout_seconds=0.02, retry_backoff_seconds=0
+            ),
         ))
     assert caught.value.state.stop_reason is StopReason.MODEL_TIMEOUT
-    assert caught.value.state.usage.unreported_model_calls == 1
+    assert caught.value.state.usage.unreported_model_calls == 3
+    assert model.calls == 3
     assert caught.value.state.usage.reported_model_calls == 0
     assert any(
         event["kind"] == "model.failed" for event in events_at(tmp_path)
     )
 
 
-@pytest.mark.parametrize("override, observed_at, message", [
-    ({"evidence_ids": [str(uuid4())]}, END, "no telemetry tool returned"),
-    ({"evidence_ids": []}, END, "must cite telemetry"),
-    ({"root_cause": "   "}, END, "must explain"),
-    ({}, START - timedelta(seconds=1), "outside the investigation window"),
+@pytest.mark.parametrize("override, observed_at", [
+    ({"evidence_ids": [str(uuid4())]}, END),
+    ({"evidence_ids": []}, END),
+    ({"root_cause": "   "}, END),
+    ({}, START - timedelta(seconds=1)),
 ])
 def test_completion_gate_rejects_unsupported_final_result(
-    tmp_path, override, observed_at, message,
+    tmp_path, override, observed_at,
 ):
     model = ScriptedModel(
         respond=lambda messages, calls: (
@@ -327,13 +341,16 @@ def test_completion_gate_rejects_unsupported_final_result(
             else diagnosis(messages, override=override)
         )
     )
-    with pytest.raises(DiagnosisError, match=message) as caught:
-        run_service(make_service(
-            model, Telemetry(observed_at=observed_at), tmp_path
-        ))
-    assert caught.value.state.stop_reason is StopReason.INVALID_DIAGNOSIS
-    assert len(caught.value.evidence) == 1
-    assert events_at(tmp_path)[-1]["data"]["status"] == "failed"
+    run = run_service(make_service(
+        model, Telemetry(observed_at=observed_at), tmp_path
+    ))
+    assert run.state.stop_reason is StopReason.INVALID_DIAGNOSIS
+    assert run.diagnosis.status is DiagnosisStatus.INCONCLUSIVE
+    assert run.diagnosis.evidence_ids == []
+    assert len(run.evidence) == 1
+    assert model.calls == 3
+    assert run.state.diagnosis_repairs == 1
+    assert events_at(tmp_path)[-1]["data"]["status"] == "inconclusive"
 
 
 def test_backend_errors_preserve_safe_trace_without_raw_data(tmp_path):
@@ -393,7 +410,8 @@ def test_framework_schema_repairs_cannot_bypass_model_budget(tmp_path):
     model = ScriptedModel(respond=lambda messages, calls:
                           tool_call("DiagnosisDraft", {"status": "invalid"}))
     run = run_service(make_service(
-        model, Telemetry(), tmp_path, limits=RunLimits(model_calls=2)
+        model, Telemetry(), tmp_path,
+        limits=RunLimits(model_calls=2, diagnosis_repairs=2),
     ))
     assert run.state.stop_reason is StopReason.MODEL_BUDGET
     assert model.calls == 2

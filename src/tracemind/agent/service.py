@@ -112,12 +112,14 @@ class LangChainAgentRunner:
         model: BaseChatModel,
         *,
         callbacks: Sequence[BaseCallbackHandler] | None = None,
+        fallback_model: BaseChatModel | None = None,
     ) -> None:
         """Retain a model and optional callbacks for subsequent
         investigations.
         """
         self._model = model
         self._callbacks = list(callbacks or ())
+        self._fallback_model = fallback_model
 
     async def run(
         self,
@@ -130,15 +132,16 @@ class LangChainAgentRunner:
         """Execute the bounded loop and parse its structured diagnosis
         proposal.
 
-        Evidence provenance and completion checks are performed by the
-        service after this method returns.
+        The harness invokes the service's completion validator during
+        bounded diagnosis repair. The service validates the final proposal
+        again after this method returns.
         """
         agent = create_agent(
             model=self._model,
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
             response_format=DiagnosisDraft,
-            middleware=[HarnessMiddleware(harness)],
+            middleware=[HarnessMiddleware(harness, self._fallback_model)],
         )
         result = await agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
@@ -222,6 +225,9 @@ class DiagnosisService:
         )
         harness = RunHarness(state, event_directory=self._event_directory)
         collector = EvidenceCollector(max_bytes=state.limits.observation_bytes)
+        harness.validate_draft = lambda draft: self._validate_draft(
+            draft, collector.evidence, start=start, end=end
+        )
         tools = create_telemetry_tools(
             self._prometheus,
             self._jaeger,
@@ -275,6 +281,7 @@ class DiagnosisService:
                 StopReason.MODEL_BUDGET, StopReason.TOOL_BUDGET,
                 StopReason.REPEATED_TOOL_CALL, StopReason.RECURSION_LIMIT,
                 StopReason.CONTEXT_LIMIT,
+                StopReason.NO_PROGRESS, StopReason.INVALID_DIAGNOSIS,
             }:
                 terminal_status = RunStatus.INCONCLUSIVE
                 draft = DiagnosisDraft(

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,9 @@ from uuid import UUID, uuid4
 
 from tracemind.agent.errors import DiagnosisError
 from tracemind.agent.llm import MODEL_SERVICE_ERRORS
+from tracemind.agent.recovery import (
+    Failure, ModelCallFailed, ToolUnavailable, classify_failure,
+)
 from tracemind.models.run import RunEvent, RunState, RunStatus, StopReason
 from tracemind.telemetry.errors import TelemetryClientError
 
@@ -54,6 +58,10 @@ class RunHarness:
         self._signatures: dict[str, int] = {}
         self._active: set[asyncio.Task[Any]] = set()
         self._model_span: UUID | None = None
+        self.validate_draft: Callable[[Any], None] | None = None
+        self._result_fingerprints: set[str] = set()
+        self._progress = 0
+        self._last_progress: int | None = None
         self._stream = None
         if event_directory is not None:
             try:
@@ -170,6 +178,74 @@ class RunHarness:
             self.stop(StopReason.TOOL_DENIED)
 
     async def model_call(
+        self, call: Callable[[], Awaitable[T]], *, model_name: str,
+        allow_fallback: bool = False,
+    ) -> T:
+        """Retry transient calls within the shared call budget and deadline."""
+        for attempt in range(self.state.limits.retry_attempts + 1):
+            try:
+                return await self._model_attempt(call, model_name=model_name)
+            except (TimeoutError, *MODEL_SERVICE_ERRORS) as exc:
+                failure = classify_failure(exc)
+                if (
+                    failure.retryable
+                    and attempt < self.state.limits.retry_attempts
+                ):
+                    await self._wait_retry("model", attempt, failure)
+                    continue
+                timed_out = isinstance(exc, TimeoutError)
+                if allow_fallback and failure.retryable:
+                    raise ModelCallFailed(
+                        failure, timed_out=timed_out
+                    ) from exc
+                self.stop(StopReason.MODEL_TIMEOUT if timed_out
+                          else StopReason.MODEL_ERROR)
+        raise AssertionError("retry loop must return or raise")
+
+    async def _wait_retry(
+        self, target: str, attempt: int, failure: Failure,
+    ) -> None:
+        """Schedule cancellable backoff, honoring server hints and deadline."""
+        self.check_active()
+        limits = self.state.limits
+        delay = min(limits.retry_max_backoff_seconds,
+                    limits.retry_backoff_seconds * 2 ** attempt)
+        delay *= random.uniform(0.5, 1)
+        delay = max(delay, failure.retry_after or 0)
+        if delay >= self.remaining_seconds:
+            self.stop(StopReason.DEADLINE)
+        self.emit("recovery.retry_scheduled", parent_span_id=self.state.id,
+                  data={"target": target, "retry": attempt + 1,
+                        "delay_seconds": delay, "category": failure.category,
+                        "status_code": failure.status_code})
+        await asyncio.sleep(delay)
+        self.check_active()
+
+    def check_progress(self) -> None:
+        """Stop after bounded rounds without a new usable tool observation."""
+        if self._last_progress is not None:
+            self.state.stalled_rounds = (
+                self.state.stalled_rounds + 1
+                if self._last_progress == self._progress else 0
+            )
+            if (
+                self.state.stalled_rounds
+                >= self.state.limits.no_progress_rounds
+            ):
+                self.stop(StopReason.NO_PROGRESS)
+        self._last_progress = self._progress
+
+    def repair_diagnosis(self) -> None:
+        """Reserve one schema or citation repair under the run limits."""
+        self.emit("diagnosis.rejected", parent_span_id=self.state.id,
+                  data={"reason": StopReason.INVALID_DIAGNOSIS.value})
+        if self.state.diagnosis_repairs >= self.state.limits.diagnosis_repairs:
+            self.stop(StopReason.INVALID_DIAGNOSIS)
+        self.state.diagnosis_repairs += 1
+        self.emit("diagnosis.repair_requested", parent_span_id=self.state.id,
+                  data={"repair": self.state.diagnosis_repairs})
+
+    async def _model_attempt(
         self, call: Callable[[], Awaitable[T]], *, model_name: str
     ) -> T:
         """Reserve one model call, enforce its timeout, and record
@@ -177,13 +253,13 @@ class RunHarness:
 
         Failed admitted calls consume budget. Missing provider usage is
         recorded as unknown. Expected provider errors and timeouts stop the
-        run; cancellation and unexpected exceptions propagate. No retries
-        are made.
+        attempt; cancellation and unexpected exceptions propagate.
         """
         self.check_active()
         if self.state.model_calls >= self.state.limits.model_calls:
             self.stop(StopReason.MODEL_BUDGET)
         self.state.model_calls += 1
+        self.state.active_model = model_name
         span = uuid4()
         self._model_span = span
         started = monotonic()
@@ -196,7 +272,6 @@ class RunHarness:
                 self.state.limits.model_timeout_seconds
             ):
                 response = await call()
-            self.check_active()
             # ModelResponse contains the provider AIMessage,
             # including usage if supplied.
             usage = [getattr(item, "usage_metadata", None)
@@ -221,13 +296,14 @@ class RunHarness:
                       data={"usage_reported": reported,
                             **{key: value if reported else None
                                for key, value in call_usage.items()}})
+            self.check_active()
             return response
         except TimeoutError:
             self.emit("model.failed",
                       span_id=span, parent_span_id=self.state.id,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"error_type": "TimeoutError"})
-            self.stop(StopReason.MODEL_TIMEOUT)
+            raise
         except asyncio.CancelledError:
             self.emit("model.cancelled",
                       span_id=span, parent_span_id=self.state.id,
@@ -237,9 +313,9 @@ class RunHarness:
             self.emit("model.failed",
                       span_id=span, parent_span_id=self.state.id,
                       duration_ms=(monotonic() - started) * 1000,
-                      data={"error_type": type(exc).__name__})
-            if isinstance(exc, MODEL_SERVICE_ERRORS):
-                self.stop(StopReason.MODEL_ERROR)
+                      data={"error_type": type(exc).__name__,
+                            "category": classify_failure(exc).category,
+                            "status_code": classify_failure(exc).status_code})
             raise
         finally:
             if reported:
@@ -251,16 +327,8 @@ class RunHarness:
         self, name: str, arguments: dict[str, object],
         call: Callable[[], Awaitable[list[dict[str, object]]]],
     ) -> list[dict[str, object]]:
-        """Authorize and reserve a tool call before awaiting its result.
-
-        Count admitted calls, including failures, against shared and
-        identical-argument limits. The callback stores evidence and selects
-        bounded results. Record returned IDs and timing; telemetry errors
-        and timeouts stop the run. Other errors and cancellation propagate.
-        """
+        """Retry read-only queries and track progress without hiding errors."""
         self.authorize_tool(name)
-        if sum(self.state.tool_calls.values()) >= self.state.limits.tool_calls:
-            self.stop(StopReason.TOOL_BUDGET)
         signature = hashlib.sha256(json.dumps(
             [name, arguments], sort_keys=True, separators=(",", ":")
         ).encode()).hexdigest()
@@ -269,16 +337,55 @@ class RunHarness:
             >= self.state.limits.identical_tool_calls
         ):
             self.stop(StopReason.REPEATED_TOOL_CALL)
-        # No await before these reservations:
-        # parallel tool calls share one budget.
         self._signatures[signature] = self._signatures.get(signature, 0) + 1
-        self.state.tool_calls[name] = self.state.tool_calls.get(name, 0) + 1
-        span = uuid4()
-        parent = self._model_span or self.state.id
-        started = monotonic()
         task = asyncio.current_task()
         assert task is not None
         self._active.add(task)
+        try:
+            for attempt in range(self.state.limits.retry_attempts + 1):
+                try:
+                    result = await self._tool_attempt(name, signature, call)
+                    for item in result:
+                        if "id" in item:
+                            fingerprint = hashlib.sha256(json.dumps(
+                                item, sort_keys=True, default=str
+                            ).encode()).hexdigest()
+                            if fingerprint not in self._result_fingerprints:
+                                self._result_fingerprints.add(fingerprint)
+                                self._progress += 1
+                    return result
+                except (TimeoutError, TelemetryClientError) as exc:
+                    failure = classify_failure(exc)
+                    if (
+                        failure.retryable
+                        and attempt < self.state.limits.retry_attempts
+                    ):
+                        await self._wait_retry(name, attempt, failure)
+                        continue
+                    if (
+                        failure.retryable
+                        or failure.category == "invalid_request"
+                    ):
+                        raise ToolUnavailable(failure) from exc
+                    self.stop(StopReason.TOOL_ERROR)
+            raise AssertionError("retry loop must return or raise")
+        finally:
+            self._active.discard(task)
+
+    async def _tool_attempt(
+        self, name: str, signature: str,
+        call: Callable[[], Awaitable[list[dict[str, object]]]],
+    ) -> list[dict[str, object]]:
+        """Reserve a shared attempt slot and record one backend execution."""
+        self.authorize_tool(name)
+        if sum(self.state.tool_calls.values()) >= self.state.limits.tool_calls:
+            self.stop(StopReason.TOOL_BUDGET)
+        self.state.tool_calls[name] = self.state.tool_calls.get(name, 0) + 1
+        if name != "read_evidence":
+            self.state.backend_attempts += 1
+        span = uuid4()
+        parent = self._model_span or self.state.id
+        started = monotonic()
         self.emit("tool.started", span_id=span, parent_span_id=parent,
                   data={"tool": name, "arguments_sha256": signature})
         try:
@@ -297,7 +404,7 @@ class RunHarness:
             self.emit("tool.failed", span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"tool": name, "error_type": "TimeoutError"})
-            self.stop(StopReason.TOOL_TIMEOUT)
+            raise
         except asyncio.CancelledError:
             self.emit("tool.cancelled", span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
@@ -306,12 +413,10 @@ class RunHarness:
         except Exception as exc:
             self.emit("tool.failed", span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
-                      data={"tool": name, "error_type": type(exc).__name__})
-            if isinstance(exc, TelemetryClientError):
-                self.stop(StopReason.TOOL_ERROR)
+                      data={"tool": name, "error_type": type(exc).__name__,
+                            "category": classify_failure(exc).category,
+                            "status_code": classify_failure(exc).status_code})
             raise
-        finally:
-            self._active.discard(task)
 
     async def drain(self) -> None:
         """Cancel sibling tool tasks before producing a terminal snapshot."""

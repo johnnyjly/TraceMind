@@ -136,8 +136,8 @@ are classified separately from unexpected code errors (`internal_error`).
 
 Evaluation reports include `run_state` with counters, events, and stop reason.
 The run state is currently in memory; JSONL events are not resumable checkpoints.
-S2 context controls are described below. Automatic retries/fallback and
-persistent recovery remain subsequent stages in [DESIGN.md](DESIGN.md).
+S2 context controls and S3 recovery are described below. Persistent recovery
+remains the next stage in [DESIGN.md](DESIGN.md).
 
 ## Bounded context and evidence retrieval (S2)
 
@@ -275,3 +275,37 @@ exception messages are excluded from these events.
 `RunHarness.emit()` records events in run state and JSONL regardless of terminal
 log level. Applications embedding TraceMind can attach their own logging
 handlers. Trace-file warnings use standard logging.
+
+## Bounded recovery (S3)
+
+The harness owns retries; provider SDK retries remain disabled. Transient
+transport failures, timeouts, and HTTP 408/429/500/502/503/504 receive at most
+`TRACEMIND_AGENT_RETRY_ATTEMPTS` retries (default 2), with capped exponential
+backoff, jitter, and Retry-After handling. Every attempt consumes the existing
+model/tool budget; backoff consumes the run deadline. Cancellation stops retries.
+Authentication failures and permanent model request errors stop explicitly.
+
+Exhausted transient tool failures and invalid queries return sanitized error
+feedback, allowing the agent to correct arguments or investigate another source.
+Failed calls produce no evidence. Unclassified telemetry failures stop the run.
+
+Fallback is disabled by default. Set both `TRACEMIND_AGENT_FALLBACK_PROVIDER`
+and `TRACEMIND_AGENT_FALLBACK_MODEL`, with that provider's API key, to enable
+one model switch after transient primary failures exhaust retries. History,
+evidence, and budgets are shared, and the fallback stays selected for that run.
+A model switch emits `model.switched`; retry scheduling emits
+`recovery.retry_scheduled`. Failed model attempts with unavailable token usage
+increase the unreported-call counter, rather than reporting zero token cost.
+
+Missing diagnosis structure (including text-only or empty responses), schema
+errors, and citation errors allow one diagnosis repair by default. Native
+structured output and tool-based output use the same bounded repair loop.
+Repair calls consume model/time/context budgets and reported token usage,
+but do not advance the no-progress counter. Rejected diagnosis exchanges stay
+in graph history, and mixed batches still execute ordinary telemetry calls
+with paired call IDs. Exhaustion returns an inconclusive diagnosis with
+`invalid_diagnosis`. Three consecutive investigation rounds without new
+evidence stop with `no_progress`; this is an evidence-based
+stall heuristic, not a judgment of reasoning quality. Both outcomes retain
+partial evidence. Configure these limits through
+`TRACEMIND_AGENT_DIAGNOSIS_REPAIRS` and `TRACEMIND_AGENT_NO_PROGRESS_ROUNDS`.

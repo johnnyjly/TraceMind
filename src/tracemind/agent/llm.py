@@ -37,7 +37,6 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             model=settings.llm_model,
             api_key=settings.google_api_key,
             temperature=1.0,
-            # S1 owns admission and timeouts; S3 will add accounted retries.
             max_retries=0,
         )
 
@@ -73,3 +72,13 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
         use_responses_api=True,
         max_retries=0,
     )
+
+
+def create_fallback_model(settings: Settings) -> BaseChatModel | None:
+    """Build an explicitly configured fallback using its own provider key."""
+    if settings.agent_fallback_provider is None:
+        return None
+    return create_chat_model(settings.model_copy(update={
+        "llm_provider": settings.agent_fallback_provider,
+        "llm_model": settings.agent_fallback_model,
+    }))

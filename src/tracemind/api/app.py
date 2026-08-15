@@ -15,6 +15,7 @@ from tracemind.agent import (
     create_chat_model,
 )
 from tracemind.api.schemas import DiagnosisRequest
+from tracemind.agent.llm import create_fallback_model
 from tracemind.config import Settings, get_settings
 from tracemind.models import Diagnosis
 from tracemind.models.run import StopReason
@@ -43,7 +44,10 @@ async def get_agent_runner(
     503.
     """
     try:
-        return LangChainAgentRunner(create_chat_model(settings))
+        return LangChainAgentRunner(
+            create_chat_model(settings),
+            fallback_model=create_fallback_model(settings),
+        )
     except ModelConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

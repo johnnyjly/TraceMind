@@ -13,6 +13,7 @@ from tracemind.agent import (
     create_chat_model,
 )
 from tracemind.config import Settings
+from tracemind.agent.llm import create_fallback_model
 from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.evaluation.models import EvaluationCase, EvaluationReport
 from tracemind.telemetry import (
@@ -48,7 +49,10 @@ async def run_live_evaluation(
                 settings.opensearch_logs_index,
                 http_client,
             ),
-            LangChainAgentRunner(model, callbacks=callbacks),
+            LangChainAgentRunner(
+                model, callbacks=callbacks,
+                fallback_model=create_fallback_model(settings),
+            ),
             recursion_limit=settings.agent_recursion_limit,
             limits=limits,
             allowed_tools=settings.agent_allowed_tools,
