@@ -15,7 +15,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, Field
 
-from tracemind.agent.errors import DiagnosisError
+from tracemind.agent.errors import DiagnosisCancelled, DiagnosisError
 from tracemind.agent.harness import RunHarness, RunStopped
 from tracemind.agent.middleware import HarnessMiddleware
 from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
@@ -352,10 +352,10 @@ class DiagnosisService:
             exc.state = state
             exc.evidence = collector.evidence
             raise
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             terminal_status = RunStatus.CANCELLED
             reason = StopReason.CANCELLED
-            raise
+            raise DiagnosisCancelled(state, collector.evidence) from exc
         except Exception as exc:
             raise DiagnosisError(
                 "Diagnosis failed unexpectedly",

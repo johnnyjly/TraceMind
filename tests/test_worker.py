@@ -14,6 +14,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import Field
 
 from tracemind.agent.persistence import RunRepository
+from tracemind.agent.errors import DiagnosisCancelled
 from tracemind.agent.harness import RunHarness
 from tracemind.agent.middleware import HarnessMiddleware
 from tracemind.agent.service import (
@@ -145,7 +146,9 @@ def test_worker_persists_graph_and_terminal_result(tmp_path: Path) -> None:
     assert stored.result.diagnosis.evidence_ids == [stored.evidence[0].id]
 
 
-def test_resume_reuses_checkpoint_and_retained_evidence(tmp_path: Path) -> None:
+def test_resume_reuses_checkpoint_and_retained_evidence(
+    tmp_path: Path,
+) -> None:
     """Restart after a tool step without reissuing its telemetry query."""
     settings = Settings(
         _env_file=None,
@@ -256,8 +259,17 @@ def test_active_cancellation_stops_worker(tmp_path: Path) -> None:
         """Represent a model call waiting when cancellation arrives."""
 
         async def run_persisted(self, *_args, **_kwargs):
+            state, evidence = _args
+            evidence.append(Evidence(
+                source=EvidenceSource.METRIC,
+                summary="retained before cancellation", observed_at=START,
+            ))
+            _kwargs["persist"](state, evidence)
             entered.set()
-            await asyncio.Future()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError as exc:
+                raise DiagnosisCancelled(state, evidence) from exc
 
     async def execute() -> None:
         worker = RunWorker(
@@ -274,4 +286,5 @@ def test_active_cancellation_stops_worker(tmp_path: Path) -> None:
     assert stored.state.status is RunStatus.CANCELLED
     assert stored.cancel_requested
     assert stored.state.stop_reason.value == "cancelled"
+    assert len(stored.evidence) == 1
     assert repository.claim_next() is None

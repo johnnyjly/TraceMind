@@ -1,0 +1,43 @@
+{
+  "case": {
+    "id": "backend_failure",
+    "description": "Synthetic backend_failure",
+    "incident": {
+      "title": "Checkout failure",
+      "description": "Investigate checkout HTTP 500",
+      "affected_services": [
+        "checkout"
+      ]
+    },
+    "ground_truth": {
+      "root_cause_service": "payment",
+      "root_cause_terms": [
+        "charge"
+      ],
+      "required_evidence_source": "trace",
+      "expected_status": "inconclusive"
+    },
+    "max_tool_calls": 12
+  },
+  "start": "2024-09-01T00:00:00Z",
+  "end": "2024-09-01T01:00:00Z",
+  "responses": [
+    {
+      "method": "search_traces",
+      "arguments": {
+        "service": "payment"
+      },
+      "evidence": [],
+      "error": "unavailable"
+    }
+  ],
+  "script": [
+    {
+      "name": "search_traces",
+      "args": {
+        "service": "payment"
+      }
+    }
+  ],
+  "expected_stop_reason": "tool_error"
+}

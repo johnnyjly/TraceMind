@@ -15,9 +15,9 @@ def evaluate_diagnosis(
 
     Match service and root-cause terms by case-insensitive substring,
     verify citation membership and required source/service, and check
-    tool usage. Passing also requires a complete diagnosis. These
-    heuristics do not prove causality; elapsed_ms is supplied by the
-    caller.
+    tool usage. Passing requires the expected diagnosis status; complete
+    cases additionally require the cause and source checks. These heuristics
+    do not prove causality; elapsed_ms is supplied by the caller.
     """
     diagnosis = run.diagnosis
     normalized_root_cause = diagnosis.root_cause.casefold()
@@ -44,12 +44,18 @@ def evaluate_diagnosis(
         for item in cited_evidence
     )
     within_tool_budget = run.tool_call_count <= case.max_tool_calls
+    correct_cause = all((service_match, term_match,
+                         required_evidence_match, grounded))
+    false_completion = (
+        diagnosis.status is DiagnosisStatus.COMPLETE
+        and (case.ground_truth.expected_status is not DiagnosisStatus.COMPLETE
+             or not correct_cause)
+    )
     passed = all(
         (
-            diagnosis.status is DiagnosisStatus.COMPLETE,
-            service_match,
-            term_match,
-            required_evidence_match,
+            diagnosis.status is case.ground_truth.expected_status,
+            (correct_cause if case.ground_truth.expected_status
+             is DiagnosisStatus.COMPLETE else True),
             grounded,
             within_tool_budget,
         )
@@ -66,4 +72,5 @@ def evaluate_diagnosis(
         within_tool_budget=within_tool_budget,
         elapsed_ms=elapsed_ms,
         passed=passed,
+        false_completion=false_completion,
     )

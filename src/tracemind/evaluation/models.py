@@ -24,22 +24,23 @@ class FaultInjection(BaseModel):
 
 
 class GroundTruth(BaseModel):
-    """Expected root service, matching terms, and required evidence source."""
+    """Held-out expected status and checks for complete root-cause answers."""
 
     root_cause_service: str = Field(min_length=1)
     root_cause_terms: list[str] = Field(min_length=1)
     required_evidence_source: EvidenceSource
+    expected_status: DiagnosisStatus = DiagnosisStatus.COMPLETE
 
 
 class EvaluationCase(BaseModel):
-    """Incident fixture with fault configuration, ground truth, and tool
+    """Incident fixture with optional fault, ground truth, and tool
     budget.
     """
 
     id: str = Field(min_length=1)
     description: str = Field(min_length=1)
     incident: Incident
-    fault: FaultInjection
+    fault: FaultInjection | None = None
     ground_truth: GroundTruth
     max_tool_calls: int = Field(default=12, ge=1)
 
@@ -66,6 +67,7 @@ class EvaluationResult(BaseModel):
     within_tool_budget: bool
     elapsed_ms: float = Field(ge=0)
     passed: bool
+    false_completion: bool = False
 
 
 class EvaluationReport(BaseModel):
@@ -78,7 +80,11 @@ class EvaluationReport(BaseModel):
     model_name: str
     investigation_start: datetime
     investigation_end: datetime
-    diagnosis: Diagnosis
+    diagnosis: Diagnosis | None = None
     evidence: list[Evidence]
-    result: EvaluationResult
+    result: EvaluationResult | None = None
     run_state: RunState | None = None
+    error_type: str | None = None
+    execution_mode: str = "live"
+    elapsed_ms: float = Field(default=0, ge=0)
+    regression_passed: bool | None = None

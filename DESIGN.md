@@ -224,7 +224,7 @@ mock telemetry, plus relevant live scenarios. The following are planned gates.
 | S2: bounded context (implemented) | Observation store, evidence selection, context assembly, compression | Large/noisy results fit context allowance; critical/contradictory evidence stays retrievable; tool messages remain valid |
 | S3: recovery (implemented; supports injected-failure testing) | Error taxonomy, retry ownership, fallback, no-progress detection | Injected 429/5xx/timeout/malformed output has bounded attempts, accounted usage, and useful terminal results |
 | S4: persistence (implemented for local queued runs) | Checkpoints, run store, resume/cancel, scheduling recovery | Restart retains evidence and budgets; concurrent resume is controlled; cancellation stops new work |
-| S5: evaluation and operations | Broader cases, replay fixtures, metrics report, trace export, shared-service controls | Report accuracy, false completion, attempts, latency, usage/cost, and recovery; verify run isolation and trace coverage |
+| S5: evaluation and operations (evaluation increment implemented) | Broader cases, replay fixtures, metrics report, trace export, shared-service controls | Report accuracy, false completion, attempts, latency, usage/cost, and recovery; verify run isolation and trace coverage |
 | S6: optional memory | Confirmed records, scoped retrieval, provenance and expiry | Memory-on/off comparison on held-out cases; reject stale/unconfirmed records and prevent ground-truth leakage |
 
 S3 implements harness-owned retries, opt-in model fallback, bounded diagnosis

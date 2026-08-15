@@ -10,7 +10,9 @@ from datetime import UTC, datetime
 import httpx
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from tracemind.agent.errors import DiagnosisError, ModelConfigurationError
+from tracemind.agent.errors import (
+    DiagnosisCancelled, DiagnosisError, ModelConfigurationError,
+)
 from tracemind.agent.llm import create_chat_model, create_fallback_model
 from tracemind.agent.persistence import ClaimedRun, RunConflict, RunRepository
 from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
@@ -128,7 +130,9 @@ class RunWorker:
                     except DiagnosisError as exc:
                         state = exc.state or state
                         evidence = exc.evidence
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as exc:
+                        if isinstance(exc, DiagnosisCancelled):
+                            state, evidence = exc.state, exc.evidence
                         state.status = RunStatus.CANCELLED
                         state.stop_reason = StopReason.CANCELLED
                     finally:

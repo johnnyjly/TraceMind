@@ -1,0 +1,70 @@
+{
+  "case": {
+    "id": "conflicting_evidence",
+    "description": "Synthetic conflicting_evidence",
+    "incident": {
+      "title": "Checkout failure",
+      "description": "Investigate checkout HTTP 500",
+      "affected_services": [
+        "checkout"
+      ]
+    },
+    "ground_truth": {
+      "root_cause_service": "payment",
+      "root_cause_terms": [
+        "charge"
+      ],
+      "required_evidence_source": "trace",
+      "expected_status": "inconclusive"
+    },
+    "max_tool_calls": 12
+  },
+  "start": "2024-09-01T00:00:00Z",
+  "end": "2024-09-01T01:00:00Z",
+  "responses": [
+    {
+      "method": "search_traces",
+      "arguments": {
+        "service": "payment"
+      },
+      "evidence": [
+        {
+          "id": "855839b5-6ee7-574c-b7ae-99519fc237ec",
+          "source": "trace",
+          "service": "payment",
+          "summary": "Charge failed with error",
+          "observed_at": "2024-09-01T00:00:00Z"
+        },
+        {
+          "id": "0cbfb65e-0fa9-5a50-b8f0-2c88bfb77f4b",
+          "source": "trace",
+          "service": "payment",
+          "summary": "Charge succeeded in same window",
+          "observed_at": "2024-09-01T00:00:00Z"
+        }
+      ],
+      "error": null
+    }
+  ],
+  "script": [
+    {
+      "name": "search_traces",
+      "args": {
+        "service": "payment"
+      }
+    },
+    {
+      "name": "DiagnosisDraft",
+      "args": {
+        "status": "inconclusive",
+        "root_cause": "Conflicting Charge evidence requires further investigation",
+        "confidence": 0,
+        "cite_indices": [
+          0,
+          1
+        ],
+        "remediation": []
+      }
+    }
+  ]
+}

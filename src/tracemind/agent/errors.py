@@ -1,5 +1,6 @@
 """Configuration and diagnosis failures shared across service boundaries."""
 
+import asyncio
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -9,6 +10,16 @@ if TYPE_CHECKING:
 
 class ModelConfigurationError(ValueError):
     """Raised when the selected model provider is not configured."""
+
+
+class DiagnosisCancelled(asyncio.CancelledError):
+    """Retain partial run data and task cancellation semantics."""
+
+    def __init__(self, state: "RunState", evidence: "list[Evidence]") -> None:
+        """Attach the mutable state finalized by the service's cleanup."""
+        super().__init__("Diagnosis cancelled")
+        self.state = state
+        self.evidence = evidence
 
 
 class DiagnosisError(RuntimeError):

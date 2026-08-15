@@ -5,7 +5,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tracemind.config import get_settings
-from tracemind.evaluation import EvaluationCase, run_live_evaluation
+from tracemind.evaluation import (
+    EvaluationCase, EvaluationReport, run_live_evaluation,
+)
 
 
 logger = logging.getLogger("tracemind.evaluation.cli")
@@ -19,7 +21,7 @@ async def run(
     case_path: Path,
     lookback_minutes: int,
     output_path: Path,
-) -> None:
+) -> EvaluationReport:
     case = EvaluationCase.load(case_path)
     end = datetime.now(UTC)
     start = end - timedelta(minutes=lookback_minutes)
@@ -31,8 +33,10 @@ async def run(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report.model_dump_json(indent=2) + "\n")
-    logger.info("Evaluation passed: %s", report.result.passed)
+    logger.info("Evaluation passed: %s",
+                report.result.passed if report.result else False)
     logger.info("Report: %s", output_path.resolve())
+    return report
 
 
 def configure_logging(*, verbose: bool) -> None:
@@ -72,13 +76,14 @@ def main() -> None:
     if args.lookback_minutes < 1:
         parser.error("--lookback-minutes must be at least 1")
     configure_logging(verbose=args.verbose)
-    asyncio.run(
+    report = asyncio.run(
         run(
             args.case,
             args.lookback_minutes,
             args.output,
         )
     )
+    raise SystemExit(0 if report.result and report.result.passed else 1)
 
 
 if __name__ == "__main__":

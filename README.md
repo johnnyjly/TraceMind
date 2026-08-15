@@ -101,6 +101,56 @@ Run the tests with:
 uv run pytest
 ```
 
+## Repeatable evaluation (S5, first increment)
+
+Run the six committed synthetic replays without Docker, credentials, or model
+API calls:
+
+```bash
+uv run python scripts/run_evaluation_suite.py
+```
+
+Fixtures in `evals/replays/` cover payment failure, misleading checkout
+symptoms, missing telemetry, conflicting evidence, transient recovery, and
+backend failure. Each executes a scripted model through the real LangGraph
+and harness against fixed normalized telemetry. These are workflow regression
+checks; their scores and latency do not measure a real model's accuracy or
+network latency. Ground truth and scripted answers stay outside runtime
+prompts. Unrecorded backend requests are rejected. A real model can be supplied
+through `run_replay_evaluation(..., model=...)` for a separate `model_replay`
+measurement against the same strict transcript.
+
+The batch JSON defaults to `artifacts/evaluations/replay-suite.json`. It retains
+individual reports and groups by execution mode, provider, and model. Regression cases include expected completions, inconclusive outcomes and
+operational failures such as `tool_error`. Expected inconclusive
+answers pass only cases that explicitly expect them. A complete answer that
+fails the cause/evidence checks, or completes an inconclusive case, counts as
+a false completion. This remains deterministic heuristic scoring.
+
+Aggregate existing live reports without another model call:
+
+```bash
+uv run python scripts/run_evaluation_suite.py \
+  --reports artifacts/evaluations/payment-failure.json \
+  --output artifacts/evaluations/live-summary.json
+```
+
+Summaries include pass rate, false completion rate among complete diagnoses,
+failures/cancellations, attempts/retries, successful recovery, mean/p95 latency,
+reported tokens, unreported calls, and trace coverage. Optional `--pricing`
+accepts a JSON mapping such as
+`{"provider:model":{"input_per_million":1,"output_per_million":2}}` with
+explicit USD rates. The estimate is null when any run lacks pricing, complete
+usage, or per-model attribution after fallback; cached-token discounts are
+not modeled. Raw telemetry and diagnoses remain in the report, so protect
+the artifacts directory when using data beyond the synthetic Demo.
+
+Service-reported diagnosis failures and cancellations produce reports with
+partial state; errors outside that boundary still propagate. The live CLI exits 1
+on failure, and the suite exits 1 when its selected gates fail. Existing report
+JSON remains loadable. OpenTelemetry trace export and shared-service controls
+remain subsequent S5 work.
+
 ## Single-agent execution controls (S1)
 
 API and evaluation runs use one harness for tool authorization, budgets, and

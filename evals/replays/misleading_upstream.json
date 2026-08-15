@@ -1,0 +1,84 @@
+{
+  "case": {
+    "id": "misleading_upstream",
+    "description": "Synthetic misleading_upstream",
+    "incident": {
+      "title": "Checkout failure",
+      "description": "Investigate checkout HTTP 500",
+      "affected_services": [
+        "checkout"
+      ]
+    },
+    "ground_truth": {
+      "root_cause_service": "payment",
+      "root_cause_terms": [
+        "charge"
+      ],
+      "required_evidence_source": "trace",
+      "expected_status": "complete"
+    },
+    "max_tool_calls": 12
+  },
+  "start": "2024-09-01T00:00:00Z",
+  "end": "2024-09-01T01:00:00Z",
+  "responses": [
+    {
+      "method": "search_traces",
+      "arguments": {
+        "service": "checkout"
+      },
+      "evidence": [
+        {
+          "id": "3838e6a5-b4e6-53f9-82d0-2ffc86955d44",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "Checkout returned HTTP 500",
+          "observed_at": "2024-09-01T00:00:00Z"
+        }
+      ],
+      "error": null
+    },
+    {
+      "method": "search_traces",
+      "arguments": {
+        "service": "payment"
+      },
+      "evidence": [
+        {
+          "id": "855839b5-6ee7-574c-b7ae-99519fc237ec",
+          "source": "trace",
+          "service": "payment",
+          "summary": "Charge failed with error",
+          "observed_at": "2024-09-01T00:00:00Z"
+        }
+      ],
+      "error": null
+    }
+  ],
+  "script": [
+    {
+      "name": "search_traces",
+      "args": {
+        "service": "checkout"
+      }
+    },
+    {
+      "name": "search_traces",
+      "args": {
+        "service": "payment"
+      }
+    },
+    {
+      "name": "DiagnosisDraft",
+      "args": {
+        "status": "complete",
+        "root_cause": "Payment Charge failed; checkout is the symptom",
+        "confidence": 0.8,
+        "cite_indices": [
+          1
+        ],
+        "remediation": []
+      }
+    }
+  ]
+}
