@@ -30,7 +30,7 @@ Milestones 1 through 3 provide:
 
 - Python 3.12 or newer
 - `uv`
-- Podman and `podman-compose` for the OpenTelemetry Demo integration
+- Docker Desktop with Docker Compose for the OpenTelemetry Demo integration
 
 ## Local setup
 
@@ -58,6 +58,18 @@ TRACEMIND_LLM_PROVIDER=openai
 TRACEMIND_LLM_MODEL=gpt-5.6-luna
 TRACEMIND_OPENAI_API_KEY=your-key
 ```
+
+To use DeepSeek:
+
+```dotenv
+TRACEMIND_LLM_PROVIDER=deepseek
+TRACEMIND_LLM_MODEL=deepseek-flash
+TRACEMIND_DEEPSEEK_API_KEY=your-key
+```
+
+DeepSeek uses its OpenAI-compatible Chat Completions endpoint with thinking
+disabled. Structured diagnoses use tool calls; SDK retries remain disabled.
+The harness applies the same output, context, call, and time limits.
 
 Never commit the populated `.env` file. Model configuration is loaded only
 when the diagnosis endpoint is called, so the health endpoint remains usable
@@ -207,13 +219,20 @@ URLs in `.env`. The evaluation environment is pinned to OpenTelemetry Demo
 `3.1.0` at commit `dedc0178918e260823323b8d95005a8cb924b007`. The Demo's
 built-in agentic mode is not used.
 
-On Ubuntu or WSL, install the rootless container runtime and Compose provider:
+On macOS, install and start [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/).
+Open a new terminal after installation, then verify that its CLI and Compose
+are available:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y podman podman-compose
-systemctl --user enable --now podman.socket
-podman info
+docker info
+docker compose version
+```
+
+Clone the pinned Demo as a sibling of TraceMind:
+
+```bash
+git clone https://github.com/open-telemetry/opentelemetry-demo.git ../opentelemetry-demo
+git -C ../opentelemetry-demo checkout dedc0178918e260823323b8d95005a8cb924b007
 ```
 
 The first evaluation case injects `paymentFailure=100%`. Its generated flagd

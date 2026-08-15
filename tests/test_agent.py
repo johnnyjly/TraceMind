@@ -1,15 +1,19 @@
 import asyncio
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+import httpx
 from langchain_core.tools import BaseTool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from tracemind.agent import DiagnosisError, DiagnosisService, create_chat_model
-from tracemind.agent.service import DiagnosisDraft
+from tracemind.agent.harness import RunHarness
+from tracemind.agent.service import DiagnosisDraft, LangChainAgentRunner
 from tracemind.config import Settings
 from tracemind.models import (
     DiagnosisStatus,
@@ -17,6 +21,7 @@ from tracemind.models import (
     EvidenceSource,
     Incident,
 )
+from tracemind.models.run import RunLimits, RunState
 
 
 class StubPrometheus:
@@ -119,7 +124,7 @@ def test_service_rejects_evidence_id_not_returned_by_tool() -> None:
         )
 
 
-def test_model_factory_supports_google_and_openai() -> None:
+def test_model_factory_supports_google_openai_and_deepseek() -> None:
     google = create_chat_model(Settings(google_api_key="google-test-key"))
     openai = create_chat_model(
         Settings(
@@ -128,12 +133,95 @@ def test_model_factory_supports_google_and_openai() -> None:
             openai_api_key="openai-test-key",
         )
     )
+    deepseek = create_chat_model(
+        Settings(
+            _env_file=None,
+            llm_provider="deepseek",
+            llm_model="deepseek-flash",
+            deepseek_api_key="deepseek-test-key",
+        )
+    )
 
     assert isinstance(google, ChatGoogleGenerativeAI)
     assert isinstance(openai, ChatOpenAI)
-    assert google.max_retries == openai.max_retries == 0
+    assert isinstance(deepseek, BaseChatOpenAI)
+    assert all(model.max_retries == 0 for model in (google, openai, deepseek))
+    assert str(deepseek.openai_api_base) == "https://api.deepseek.com"
+    assert deepseek.use_responses_api is False
+    assert deepseek.extra_body == {"thinking": {"type": "disabled"}}
+    assert deepseek.profile["structured_output"] is False
 
 
 def test_model_factory_requires_selected_provider_key() -> None:
     with pytest.raises(ValueError, match="TRACEMIND_GOOGLE_API_KEY"):
         create_chat_model(Settings(google_api_key=""))
+    with pytest.raises(ValueError, match="TRACEMIND_DEEPSEEK_API_KEY"):
+        create_chat_model(Settings(
+            _env_file=None, llm_provider="deepseek", deepseek_api_key="",
+            openai_api_key="unrelated-key",
+        ))
+
+
+def test_deepseek_agent_sends_compatible_structured_tool_request(monkeypatch):
+    """Exercise the agent and SDK against a simulated DeepSeek endpoint."""
+    def respond(request):
+        assert str(request.url) == "https://api.deepseek.com/chat/completions"
+        assert request.headers["authorization"] == "Bearer deepseek-test-key"
+        payload = json.loads(request.content)
+        assert payload["max_tokens"] == 512
+        assert "max_completion_tokens" not in payload
+        assert payload["thinking"] == {"type": "disabled"}
+        assert "response_format" not in payload
+        assert any(tool["function"]["name"] == "DiagnosisDraft"
+                   for tool in payload["tools"])
+        return httpx.Response(200, json={
+            "id": "deepseek-test", "object": "chat.completion", "created": 0,
+            "model": "deepseek-flash",
+            "choices": [{"index": 0, "finish_reason": "tool_calls",
+                         "message": {"role": "assistant", "content": "",
+                                     "tool_calls": [{
+                                         "id": "draft-1", "type": "function",
+                                         "function": {
+                                             "name": "DiagnosisDraft",
+                                             "arguments": json.dumps({
+                                                 "status": "inconclusive",
+                                                 "root_cause": "No evidence",
+                                                 "confidence": 0,
+                                                 "evidence_ids": [],
+                                                 "remediation": [],
+                                             }),
+                                         },
+                                     }]}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20,
+                      "total_tokens": 30},
+        })
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond)
+        ) as http:
+            monkeypatch.setattr(
+                "tracemind.agent.llm.BaseChatOpenAI",
+                lambda **kwargs: BaseChatOpenAI(
+                    http_async_client=http, **kwargs
+                ),
+            )
+            model = create_chat_model(Settings(
+                _env_file=None, llm_provider="deepseek",
+                llm_model="deepseek-flash",
+                deepseek_api_key="deepseek-test-key",
+            ))
+            state = RunState(
+                incident=Incident(title="Failure", description="HTTP 500"),
+                investigation_start=datetime(2024, 9, 1, tzinfo=UTC),
+                investigation_end=datetime(2024, 9, 1, 1, tzinfo=UTC),
+                limits=RunLimits(output_tokens=512), allowed_tools=(),
+            )
+            draft = await LangChainAgentRunner(model).run(
+                "Investigate", [], recursion_limit=8,
+                harness=RunHarness(state),
+            )
+            assert draft.status is DiagnosisStatus.INCONCLUSIVE
+            assert state.usage.reported_total_tokens == 30
+
+    asyncio.run(run())

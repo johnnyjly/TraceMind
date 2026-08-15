@@ -1,7 +1,8 @@
-"""Pinned OpenTelemetry Demo configuration and Podman command helpers."""
+"""Pinned OpenTelemetry Demo configuration and Docker Compose helpers."""
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def compose_command(
     override_path: Path,
     action: str,
 ) -> list[str]:
-    """Build, but do not execute, a Podman Compose command for the
+    """Build, but do not execute, a Docker Compose command for the
     scenario.
 
     Support start, stop, and status; reject other actions. The stop
@@ -70,7 +71,7 @@ def compose_command(
         override_path,
     ]
     command = [
-        "podman",
+        "docker",
         "compose",
         "--env-file",
         str(demo_path / ".env"),
@@ -97,21 +98,26 @@ def compose_command(
     return command
 
 
-def podman_environment(flag_config: Path) -> dict[str, str]:
-    """Copy the process environment and add pinned Demo/Podman settings."""
+def docker_environment(flag_config: Path) -> dict[str, str]:
+    """Copy the process environment and add pinned Demo settings."""
     environment = os.environ.copy()
-    runtime_dir = environment.get(
-        "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"
-    )
+    desktop_cli = Path.home() / ".docker" / "bin" / "docker"
+    if shutil.which("docker", path=environment.get("PATH")) is None and (
+        desktop_cli.is_file()
+    ):
+        environment["PATH"] = (
+            f"{desktop_cli.parent}{os.pathsep}{environment.get('PATH', '')}"
+        )
+    desktop_socket = Path.home() / ".docker" / "run" / "docker.sock"
     environment.update(
         {
-            "DOCKER_SOCK": f"{runtime_dir}/podman/podman.sock",
+            "DOCKER_SOCK": environment.get("DOCKER_SOCK") or str(
+                desktop_socket if desktop_socket.is_socket()
+                else Path("/var/run/docker.sock")
+            ),
             "DEMO_VERSION": "3.1.0",
             "IMAGE_VERSION": "3.1.0",
             "TRACEMIND_FLAGD_CONFIG": str(flag_config.resolve()),
-            "PODMAN_COMPOSE_PROVIDER": "podman-compose",
-            "POSTGRES_IMAGE": "docker.io/library/postgres:18.4",
-            "GRAFANA_IMAGE": "docker.io/grafana/grafana:13.1.0",
         }
     )
     return environment

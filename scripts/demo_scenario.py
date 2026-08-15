@@ -9,7 +9,7 @@ from pathlib import Path
 
 from tracemind.evaluation.demo import (
     compose_command,
-    podman_environment,
+    docker_environment,
     prepare_flag_config,
     verify_demo_commit,
 )
@@ -75,21 +75,22 @@ def main() -> None:
         feature_flag=case.fault.feature_flag,
         variant=case.fault.variant,
     )
+    environment = docker_environment(flag_config)
 
     if args.action == "prepare":
         logger.info("Prepared %s", flag_config)
         return
 
-    if shutil.which("podman") is None:
+    if shutil.which("docker", path=environment.get("PATH")) is None:
         raise SystemExit(
-            "Podman is not installed. Run: sudo apt-get update && "
-            "sudo apt-get install -y podman podman-compose"
+            "Docker CLI is unavailable. Install and start Docker Desktop, "
+            "then check that docker is on PATH."
         )
 
     subprocess.run(
         compose_command(args.demo_path, OVERRIDE_PATH, args.action),
         cwd=args.demo_path,
-        env=podman_environment(flag_config),
+        env=environment,
         check=True,
     )
     if args.action == "start":

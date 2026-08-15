@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import pytest
 from tracemind.agent import DiagnosisRun
 from tracemind.evaluation.demo import (
     compose_command,
-    podman_environment,
+    docker_environment,
     prepare_flag_config,
 )
 from tracemind.evaluation.evaluator import evaluate_diagnosis
@@ -115,11 +116,10 @@ def test_prepare_flag_config_changes_only_selected_default(
     ] == "off"
 
 
-def test_compose_command_is_podman_only(tmp_path: Path) -> None:
+def test_compose_command_uses_docker(tmp_path: Path) -> None:
     command = compose_command(tmp_path, tmp_path / "override.yaml", "start")
 
-    assert command[:2] == ["podman", "compose"]
-    assert "docker" not in command
+    assert command[:2] == ["docker", "compose"]
     assert not any("compose.extras.yaml" in part for part in command)
     assert not any(".env.override" in part for part in command)
     assert command[-5:] == [
@@ -131,13 +131,32 @@ def test_compose_command_is_podman_only(tmp_path: Path) -> None:
     ]
 
 
-def test_podman_environment_pins_demo_images(tmp_path: Path) -> None:
-    environment = podman_environment(tmp_path / "flags.json")
+def test_docker_environment_pins_demo_version(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DOCKER_SOCK", str(tmp_path / "docker.sock"))
+    environment = docker_environment(tmp_path / "flags.json")
 
     assert environment["DEMO_VERSION"] == "3.1.0"
     assert environment["IMAGE_VERSION"] == "3.1.0"
-    assert environment["POSTGRES_IMAGE"].startswith("docker.io/")
-    assert environment["GRAFANA_IMAGE"].startswith("docker.io/")
+    assert environment["DOCKER_SOCK"] == str(tmp_path / "docker.sock")
+    assert environment["TRACEMIND_FLAGD_CONFIG"] == str(
+        (tmp_path / "flags.json").resolve()
+    )
+
+
+def test_docker_environment_finds_desktop_cli_on_stale_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    docker_cli = tmp_path / ".docker" / "bin" / "docker"
+    docker_cli.parent.mkdir(parents=True)
+    docker_cli.touch()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    environment = docker_environment(tmp_path / "flags.json")
+
+    assert environment["PATH"].split(os.pathsep)[0] == str(docker_cli.parent)
 
 
 def test_prepare_flag_config_rejects_unknown_variant(tmp_path: Path) -> None:

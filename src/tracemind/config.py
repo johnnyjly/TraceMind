@@ -24,10 +24,11 @@ class Settings(BaseSettings):
     jaeger_url: AnyHttpUrl = "http://localhost:16686/jaeger/ui"
     opensearch_url: AnyHttpUrl = "http://localhost:9200"
     opensearch_logs_index: str = "otel-logs-*"
-    llm_provider: Literal["google", "openai"] = "google"
+    llm_provider: Literal["google", "openai", "deepseek"] = "google"
     llm_model: str = "gemini-3.7-flash"
     google_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
+    deepseek_api_key: SecretStr | None = None
     agent_recursion_limit: int = Field(default=12, ge=2, le=50)
     agent_context_tokens: int = Field(default=32768, ge=1)
     agent_output_tokens: int = Field(default=4096, ge=1)

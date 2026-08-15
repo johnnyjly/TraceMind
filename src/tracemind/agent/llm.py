@@ -6,6 +6,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models.base import BaseChatOpenAI
 from openai import APIError
 
 from tracemind.agent.errors import ModelConfigurationError
@@ -37,6 +38,25 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             api_key=settings.google_api_key,
             temperature=1.0,
             # S1 owns admission and timeouts; S3 will add accounted retries.
+            max_retries=0,
+        )
+
+    if settings.llm_provider == "deepseek":
+        if (
+            settings.deepseek_api_key is None
+            or not settings.deepseek_api_key.get_secret_value()
+        ):
+            raise ModelConfigurationError(
+                "TRACEMIND_DEEPSEEK_API_KEY is required "
+                "when LLM provider is deepseek"
+            )
+        return BaseChatOpenAI(
+            model=settings.llm_model,
+            api_key=settings.deepseek_api_key,
+            base_url="https://api.deepseek.com",
+            use_responses_api=False,
+            extra_body={"thinking": {"type": "disabled"}},
+            profile={"tool_calling": True, "structured_output": False},
             max_retries=0,
         )
 
