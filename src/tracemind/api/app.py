@@ -1,13 +1,17 @@
 """FastAPI routes and request-scoped diagnosis dependencies."""
 
+import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import (
+    Depends, FastAPI, Header, HTTPException, Query, Request, Response, status,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from tracemind.agent import (
@@ -20,11 +24,15 @@ from tracemind.agent import (
 from tracemind.agent.persistence import (
     RunConflict, RunNotFound, RunRepository, StoredRun,
 )
-from tracemind.api.schemas import DiagnosisRequest, RunStatusResponse
+from tracemind.api.schemas import (
+    DiagnosisRequest, FollowUpRequest, InvestigationCreated,
+    InvestigationResponse, InvestigationTurn, RunStatusResponse,
+)
+from tracemind.api.progress import stream_progress
 from tracemind.agent.llm import create_fallback_model
 from tracemind.config import Settings, get_settings
 from tracemind.models import Diagnosis
-from tracemind.models.run import RunState, RunStatus, StopReason
+from tracemind.models.run import RunPurpose, RunState, RunStatus, StopReason
 from tracemind.telemetry import (
     JaegerClient,
     OpenSearchClient,
@@ -97,6 +105,8 @@ def run_status(record: StoredRun) -> RunStatusResponse:
     state = record.state
     return RunStatusResponse(
         id=state.id, status=state.status, stop_reason=state.stop_reason,
+        investigation_id=state.investigation_id,
+        parent_run_id=state.parent_run_id, purpose=state.purpose,
         cancel_requested=record.cancel_requested, attempt=record.attempt,
         model_calls=state.model_calls,
         tool_calls=sum(state.tool_calls.values()),
@@ -104,6 +114,21 @@ def run_status(record: StoredRun) -> RunStatusResponse:
         started_at=state.started_at if record.attempt else None,
         finished_at=state.finished_at,
     )
+
+
+def request_fingerprint(
+    request: BaseModel, operation: str | None = None,
+) -> str:
+    """Hash validated input, omitting generated incident IDs."""
+    excluded = None
+    if isinstance(request, DiagnosisRequest):
+        if "id" not in request.incident.model_fields_set:
+            excluded = {"incident": {"id"}}
+    payload = request.model_dump(mode="json", exclude=excluded)
+    if operation is not None:
+        payload = {"operation": operation, "body": payload}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def create_app() -> FastAPI:
@@ -193,15 +218,7 @@ def create_app() -> FastAPI:
             allowed_tools=settings.agent_allowed_tools,
             status=RunStatus.QUEUED,
         )
-        excluded = (
-            {"incident": {"id"}}
-            if "id" not in request.incident.model_fields_set else None
-        )
-        canonical = json.dumps(
-            request.model_dump(mode="json", exclude=excluded),
-            sort_keys=True, separators=(",", ":"),
-        )
-        request_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        request_hash = request_fingerprint(request)
         try:
             record = repository.create(
                 state, request_hash=request_hash,
@@ -279,6 +296,141 @@ def create_app() -> FastAPI:
             ) from exc
         except RunConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post(
+        "/api/v1/investigations", status_code=202,
+        response_model=InvestigationCreated, tags=["investigations"],
+    )
+    async def create_investigation(
+        request: DiagnosisRequest, response: Response,
+        settings: Annotated[Settings, Depends(get_request_settings)],
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+        _runner: Annotated[LangChainAgentRunner, Depends(get_agent_runner)],
+        idempotency_key: Annotated[
+            str | None, Header(alias="Idempotency-Key", max_length=128)
+        ] = None,
+    ) -> InvestigationCreated:
+        """Start autonomous diagnosis with optional later human follow-up."""
+        state = RunState(
+            investigation_id=uuid4(), incident=request.incident,
+            investigation_start=request.investigation_start,
+            investigation_end=request.investigation_end,
+            limits=settings.run_limits,
+            allowed_tools=settings.agent_allowed_tools,
+            status=RunStatus.QUEUED,
+        )
+        try:
+            record = repository.create(
+                state, request_hash=request_fingerprint(request,
+                                                        "investigation"),
+                idempotency_key=idempotency_key, new_investigation=True,
+            )
+        except RunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        response.headers["Location"] = (
+            f"/api/v1/investigations/{record.state.investigation_id}"
+        )
+        return InvestigationCreated(id=record.state.investigation_id,
+                                    run=run_status(record))
+
+    @application.get(
+        "/api/v1/investigations/{investigation_id}",
+        response_model=InvestigationResponse, tags=["investigations"],
+    )
+    async def get_investigation(
+        investigation_id: UUID,
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> InvestigationResponse:
+        """Read the preserved incident and chronological round history."""
+        try:
+            record = repository.get_investigation(
+                investigation_id, offset=offset, limit=limit,
+            )
+        except RunNotFound as exc:
+            raise HTTPException(
+                status_code=404, detail="investigation not found"
+            ) from exc
+        return InvestigationResponse(
+            id=record.id, incident=record.incident,
+            created_at=record.created_at,
+            next_offset=record.next_offset,
+            turns=[InvestigationTurn(
+                run_id=s.id, parent_run_id=s.parent_run_id,
+                purpose=s.purpose, status=s.status, stop_reason=s.stop_reason,
+                investigation_start=s.investigation_start,
+                investigation_end=s.investigation_end,
+                user_message=s.user_message, diagnosis=s.diagnosis,
+            ) for s in record.runs],
+        )
+
+    @application.post(
+        "/api/v1/investigations/{investigation_id}/messages", status_code=202,
+        response_model=RunStatusResponse, tags=["investigations"],
+    )
+    async def follow_up(
+        investigation_id: UUID, request: FollowUpRequest, response: Response,
+        settings: Annotated[Settings, Depends(get_request_settings)],
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+        _runner: Annotated[LangChainAgentRunner, Depends(get_agent_runner)],
+        idempotency_key: Annotated[
+            str | None, Header(alias="Idempotency-Key", max_length=128)
+        ] = None,
+    ) -> RunStatusResponse:
+        """Queue a separately budgeted explanation or hypothesis check."""
+        try:
+            record = repository.follow_up(
+                investigation_id, message=request.message,
+                purpose=RunPurpose(request.purpose),
+                limits=settings.run_limits,
+                allowed_tools=settings.agent_allowed_tools,
+                start=request.investigation_start,
+                end=request.investigation_end,
+                request_hash=request_fingerprint(request,
+                                                 str(investigation_id)),
+                idempotency_key=idempotency_key,
+            )
+        except RunNotFound as exc:
+            raise HTTPException(
+                status_code=404, detail="investigation not found"
+            ) from exc
+        except RunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        response.headers["Location"] = f"/api/v1/runs/{record.state.id}"
+        return run_status(record)
+
+    @application.get("/api/v1/runs/{run_id}/events", tags=["runs"])
+    async def run_events(
+        run_id: UUID, request: Request,
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+        after: Annotated[int, Query(ge=0)] = 0,
+        last_event_id: Annotated[
+            str | None, Header(alias="Last-Event-ID")
+        ] = None,
+    ) -> StreamingResponse:
+        """Subscribe to readable progress or replay from a durable cursor."""
+        if last_event_id is not None:
+            if (not last_event_id.isascii() or not last_event_id.isdigit()
+                    or len(last_event_id) > 20):
+                raise HTTPException(status_code=400, detail="invalid event ID")
+            after = int(last_event_id)
+        try:
+            snapshot = await asyncio.to_thread(
+                repository.event_snapshot, run_id,
+            )
+        except RunNotFound as exc:
+            raise HTTPException(
+                status_code=404, detail="run not found"
+            ) from exc
+        latest = snapshot.events[-1].sequence if snapshot.events else 0
+        if after > latest:
+            raise HTTPException(status_code=409, detail="event ID is ahead")
+        return StreamingResponse(
+            stream_progress(repository, run_id, request, after=after),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return application
 

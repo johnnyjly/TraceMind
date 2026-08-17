@@ -6,6 +6,57 @@ from dataclasses import dataclass
 from langchain.agents.middleware import ModelRequest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from tracemind.models import Evidence
+from tracemind.models.run import RunState
+
+
+def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
+    """Bound prior findings while keeping the current user request intact.
+
+    Complete observations remain available through run-local read_evidence.
+    Previous conclusions and user hypotheses are never promoted to evidence.
+    """
+    prior = state.prior_diagnosis
+    payload = {
+        "parent_run_id": str(state.parent_run_id),
+        "request": state.user_message,
+        "recent_user_messages": [m[:800] for m in state.previous_messages],
+        "prior_conclusion": {
+            "status": prior.status.value,
+            "root_cause": prior.root_cause[:1600],
+            "confidence": prior.confidence,
+            "remediation": [text[:240] for text in prior.remediation[:3]],
+            "evidence_ids": [str(i) for i in prior.evidence_ids[:20]],
+            "historical_claim_only": True,
+        } if prior else None,
+        "available_evidence_count": len(evidence),
+        "omitted_prior_evidence": state.omitted_prior_evidence,
+        "evidence_previews": [{
+            "id": str(item.id), "source": item.source.value,
+            "service": item.service[:120] if item.service else None,
+            "observed_at": item.observed_at.isoformat(),
+            "summary": item.summary[:160],
+        } for item in evidence[:10]],
+        "bounded_history": True,
+        "detail_retrieval": (
+            "read_evidence lists and pages retained evidence"
+            if "read_evidence" in state.allowed_tools
+            else "detail retrieval is unavailable under current tool policy"
+        ),
+    }
+    allowance = min(6000, max(
+        0, (state.limits.context_tokens - state.limits.output_tokens) // 3
+    ))
+    while len(json_text(payload).encode()) > allowance:
+        if payload["evidence_previews"]:
+            payload["evidence_previews"].pop()
+        elif payload["recent_user_messages"]:
+            payload["recent_user_messages"].pop(0)
+        elif payload["prior_conclusion"] is not None:
+            payload["prior_conclusion"] = None
+        else:
+            break  # The existing context gate rejects oversized user input.
+    return json_text(payload)
 
 
 def json_text(value: object) -> str:

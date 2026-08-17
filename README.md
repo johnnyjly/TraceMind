@@ -186,7 +186,7 @@ are classified separately from unexpected code errors (`internal_error`).
 
 Evaluation reports include `run_state` with counters, events, and stop reason.
 The synchronous diagnosis and evaluation paths keep run state in memory. S4
-persistence applies to the queued `/api/v1/runs` path described below. JSONL
+persistence applies to queued runs and investigation rounds described below. JSONL
 events are diagnostic output, not resumable checkpoints.
 
 ## Persistent local runs (S4)
@@ -219,6 +219,77 @@ and interrupts the active worker task. This local setup is designed for one
 worker process, without shared-service authentication or admission controls.
 
 S2 context controls and S3 recovery are described below.
+
+## Incident collaboration and readable progress
+
+The autonomous first diagnosis stays usable without human interaction. To
+retain an incident for later questions, submit the same diagnosis request to
+`POST /api/v1/investigations`. Its 202 response contains an investigation `id`
+and the first `run`. A run owns its checkpoint, evidence, deadline and budgets;
+an investigation associates successive rounds with the same incident.
+
+After that run finishes, `POST /api/v1/investigations/{id}/messages` accepts:
+
+```json
+{"message":"Why is payment the root cause?","purpose":"explain"}
+```
+
+`explain` allows only retained-evidence reading, so the model cannot silently
+perform fresh telemetry queries. Use `purpose: "investigate"` to verify an
+alternative hypothesis or collect more observations. User suggestions and
+previous conclusions are untrusted claims, not observed evidence. Every round
+gets a new run ID and budget; the previous outcome is preserved. An active
+round returns 409 for a new question; finish or cancel it first. Both creation
+and follow-up accept `Idempotency-Key`.
+
+An omitted window inherits the previous round's fixed bounds. For a recurrence,
+provide both timezone-aware `investigation_start` and `investigation_end`.
+Only prior observations inside that window and the new capacity are retained,
+with cited observations selected first. Explain requests must keep the previous
+window. Full evidence stays paginated through `read_evidence`; the prompt uses
+bounded previews, the previous conclusion and at most three recent questions.
+Older rounds remain available through
+`GET /api/v1/investigations/{id}?offset=0&limit=20` and individual run results.
+This is incident-local history; it is not cross-incident long-term memory.
+
+Subscribe to `GET /api/v1/runs/{run_id}/events` for readable SSE progress.
+It replays saved events then tails updates, including tool/service/window,
+observations added, retries, recovery and termination. It excludes raw prompts,
+queries and log payloads. The detailed operational events remain in run state
+and best-effort JSONL traces; workflow-only queued/early-terminal events are
+authoritative in SQLite. Progress describes actual actions, not private model
+reasoning or an inferred investigation plan.
+
+Reconnect with `Last-Event-ID: <sequence>` or `?after=<sequence>` (the header
+takes precedence). Delivery across reconnects is at least once; clients should
+deduplicate by run ID and sequence. Heartbeat comments arrive while idle.
+The `complete` event is sent after the terminal transaction commits and contains
+the final status and an optional result URL; close the subscription on that
+event. Closing a subscription does not cancel the run. Existing synchronous
+diagnoses/evaluations and their standalone JSONL files are not live SSE runs.
+
+With the API, worker and Demo running, the terminal demo makes real model calls:
+
+```bash
+uv run python scripts/demo_investigation.py
+uv run python scripts/demo_investigation.py --investigation-id <id> \
+  --purpose explain --message "为什么认为 payment 是根因？"
+uv run python scripts/demo_investigation.py --investigation-id <id> \
+  --purpose investigate --message "检查是否也存在网络故障"
+```
+
+Use `--lookback-minutes 10` on an investigate request to start a new current
+window; omit it to reuse the previous window. `--run-id <id> --after <sequence>`
+subscribes to an existing run without starting another. The demo automatically
+reconnects on transport failures and prints the final diagnosis.
+
+The run store migrates schema v1 to v2 transactionally on opening, adding an
+investigations table and a nullable run association. Existing runs remain
+independent and readable. Back up the run and checkpoint stores before upgrade;
+no checkpoint schema or dependency changes are required. Local SQLite remains
+intended for one worker. Automatic fault detection and alert triggering are
+not implemented. Autonomous evaluation stays separate from human-assisted
+evaluation; human follow-up tests verify workflow mechanics, not model accuracy.
 
 ## Bounded context and evidence retrieval (S2)
 

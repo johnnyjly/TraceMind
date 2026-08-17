@@ -20,9 +20,9 @@ input estimate plus enforced provider output cap. Compression retains evidence
 references and tool-call/result pairing; oversized fixed input stops explicitly.
 Store size limits retain partial evidence with a context_limit outcome.
 
-There is no resumable checkpoint, cross-incident memory,
-service/tenant authorization, or full payload trace
-yet. S1 disables SDK retries and records provider usage when available. Its
+Queued runs now have resumable checkpoints and durable evidence. Cross-incident
+memory, service/tenant authorization, and full payload trace export remain
+pending. S1 disables SDK retries and records provider usage when available. Its
 event files contain operational metadata and evidence IDs, not full observations
 or recoverable graph state. Optional DEBUG logging exposes the same sanitized
 event metadata in the terminal without changing persisted events.
@@ -104,7 +104,7 @@ working notes, evidence references, pending calls, call/attempt ledger, usage,
 failures, remaining budgets, diagnosis proposal, and stop reason. Record model,
 prompt, policy, tool-schema, and application versions for reproducibility.
 
-Run statuses include `running`, `waiting_for_input`, `succeeded`, `inconclusive`,
+Run statuses include `queued`, `running`, `succeeded`, `inconclusive`,
 `failed`, and `cancelled`. Keep these separate from diagnosis status: a provider
 outage is an operational failure. Preserve partial evidence on failure.
 
@@ -119,6 +119,21 @@ recorded results and record any re-execution after ambiguous failures. Keep
 query windows fixed and record retrieval timestamps. Allow one active worker
 per run. Define request idempotency, version compatibility, retention, and
 startup/worker recovery; an in-process background task alone is insufficient.
+
+Optional human collaboration groups independent runs under an investigation
+ID. The first run remains autonomous; follow-up questions create new checkpoints
+and budgets after the current round finishes. Explain rounds expose only
+read_evidence; investigate rounds can query telemetry. New time windows filter
+inherited observations. The bounded context includes recent user requests and
+previous conclusions as untrusted historical claims, with evidence references.
+Historical run results are preserved. This does not add cross-incident memory
+or pause a running tool for human approval.
+
+Readable progress is a projection of durable events through SSE. Cursor replay,
+idle heartbeats and a committed terminal notification support reconnection;
+subscriber disconnection leaves execution intact. SQLite schema v2 adds incident
+records and run associations without changing checkpoint storage. The initial
+implementation polls small event snapshots and is scoped to local deployment.
 
 ## 3. Long-term memory
 

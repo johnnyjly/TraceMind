@@ -389,7 +389,9 @@ class RunHarness:
         try:
             for attempt in range(self.state.limits.retry_attempts + 1):
                 try:
-                    result = await self._tool_attempt(name, signature, call)
+                    result = await self._tool_attempt(
+                        name, signature, call, arguments,
+                    )
                     for item in result:
                         if "id" in item:
                             fingerprint = hashlib.sha256(json.dumps(
@@ -425,6 +427,7 @@ class RunHarness:
     async def _tool_attempt(
         self, name: str, signature: str,
         call: Callable[[], Awaitable[list[dict[str, object]]]],
+        arguments: dict[str, object],
     ) -> list[dict[str, object]]:
         """Reserve a shared attempt slot and record one backend execution."""
         self.authorize_tool(name)
@@ -436,8 +439,23 @@ class RunHarness:
         span = uuid4()
         parent = self._model_span or self.state.id
         started = monotonic()
+        display = {}
+        if name in {"search_traces", "search_logs"}:
+            service = arguments.get("service")
+            if isinstance(service, str):
+                display["service"] = "".join(
+                    c for c in service if c.isprintable()
+                )[:120]
+        if name != "read_evidence":
+            display.update({
+                "investigation_start": (
+                    self.state.investigation_start.isoformat()
+                ),
+                "investigation_end": self.state.investigation_end.isoformat(),
+            })
         self.emit("tool.started", span_id=span, parent_span_id=parent,
-                  data={"tool": name, "arguments_sha256": signature})
+                  data={"tool": name, "arguments_sha256": signature,
+                        **display})
         try:
             async with asyncio.timeout(self.state.limits.tool_timeout_seconds):
                 result = await call()

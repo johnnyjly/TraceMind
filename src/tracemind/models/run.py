@@ -55,6 +55,14 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class RunPurpose(StrEnum):
+    """Distinguish autonomous diagnosis, follow-up checks and explanation."""
+
+    AUTOMATIC = "automatic"
+    INVESTIGATE = "investigate"
+    EXPLAIN = "explain"
+
+
 class StopReason(StrEnum):
     """Machine-readable reason why an investigation reached a terminal
     state.
@@ -111,6 +119,13 @@ class RunState(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
+    investigation_id: UUID | None = None
+    parent_run_id: UUID | None = None
+    purpose: RunPurpose = RunPurpose.AUTOMATIC
+    user_message: str | None = Field(default=None, max_length=4000)
+    previous_messages: list[str] = Field(default_factory=list)
+    prior_diagnosis: Diagnosis | None = None
+    omitted_prior_evidence: int = 0
     incident: Incident
     investigation_start: datetime
     investigation_end: datetime
