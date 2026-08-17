@@ -202,6 +202,10 @@ class HarnessMiddleware(AgentMiddleware):
                   "estimated_input_before": selection.before,
                   "estimated_input_after": selection.after,
                   "reduced_messages": selection.reduced_messages,
+                  "omitted_previews": selection.omitted_previews,
+                  "input_allowance": (
+                      state.limits.context_tokens - state.limits.output_tokens
+                  ),
                   "output_reserved": state.limits.output_tokens,
                   "fits": selection.fits},
         )

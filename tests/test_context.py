@@ -149,6 +149,81 @@ def test_current_detail_page_is_never_compressed_and_tiny_budget_fails():
     assert len(selected.request.messages) == len(request.messages)
 
 
+@pytest.mark.parametrize("reader_allowed", [False, True])
+def test_large_indexes_require_authorized_retrieval_to_omit(reader_allowed):
+    records = [evidence(summary=f"日志 {i}: " + "失败" * 50)
+               for i in range(200)]
+    store = EvidenceCollector()
+    content = store.add(records)
+    request, _ = request_with_results()
+    tools = [{"type": "function", "function": {
+        "name": "read_evidence", "parameters": {"type": "object"},
+    }}] if reader_allowed else []
+    result = ToolMessage(
+        content=json_text(content), name="search_logs", tool_call_id="b",
+        artifact=context_index(content),
+    )
+    error = ToolMessage(
+        content='[{"error":"no_data"}]', tool_call_id="a",
+        artifact=context_index([{"error": "no_data"}]),
+    )
+    request = request.override(
+        messages=[*request.messages[:2], error, result], tools=tools,
+    )
+    original = result.content
+    selected = select_context(request, 10_000)
+    assert selected.fits is reader_allowed
+    assert selected.request.messages[2].content == error.content
+    assert selected.request.messages[:2] == request.messages[:2]
+    assert [m.tool_call_id for m in selected.request.messages[2:]] == [
+        "a", "b",
+    ]
+    assert result.content == original
+    assert len(store.evidence) == 200
+    if reader_allowed:
+        assert selected.after <= 10_000
+        preview = json.loads(selected.request.messages[-1].content)
+        shown = [p for p in preview if "id" in p]
+        assert 0 < len(shown) < 200
+        assert preview[-1]["context_omitted_count"] == 200 - len(shown)
+        assert selected.omitted_previews == 200 - len(shown)
+        assert "read_evidence" in preview[-1]["retrieval"]
+        # Omitted references remain discoverable and fully readable.
+        omitted = records[-1]
+        page = store.read(None, 180)
+        assert str(omitted.id) in {p.get("id") for p in page}
+        full = store.read(str(omitted.id), 0)[0]
+        assert json.loads(full["content"]) == omitted.model_dump(mode="json")
+    else:
+        assert selected.omitted_previews == 0
+        assert len(json.loads(selected.request.messages[-1].content)) == 200
+
+
+def test_bounded_indexes_keep_current_detail_and_pagination_metadata():
+    request, _ = request_with_results()
+    items = [r.model_dump(mode="json") for r in
+             [evidence(summary=f"error {i}") for i in range(200)]]
+    items.append({"total_evidence": 500, "next_offset": 200})
+    old = request.messages[2].model_copy(update={
+        "content": json_text(items), "artifact": context_index(items),
+    })
+    detail = request.messages[-1].model_copy(update={
+        "content": json_text([{"id": "b", "content": "详情" * 600}]),
+        "artifact": {"context_index": [{"id": "b"}], "detail_page": True},
+    })
+    request = request.override(messages=[*request.messages[:2], old, detail],
+                               tools=[{"name": "read_evidence",
+                                       "description": "Read stored evidence",
+                                       "parameters": {"type": "object"}}])
+    selected = select_context(request, 9000)
+    assert selected.fits
+    assert selected.omitted_previews > 0
+    assert selected.request.messages[-1].content == detail.content
+    assert {"total_evidence": 500, "next_offset": 200} in json.loads(
+        selected.request.messages[2].content
+    )
+
+
 def test_estimator_counts_schema_unicode_and_ignores_private_artifacts():
     request, _ = request_with_results()
     base = estimate_input(request)

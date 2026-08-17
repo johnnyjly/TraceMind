@@ -323,17 +323,36 @@ framing allowance. It deliberately overestimates ordinary text/JSON tokens;
 it is not a provider tokenizer or a guarantee about billing or model limits.
 Provider-reported usage remains separately recorded.
 
-Defaults in `.env.example` are:
+The example diagnostic profile in `.env.example` is:
 
-| Setting suffix (`TRACEMIND_AGENT_`) | Default | Meaning |
+| Setting suffix (`TRACEMIND_AGENT_`) | Example profile | Meaning |
 | --- | --- | --- |
-| `CONTEXT_TOKENS` | 32768 | Estimated input plus reserved output allowance |
-| `OUTPUT_TOKENS` | 4096 | Output reservation and provider output cap |
+| `CONTEXT_TOKENS` | 131072 | Estimated input plus reserved output allowance |
+| `OUTPUT_TOKENS` | 8192 | Output reservation and provider output cap |
 | `OBSERVATION_BYTES` | 8388608 | Maximum stored serialized evidence bytes |
+| `RECURSION_LIMIT` | 50 | Graph step limit; a model/tool cycle uses multiple steps |
+| `MAX_MODEL_CALLS` | 15 | Model attempts, including retries and repairs |
+| `MAX_TOOL_CALLS` | 25 | Tool attempts, including retries and evidence reads |
+| `TIMEOUT_SECONDS` | 300 | Whole-run deadline in seconds |
+
+The input allowance is 122,880 estimate units after reserving output. These
+settings override the smaller code defaults when `.env` is loaded. Choose
+allowances compatible with your provider's model capacity. They limit maximum
+work; the agent can finish earlier when it has sufficient evidence.
+
+`.env.example` lists all application settings, grouped by function. Keep local
+keys and backend addresses in `.env`. After changing it, restart the API and
+worker and create a new run: existing runs retain their saved `RunLimits`.
+The evaluation runner also caps tool calls by the case's `max_tool_calls`.
 
 When input exceeds its allowance, the oldest tool results are replaced with
-compact evidence indexes first. Every displayed evidence ID and every
-assistant tool-call/result pair is retained. System instructions, incident
+compact evidence indexes first. If those still exceed the allowance and
+`read_evidence` is authorized, old indexes become bounded previews with explicit
+`context_omitted_count` records and a catalogue retrieval instruction. Preview
+selection preserves result order and does not rank causal importance. All
+evidence IDs remain stored and discoverable through `read_evidence`; every
+assistant tool-call/result pair is retained. Without that tool, indexes retain
+all references and the context gate can stop the run. System instructions, incident
 information, and assistant messages are preserved. A newly requested detail
 page reaches the model intact. Compression changes the model input view, not
 the stored observations or graph message history; no summarization LLM is used.
@@ -344,7 +363,8 @@ evidence. The byte limit bounds serialized retained observations, not Python
 heap usage or HTTP response buffering. This is not a persistent artifact store.
 
 `context.selected` events record input estimates before/after reduction,
-reduced-message counts, output reservation, and admission outcome.
+reduced-message counts, omitted-reference counts, input allowance, output
+reservation, and admission outcome.
 `observations.stored` events record received/new/duplicate/omitted-preview
 counts and stored bytes. `observations.limit` distinguishes store exhaustion.
 These events contain no raw observation payloads. Evaluation reports already

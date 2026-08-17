@@ -623,6 +623,55 @@ def test_large_results_compress_and_omitted_counterevidence_is_retrievable(
     assert "SUCCESS" not in json.dumps(events_at(tmp_path))
 
 
+def test_accumulating_logs_continue_after_bounded_index_compression(tmp_path):
+    records = [Evidence(
+        source=EvidenceSource.LOG, summary=f"Payment failure {i}",
+        service="payment", observed_at=END,
+        attributes={"details": "x" * 850},
+    ) for i in range(300)]
+    records[-1] = records[-1].model_copy(update={
+        "summary": "Payment succeeded", "attributes": {"status": "SUCCESS"},
+    })
+
+    class LargeTelemetry(Telemetry):
+        async def query(self, expression, *, at=None):
+            phase = int(expression[-1])
+            return records[(phase - 1) * 100:phase * 100]
+
+    def respond(messages, calls):
+        if calls <= 3:
+            return tool_call(arguments={"expression": f"phase_{calls}"})
+        last = next(m for m in reversed(messages)
+                    if isinstance(m, ToolMessage))
+        content = json.loads(last.content)
+        if calls == 4:
+            assert any("context_omitted_count" in item
+                       for m in messages if isinstance(m, ToolMessage)
+                       for item in json.loads(m.content))
+            return tool_call("read_evidence", {"offset": 280})
+        if calls == 5:
+            assert str(records[-1].id) in {p.get("id") for p in content}
+            return tool_call("read_evidence", {
+                "evidence_id": str(records[-1].id), "offset": 0,
+            })
+        assert "SUCCESS" in content[0]["content"]
+        return diagnosis(messages)
+
+    model = ScriptedModel(respond=respond)
+    run = run_service(make_service(
+        model, LargeTelemetry(), tmp_path, recursion_limit=50,
+    ))
+    assert run.state.status is RunStatus.SUCCEEDED
+    assert model.calls == 6
+    assert len(run.evidence) == 300
+    assert run.diagnosis.evidence_ids == [records[-1].id]
+    selections = [e.data for e in run.state.events
+                  if e.kind == "context.selected"]
+    assert any(e["omitted_previews"] > 0 for e in selections)
+    assert all(e["fits"] and e["estimated_input_after"] <= e["input_allowance"]
+               for e in selections)
+
+
 def test_context_limit_stops_before_provider_and_keeps_terminal_event(
     tmp_path,
 ):

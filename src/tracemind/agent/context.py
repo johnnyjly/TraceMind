@@ -97,7 +97,8 @@ class ContextSelection:
     """Describe a model-input view and its estimated fit within an allowance.
 
     Before/after values use the same estimator; reduced_messages counts
-    replaced tool results. A false fits value requires the caller to stop.
+    replaced tool results and omitted_previews counts hidden references.
+    A false fits value requires the caller to stop.
     """
 
     request: ModelRequest
@@ -105,13 +106,32 @@ class ContextSelection:
     after: int
     reduced_messages: int
     fits: bool
+    omitted_previews: int = 0
+
+
+def bounded_index(items: list[dict], count: int) -> list[dict]:
+    """Retain a prefix of evidence references and all non-evidence records.
+
+    Omission concerns this input view only. The run-local evidence catalogue
+    remains pageable, including references no longer displayed here.
+    """
+    references = [item for item in items if "id" in item]
+    metadata = [item for item in items if "id" not in item]
+    return [*references[:count], *metadata, {
+        "context_omitted_count": len(references) - count,
+        "retrieval": (
+            "read_evidence without evidence_id pages all run-local evidence; "
+            "with evidence_id reads full detail"
+        ),
+    }]
 
 
 def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
     """Reduce tool results oldest first to fit the input-only allowance.
 
-    Use application-generated indexes while preserving evidence references
-    and tool-call/result pairs. Keep newly requested detail pages intact.
+    Use application-generated indexes, then bounded previews if authorized
+    evidence retrieval is available. Preserve tool-call/result pairs and
+    newly requested detail pages. Count omitted references explicitly.
     Return fits=False if reduction is insufficient. Original messages and
     stored evidence are not mutated; output space must be reserved by the
     caller before supplying allowance.
@@ -125,10 +145,10 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
         (i for i, m in enumerate(messages)
          if isinstance(m, AIMessage) and m.tool_calls), default=-1
     )
-    reduced = 0
+    reduced = set()
+    eligible = []
     after = before
     # Oldest results first; never remove an assistant call or its response.
-    # Keep every evidence ID, even if it means stopping at the context limit.
     for index, message in enumerate(messages):
         if not isinstance(message, ToolMessage):
             continue
@@ -138,15 +158,67 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
         # A requested detail page must reach the model intact this round.
         if index > last_call and artifact.get("detail_page"):
             continue
+        eligible.append(index)
         content = json_text(artifact["context_index"])
         if len(content.encode()) >= len(str(message.content).encode()):
             continue
         messages[index] = message.model_copy(update={"content": content})
-        reduced += 1
+        reduced.add(index)
         candidate = request.override(messages=messages)
         after = estimate_input(candidate)
         if after <= allowance:
-            return ContextSelection(candidate, before, after, reduced, True)
+            return ContextSelection(
+                candidate, before, after, len(reduced), True
+            )
+
+    # Omitted references must remain discoverable through an authorized tool.
+    can_read = any(
+        convert_to_openai_tool(tool)["function"]["name"] == "read_evidence"
+        for tool in request.tools
+    )
+    omitted = 0
+    if can_read:
+        for index in eligible:
+            message = messages[index]
+            items = message.artifact["context_index"]
+            count = sum("id" in item for item in items)
+            if not count:
+                continue
+
+            def candidate(keep: int) -> ModelRequest:
+                """Build a view while preserving messages and artifacts."""
+                view = list(messages)
+                view[index] = message.model_copy(update={
+                    "content": json_text(bounded_index(items, keep)),
+                })
+                return request.override(messages=view)
+
+            compact = candidate(0)
+            size = estimate_input(compact)
+            if size >= after:
+                continue
+            # Binary search accounts for JSON escaping and request framing,
+            # retaining as many previews as the actual estimator permits.
+            keep = 0
+            if size <= allowance:
+                low, high = 0, count - 1
+                while low <= high:
+                    middle = (low + high) // 2
+                    probe = candidate(middle)
+                    if estimate_input(probe) <= allowance:
+                        keep, compact = middle, probe
+                        low = middle + 1
+                    else:
+                        high = middle - 1
+            messages = list(compact.messages)
+            after = estimate_input(compact)
+            reduced.add(index)
+            omitted += count - keep
+            if after <= allowance:
+                return ContextSelection(
+                    compact, before, after, len(reduced), True, omitted
+                )
     return ContextSelection(
-        request.override(messages=messages), before, after, reduced, False
+        request.override(messages=messages), before, after, len(reduced),
+        False, omitted,
     )
