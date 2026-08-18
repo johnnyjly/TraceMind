@@ -240,11 +240,27 @@ def create_telemetry_tools(
         return result, context_index(result)
 
     @tool(response_format="content_and_artifact")
-    async def query_metrics(expression: str) -> tuple[list[dict], dict]:
+    async def query_metrics(
+        expression: Annotated[str, Field(description=(
+            "PromQL expression returning an instant vector, using confirmed "
+            "metric names and label values. Not a bare range vector or "
+            "scalar. "
+            "Query time is fixed to the investigation end by the application."
+        ))],
+    ) -> tuple[list[dict], dict]:
         """Query an instant vector at the investigation end time.
 
-        Discover unknown names/labels first. Empty results do not establish
-        service health and may mean mismatched labels or absent samples.
+        Use when sample values are needed to check a hypothesis. Reuse known
+        names and labels; discover_metrics is optional if they are confirmed.
+        Skip this tool when existing evidence already answers the question.
+        Returns normalized observations with evidence IDs, or empty-query
+        guidance without evidence IDs. An empty result does not establish
+        health: check names, labels and sample availability before retrying.
+
+        Conditional example: ONLY if discovery returned request_count_total
+        and the label job="orders", query_metrics with expression
+        'request_count_total{job="orders"}' can inspect those samples.
+        If names or labels are unknown, discover them instead of guessing.
         """
         result, artifact = await execute(
             "query_metrics", {"expression": expression},
@@ -266,17 +282,48 @@ def create_telemetry_tools(
 
     @tool(response_format="content_and_artifact")
     async def discover_metrics(
-        service: Annotated[str | None, Field(max_length=120)] = None,
-        metric: Annotated[str | None, Field(max_length=240)] = None,
-        limit: Annotated[int, Field(ge=1, le=50)] = 20,
+        service: Annotated[str | None, Field(
+            max_length=120, description=(
+                "Exact service value matched against service_name, service "
+                "or job labels, not a substring or regex. Omit or use null "
+                "for a bounded global catalogue when these labels are unknown."
+            ),
+        )] = None,
+        metric: Annotated[str | None, Field(
+            max_length=240, description=(
+                "One exact metric name returned by discovery, not PromQL or "
+                "a regex. Set it to inspect that metric's label examples; "
+                "omit or use null to discover distinct metric names first."
+            ),
+        )] = None,
+        limit: Annotated[int, Field(
+            ge=1, le=50, description=(
+                "Maximum distinct names and maximum series inspected per "
+                "metadata request (1-50, default 20), not an evidence count "
+                "or time range. Results may be incomplete even at this limit."
+            ),
+        )] = 20,
     ) -> tuple[list[dict], dict]:
         """Discover metric names and label examples before writing PromQL.
 
-        Read at most limit distinct names and limit series in the investigation
-        window. Service matches service_name, service or job exactly; omit it
-        for a bounded global catalogue if those labels are unknown. Pass a
-        discovered metric name to inspect its labels when examples are missing.
-        Metadata is not citable fault evidence or sample values.
+        Use when relevant names or labels are unknown, including after an
+        empty query with suspected mismatched names/labels. Reuse previously
+        discovered metadata instead of rediscovering it for every query.
+        Skip discovery when names/labels are known or evidence is sufficient.
+        The application fixes the investigation window; do not supply dates.
+
+        Returns metrics containing metric, label_keys and example_labels.
+        Empty example_labels means no examples were included, not that the
+        metric has no labels; pass its exact returned name as metric to inspect
+        it. possibly_truncated, omitted_metrics and labels_truncated mark
+        incomplete coverage. Empty discovery may mean service labels differ;
+        bounded global discovery can reveal them. Absence never proves health.
+        Metadata has no evidence IDs or sample values and cannot be cited.
+
+        Examples: If the incident names orders and metric names are unknown,
+        discover_metrics(service="orders") finds candidates to query.
+        If retained evidence already supports a user's explanation request,
+        answer directly without discovery or another metric query.
         """
         async def discover() -> list[dict]:
             """Return metadata without storing observations or evidence IDs."""
