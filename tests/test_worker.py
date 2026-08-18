@@ -5,6 +5,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from langchain_core.language_models import BaseChatModel
@@ -298,3 +299,158 @@ def test_active_cancellation_stops_worker(tmp_path: Path) -> None:
     assert stored.state.stop_reason.value == "cancelled"
     assert len(stored.evidence) == 1
     assert repository.claim_next() is None
+
+
+@pytest.mark.parametrize("forever", [False, True])
+@pytest.mark.parametrize("phase", ["checkpoint", "model"])
+def test_worker_shutdown_finalizes_claim_and_preserves_queued_work(
+    tmp_path: Path, monkeypatch, forever, phase,
+) -> None:
+    """Worker cancellation cleans up and exits without claiming another run."""
+    settings = Settings(
+        _env_file=None, agent_run_database=tmp_path / "runs.sqlite3",
+        agent_checkpoint_database=tmp_path / "checkpoints.sqlite3",
+        agent_trace_directory=tmp_path / "traces",
+    )
+    repository = RunRepository(settings.agent_run_database)
+    first = RunState(
+        incident=Incident(title="checkout failure", description="HTTP 500"),
+        investigation_start=START,
+        investigation_end=START + timedelta(hours=1),
+        limits=RunLimits(), allowed_tools=("query_metrics",),
+        status=RunStatus.QUEUED,
+    )
+    second = first.model_copy(deep=True, update={"id": uuid4()})
+    repository.create(first, request_hash="active-shutdown")
+    repository.create(second, request_hash="keep-queued")
+    entered = asyncio.Event()
+
+    class WaitingModel(ScriptedModel):
+        """Block the second model call after real evidence was persisted."""
+
+        async def _agenerate(self, messages, **kwargs):
+            if self.calls == 1:
+                self.calls += 1
+                entered.set()
+                await asyncio.Future()
+            return await super()._agenerate(messages, **kwargs)
+
+    if phase == "checkpoint":
+        async def wait_for_checkpoint(*_args, **_kwargs):
+            """Interrupt setup after the run is claimed, before diagnosis."""
+            entered.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(
+            AsyncSqliteSaver, "aget_tuple", wait_for_checkpoint,
+        )
+    model, telemetry = WaitingModel(), Telemetry()
+
+    async def execute():
+        worker = RunWorker(settings, repository=repository,
+                           service_factory=lambda saver, _client:
+                           DiagnosisService(
+                               telemetry, telemetry, telemetry,
+                               LangChainAgentRunner(model, checkpointer=saver),
+                               event_directory=settings.agent_trace_directory,
+                           ))
+        task = asyncio.create_task(
+            worker.run_forever() if forever else worker.run_once()
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=3)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(execute())
+    saved = RunRepository(repository.path).get(first.id)
+    assert saved.state.status is RunStatus.CANCELLED
+    assert saved.state.stop_reason is StopReason.CANCELLED
+    assert saved.state.finished_at is not None
+    # Worker stop is distinct from an API cancellation request.
+    assert not saved.cancel_requested
+    assert len(saved.evidence) == (1 if phase == "model" else 0)
+    assert saved.state.model_calls == (2 if phase == "model" else 0)
+    assert saved.state.tool_calls == (
+        {"query_metrics": 1} if phase == "model" else {}
+    )
+    terminal = [e for e in saved.state.events if e.kind == "run.finished"]
+    assert len(terminal) == 1
+    assert terminal[0].data["status"] == "cancelled"
+    assert repository.get(second.id).state.status is RunStatus.QUEUED
+    with sqlite3.connect(repository.path) as connection:
+        assert connection.execute(
+            "SELECT lease_owner,lease_until FROM runs WHERE id=?",
+            (str(first.id),),
+        ).fetchone() == (None, None)
+
+
+def test_api_cancellation_keeps_worker_running_for_next_run(tmp_path):
+    """Cancelling only the diagnosis still permits a queued run to complete."""
+    settings = Settings(
+        _env_file=None, agent_run_database=tmp_path / "runs.sqlite3",
+        agent_checkpoint_database=tmp_path / "checkpoints.sqlite3",
+        agent_trace_directory=tmp_path / "traces",
+    )
+    repository = RunRepository(settings.agent_run_database)
+    first = RunState(
+        incident=Incident(title="checkout failure", description="HTTP 500"),
+        investigation_start=START,
+        investigation_end=START + timedelta(hours=1),
+        limits=RunLimits(), allowed_tools=("query_metrics",),
+        status=RunStatus.QUEUED,
+    )
+    second = first.model_copy(deep=True, update={"id": uuid4()})
+    repository.create(first, request_hash="api-cancel")
+    repository.create(second, request_hash="after-api-cancel")
+    entered = asyncio.Event()
+
+    class WaitingModel(ScriptedModel):
+        """Wait only in the first run; the next run uses normal responses."""
+
+        async def _agenerate(self, messages, **kwargs):
+            if self.calls == 1:
+                self.calls += 1
+                entered.set()
+                await asyncio.Future()
+            return await super()._agenerate(messages, **kwargs)
+
+    model, telemetry = WaitingModel(), Telemetry()
+
+    async def execute():
+        worker = RunWorker(settings, repository=repository,
+                           service_factory=lambda saver, _client:
+                           DiagnosisService(
+                               telemetry, telemetry, telemetry,
+                               LangChainAgentRunner(model, checkpointer=saver),
+                               event_directory=settings.agent_trace_directory,
+                           ))
+        task = asyncio.create_task(worker.run_forever())
+
+        async def wait_for_result():
+            """Wait for the second run's durable terminal snapshot."""
+            while repository.get(second.id).state.status is not (
+                RunStatus.SUCCEEDED
+            ):
+                await asyncio.sleep(.01)
+
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=3)
+            repository.cancel(first.id)
+            await asyncio.wait_for(wait_for_result(), timeout=3)
+            assert not task.done()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(execute())
+    cancelled = repository.get(first.id)
+    assert cancelled.state.status is RunStatus.CANCELLED
+    assert cancelled.cancel_requested
+    assert len(cancelled.evidence) == 1
+    assert repository.get(second.id).result.diagnosis.evidence_ids

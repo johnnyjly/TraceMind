@@ -81,7 +81,13 @@ class RunWorker:
                 break
 
     async def run_once(self) -> bool:
-        """Execute at most one claim; return False when the queue is empty."""
+        """Execute one claim, finalizing cancellation before worker shutdown.
+
+        Cancelling a diagnosis leaves the worker available for another claim.
+        Cancelling the worker task propagates after resources and state close.
+        Return False when the queue is empty.
+        """
+        worker_task = asyncio.current_task()
         claim = self.repository.claim_next()
         if claim is None:
             return False
@@ -130,17 +136,19 @@ class RunWorker:
                     except DiagnosisError as exc:
                         state = exc.state or state
                         evidence = exc.evidence
-                    except asyncio.CancelledError as exc:
-                        if isinstance(exc, DiagnosisCancelled):
-                            state, evidence = exc.state, exc.evidence
-                        state.status = RunStatus.CANCELLED
-                        state.stop_reason = StopReason.CANCELLED
                     finally:
                         monitor.cancel()
                         with suppress(asyncio.CancelledError):
                             await monitor
+        except asyncio.CancelledError as exc:
+            if isinstance(exc, DiagnosisCancelled):
+                state, evidence = exc.state, exc.evidence
+            state.status = RunStatus.CANCELLED
+            state.stop_reason = StopReason.CANCELLED
         except RunConflict:
             logger.warning("Run %s: worker lease lost", run_id)
+            if worker_task.cancelling():
+                raise asyncio.CancelledError
             return True
         except Exception as exc:
             logger.error("Run %s: worker failed (%s)",
@@ -165,8 +173,12 @@ class RunWorker:
         except RunConflict:
             logger.warning("Run %s: worker lease lost before finalization",
                            run_id)
-            return True
-        logger.info("Run %s finished: %s", run_id, state.status.value)
+        else:
+            logger.info("Run %s finished: %s", run_id, state.status.value)
+        # A cancelled child diagnosis does not cancel this task. A SIGINT or
+        # caller cancellation does, and must stop polling after finalization.
+        if worker_task.cancelling():
+            raise asyncio.CancelledError
         return True
 
     async def run_forever(self, *, poll_seconds: float = 1) -> None:
