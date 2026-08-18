@@ -166,7 +166,9 @@ tool-name policy; it does not provide service or tenant isolation. SDK retries
 are disabled in S1 so hidden retries cannot multiply calls. Failed calls are
 counted; calls rejected before backend execution are not admitted tool calls.
 
-Budget/repetition/recursion stops produce an `inconclusive` diagnosis. Operational
+Model/context/recursion exhaustion produces an `inconclusive` diagnosis. Tool
+budget and repetition limits close investigation and allow a final diagnosis
+within remaining hard budgets. Operational
 timeouts return HTTP 504; tool/model failures and invalid diagnoses return 502.
 Error `detail` remains a string. Responses for completed or failed runs include
 `X-TraceMind-Run-ID` and `X-TraceMind-Stop-Reason` headers. Investigation
@@ -477,7 +479,35 @@ but do not advance the no-progress counter. Rejected diagnosis exchanges stay
 in graph history, and mixed batches still execute ordinary telemetry calls
 with paired call IDs. Exhaustion returns an inconclusive diagnosis with
 `invalid_diagnosis`. Three consecutive investigation rounds without new
-evidence stop with `no_progress`; this is an evidence-based
-stall heuristic, not a judgment of reasoning quality. Both outcomes retain
-partial evidence. Configure these limits through
+usable observations trigger `no_progress`; this is an observation-based
+stall heuristic, not a judgment of reasoning quality. Rereading a previously
+returned preview does not advance it; reading a previously unseen detail page
+can. Configure these limits through
 `TRACEMIND_AGENT_DIAGNOSIS_REPAIRS` and `TRACEMIND_AGENT_NO_PROGRESS_ROUNDS`.
+
+### Final diagnosis after tool investigation closes
+
+`no_progress`, `tool_budget`, and `repeated_tool_call` close investigation when
+there is remaining model-call budget and time. Middleware removes all telemetry
+and `read_evidence` tools from subsequent model requests and instructs the model
+to submit its diagnosis using evidence already supplied. With tool-based
+structured output, only `DiagnosisDraft` remains exposed as the result-submission
+mechanism. Native structured output needs no tool for submitting the result.
+
+Already-admitted parallel queries can finish within existing timeouts. Calls
+rejected by the closure return paired error messages without reaching a backend
+or consuming additional tool attempts. A model ignoring closure receives only
+the configured diagnosis repair allowance; tools stay closed during repairs.
+Citation and investigation-window validation still apply. A valid diagnosis
+can be complete or inconclusive with a useful explanation; there is no forced
+claim of a confirmed cause.
+
+Finalization adds no model attempts, timeout, context space, graph steps, retry,
+or repair allowance. Model/context/graph exhaustion, cancellation, and the
+deadline retain their existing stop behavior. If final output cannot be obtained
+or validated within those limits, the existing fallback/failure path is used.
+`policy.finalizing` records why investigation closed, while the terminal stop
+reason describes the final outcome (`completed`, `insufficient_evidence`, or a
+hard stop). `tool.skipped` identifies rejected tool dispatches. SSE displays
+the transition as “工具调查已停止，正在根据已有证据整理结论”. The persisted phase
+event keeps tools closed when a worker resumes; no database migration is needed.

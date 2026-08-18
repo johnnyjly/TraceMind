@@ -6,6 +6,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -24,7 +25,7 @@ from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
 from tracemind.agent.worker import RunWorker
 from tracemind.config import Settings
 from tracemind.models import Evidence, EvidenceSource, Incident
-from tracemind.models.run import RunLimits, RunState, RunStatus
+from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
 
 
 START = datetime(2024, 9, 1, tzinfo=UTC)
@@ -146,8 +147,9 @@ def test_worker_persists_graph_and_terminal_result(tmp_path: Path) -> None:
     assert stored.result.diagnosis.evidence_ids == [stored.evidence[0].id]
 
 
+@pytest.mark.parametrize("finalizing", [False, True])
 def test_resume_reuses_checkpoint_and_retained_evidence(
-    tmp_path: Path,
+    tmp_path: Path, finalizing: bool,
 ) -> None:
     """Restart after a tool step without reissuing its telemetry query."""
     settings = Settings(
@@ -202,6 +204,8 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
                 {"messages": [{"role": "user", "content": "Investigate"}]},
                 {"configurable": {"thread_id": str(state.id)}},
             )
+        if finalizing:
+            harness.begin_finalization(StopReason.NO_PROGRESS)
         harness._close_trace()
 
     asyncio.run(first_step())
@@ -235,6 +239,12 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
     assert telemetry.calls == 1
     assert completed.result is not None
     assert completed.result.diagnosis.evidence_ids == [halfway.evidence[0].id]
+    if finalizing:
+        assert resumed_model.bindings == [["DiagnosisDraft"]]
+        phases = [e for e in completed.state.events
+                  if e.kind == "policy.finalizing"]
+        assert len(phases) == 1
+        assert phases[0].data["reason"] == "no_progress"
 
 
 def test_active_cancellation_stops_worker(tmp_path: Path) -> None:

@@ -198,7 +198,8 @@ causal quality against ground truth and reviewed cases.
 | Backend unavailable | Record failure; agent can use remaining authorized sources |
 | Provider failure | Bounded retry; optional compatible fallback with recorded model switch |
 | Malformed diagnosis | Bounded schema/contract repair |
-| Budget exhaustion or no progress | Persist partial results and explicit stop reason |
+| Tool budget, repeated calls, or no progress | Close tools; submit a validated diagnosis from existing evidence within remaining hard budgets |
+| Model/context/graph exhaustion, deadline, cancellation | Stop under existing limits; persist partial results and explicit reason |
 | Unexpected software error | Mark failed and retain diagnostic trace |
 
 Choose one transport-retry owner and account for SDK retries explicitly.
@@ -243,7 +244,10 @@ mock telemetry, plus relevant live scenarios. The following are planned gates.
 | S6: optional memory | Confirmed records, scoped retrieval, provenance and expiry | Memory-on/off comparison on held-out cases; reject stale/unconfirmed records and prevent ground-truth leakage |
 
 S3 implements harness-owned retries, opt-in model fallback, bounded diagnosis
-repair, and evidence-based no-progress termination, with injected-failure tests.
+repair, and observation-based no-progress detection, with injected-failure tests.
+Tool budget, repetition, and no-progress limits enter a tool-free finalization
+phase when model-call budget and time remain. The phase is recorded in durable
+events; final output shares existing budgets and citation validation.
 S4 adds a separate worker, SQLite run/evidence ledger, and LangGraph SQLite
 checkpoints for queued runs. The synchronous API and evaluation paths still run
 without persistent recovery. The two databases do not share a transaction;

@@ -18,7 +18,7 @@ from test_harness import (
 )
 
 from tracemind.agent import DiagnosisService, LangChainAgentRunner
-from tracemind.agent.harness import RunHarness, RunStopped
+from tracemind.agent.harness import InvestigationClosed, RunHarness, RunStopped
 from tracemind.agent.llm import create_chat_model, create_fallback_model
 from tracemind.agent.recovery import classify_failure, retry_after_seconds
 from tracemind.config import Settings
@@ -164,8 +164,8 @@ def test_parallel_tool_retries_share_the_attempt_budget():
     results = asyncio.run(scenario())
     assert attempts == run.state.backend_attempts == 3
     assert run.state.tool_calls == {"query_metrics": 3}
-    assert all(isinstance(result, RunStopped) for result in results)
-    assert all(result.reason is StopReason.TOOL_BUDGET for result in results)
+    assert all(isinstance(result, InvestigationClosed) for result in results)
+    assert run.finalization_reason is StopReason.TOOL_BUDGET
 
 
 def test_fallback_requires_explicit_pair_and_selected_provider_key():
@@ -346,19 +346,27 @@ def test_malformed_schema_repair_preserves_provider_usage(tmp_path, native):
     assert run.state.stop_reason is StopReason.INSUFFICIENT_EVIDENCE
 
 
-def test_distinct_empty_queries_stop_without_fabricating_evidence(tmp_path):
+def test_empty_queries_finalize_without_fabricating_evidence(tmp_path):
     class EmptyTelemetry(Telemetry):
         async def query(self, expression, *, at=None):
             self.calls.append(expression)
             return []
 
-    model = ScriptedModel(respond=lambda messages, calls: tool_call(
-        arguments={"expression": str(calls)}
-    ))
+    def respond(messages, calls):
+        if calls <= 3:
+            return tool_call(arguments={"expression": str(calls)})
+        return tool_call("DiagnosisDraft", {
+            "status": "inconclusive", "root_cause": "No observations found",
+            "confidence": 0,
+        })
+
+    model = ScriptedModel(respond=respond)
     telemetry = EmptyTelemetry()
     run = run_service(make_service(model, telemetry, tmp_path))
-    assert run.state.stop_reason is StopReason.NO_PROGRESS
-    assert run.state.model_calls == 3
+    assert run.state.stop_reason is StopReason.INSUFFICIENT_EVIDENCE
+    assert run.state.model_calls == 4
+    assert any(e.kind == "policy.finalizing" and e.data["reason"]
+               == "no_progress" for e in run.state.events)
     assert telemetry.calls == ["1", "2", "3"]
     assert run.diagnosis.status is DiagnosisStatus.INCONCLUSIVE
     assert run.evidence == []

@@ -191,29 +191,38 @@ def test_real_loop_success_records_usage_evidence_and_terminal_event(tmp_path):
     assert tool_start["parent_span_id"] in model_spans
 
 
-@pytest.mark.parametrize("limits, reason, model_calls, tool_calls", [
-    (RunLimits(model_calls=1), StopReason.MODEL_BUDGET, 1, 1),
-    (RunLimits(tool_calls=1), StopReason.TOOL_BUDGET, 2, 1),
-    (RunLimits(identical_tool_calls=2), StopReason.REPEATED_TOOL_CALL, 3, 2),
+@pytest.mark.parametrize("limits, reason, calls, tools, finalizing", [
+    (RunLimits(model_calls=1), StopReason.MODEL_BUDGET, 1, 1, None),
+    (RunLimits(tool_calls=1), StopReason.INVALID_DIAGNOSIS, 3, 1,
+     StopReason.TOOL_BUDGET),
+    (RunLimits(identical_tool_calls=2), StopReason.INVALID_DIAGNOSIS, 5, 2,
+     StopReason.REPEATED_TOOL_CALL),
 ])
 def test_loop_limits_are_enforced_before_execution(
-    tmp_path, limits, reason, model_calls, tool_calls,
+    tmp_path, limits, reason, calls, tools, finalizing,
 ):
     model = ScriptedModel(respond=lambda messages, calls: tool_call())
     telemetry = Telemetry()
     run = run_service(make_service(model, telemetry, tmp_path, limits=limits))
     assert run.state.status is RunStatus.INCONCLUSIVE
     assert run.state.stop_reason is reason
-    assert model.calls == model_calls
-    assert len(telemetry.calls) == run.tool_call_count == tool_calls
+    assert model.calls == calls
+    assert len(telemetry.calls) == run.tool_call_count == tools
     # Identical observations share a citation even across repeated queries.
     assert len(run.evidence) == 1
     completed = [event for event in run.state.events
                  if event.kind == "tool.completed"]
-    assert len(completed) == tool_calls
+    assert len(completed) == tools
     assert all(event.data["evidence_ids"] == [str(run.evidence[0].id)]
                for event in completed)
     assert run.diagnosis.confidence == 0
+    phases = [e.data["reason"] for e in run.state.events
+              if e.kind == "policy.finalizing"]
+    assert phases == ([finalizing.value] if finalizing else [])
+    if finalizing:
+        # A model ignoring closed tools gets only the bounded repair allowance.
+        assert model.bindings[-1] == ["DiagnosisDraft"]
+        assert run.state.diagnosis_repairs == limits.diagnosis_repairs
 
 
 @pytest.mark.parametrize("name", [
@@ -256,31 +265,69 @@ def test_executor_rechecks_policy_even_when_tool_was_previously_visible():
     asyncio.run(scenario())
 
 
-def test_parallel_calls_share_budget_and_cancel_started_sibling(tmp_path):
+def test_parallel_budget_preserves_started_sibling(tmp_path, monkeypatch):
+    release, closed = asyncio.Event(), asyncio.Event()
+    begin = RunHarness.begin_finalization
+
+    def mark_closed(self, reason):
+        begin(self, reason)
+        closed.set()
+
+    monkeypatch.setattr(RunHarness, "begin_finalization", mark_closed)
+
+    class PendingTelemetry(Telemetry):
+        async def query(self, expression, *, at=None):
+            self.calls.append(expression)
+            self.entered.set()
+            await release.wait()
+            return [Evidence(source=EvidenceSource.METRIC,
+                             summary="Payment errors=10", observed_at=END)]
+
     def respond(messages, calls):
+        if calls == 2:
+            results = [json.loads(m.content) for m in messages
+                       if isinstance(m, ToolMessage)]
+            item = next(r[0] for r in results if isinstance(r, list))
+            return tool_call("DiagnosisDraft", {
+                "status": "complete", "root_cause": "Payment Charge failed",
+                "confidence": .8, "evidence_ids": [item["id"]],
+            })
         first = tool_call(arguments={"expression": "first"})
         second = tool_call(arguments={"expression": "second"})
         return AIMessage(
             content="", tool_calls=first.tool_calls + second.tool_calls
         )
 
-    telemetry = Telemetry(block=True)
+    telemetry = PendingTelemetry()
     model = ScriptedModel(respond=respond)
-    run = run_service(make_service(
+    service = make_service(
         model, telemetry, tmp_path, limits=RunLimits(tool_calls=1)
-    ))
-    assert run.state.stop_reason is StopReason.TOOL_BUDGET
+    )
+
+    async def scenario():
+        task = asyncio.create_task(service.diagnose_with_evidence(
+            INCIDENT, start=START, end=END,
+        ))
+        await asyncio.wait_for(closed.wait(), timeout=2)
+        assert not task.done()
+        release.set()
+        return await asyncio.wait_for(task, timeout=2)
+
+    run = asyncio.run(scenario())
+    assert run.state.stop_reason is StopReason.COMPLETED
     assert len(telemetry.calls) == 1
-    assert telemetry.cancelled
+    assert not telemetry.cancelled
+    assert run.diagnosis.evidence_ids == [run.evidence[0].id]
     events = events_at(tmp_path)
-    assert any(event["kind"] == "tool.cancelled" for event in events)
+    assert any(event["kind"] == "tool.skipped" for event in events)
+    assert not any(event["kind"] == "tool.cancelled" for event in events)
     assert events[-1]["kind"] == "run.finished"
     assert run.state.usage.unreported_model_calls == 1
 
 
 @pytest.mark.parametrize("limits, reason", [
     (RunLimits(tool_timeout_seconds=0.02, retry_backoff_seconds=0),
-     StopReason.REPEATED_TOOL_CALL),
+     StopReason.INVALID_DIAGNOSIS),
     (RunLimits(duration_seconds=0.05), StopReason.DEADLINE),
 ])
 def test_tool_timeout_and_run_deadline_cancel_backend(
@@ -300,6 +347,8 @@ def test_tool_timeout_and_run_deadline_cancel_backend(
         assert run.diagnosis.status is DiagnosisStatus.INCONCLUSIVE
         assert len(telemetry.calls) == 6
         assert state.backend_attempts == 6
+        assert any(e.kind == "policy.finalizing" and e.data["reason"]
+                   == "repeated_tool_call" for e in state.events)
     assert state.stop_reason is reason
     assert telemetry.cancelled
     assert events_at(tmp_path)[-1]["data"]["reason"] == reason.value
@@ -716,12 +765,16 @@ def test_detail_reads_consume_shared_tool_budget(tmp_path):
     def respond(messages, calls):
         if calls == 1:
             return tool_call()
-        return tool_call("read_evidence", {"offset": 0})
+        if calls == 2:
+            return tool_call("read_evidence", {"offset": 0})
+        return diagnosis(messages)
 
     model = ScriptedModel(respond=respond)
     run = run_service(make_service(
         model, Telemetry(), tmp_path, limits=RunLimits(tool_calls=2)
     ))
-    assert run.state.stop_reason is StopReason.TOOL_BUDGET
+    assert run.state.stop_reason is StopReason.COMPLETED
+    assert any(e.kind == "policy.finalizing" and e.data["reason"]
+               == "tool_budget" for e in run.state.events)
     assert run.tool_calls == {"query_metrics": 1, "read_evidence": 1}
     assert len(run.evidence) == 1

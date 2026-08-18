@@ -37,6 +37,10 @@ class RunStopped(DiagnosisError):
         self.reason = reason
 
 
+class InvestigationClosed(Exception):
+    """Reject further tool admission while allowing a final diagnosis."""
+
+
 class RunHarness:
     """Enforce per-run admission, budgets, deadlines, and lifecycle events.
 
@@ -70,6 +74,13 @@ class RunHarness:
         self._result_fingerprints = set(state.result_fingerprints)
         self._progress = state.progress_count
         self._last_progress = state.last_progress
+        # The durable phase event survives a restart independently of the
+        # graph checkpoint, including a pending tool-node replay.
+        self.finalization_reason = next((
+            StopReason(event.data["reason"])
+            for event in reversed(state.events)
+            if event.kind == "policy.finalizing"
+        ), None)
         self._stream = None
         if event_directory is not None:
             try:
@@ -216,6 +227,22 @@ class RunHarness:
         self.check_active()
         if name not in self.state.allowed_tools:
             self.stop(StopReason.TOOL_DENIED)
+        if self.finalization_reason is not None:
+            raise InvestigationClosed()
+
+    def begin_finalization(self, reason: StopReason) -> None:
+        """Close tool admission once, without extending any hard budget.
+
+        Admitted tools can still return observations. The next model request
+        receives the completed tool exchanges and submits a diagnosis.
+        """
+        self.check_active()
+        if self.state.model_calls >= self.state.limits.model_calls:
+            self.stop(StopReason.MODEL_BUDGET)
+        if self.finalization_reason is None:
+            self.finalization_reason = reason
+            self.emit("policy.finalizing", parent_span_id=self.state.id,
+                      data={"reason": reason.value})
 
     async def model_call(
         self, call: Callable[[], Awaitable[T]], *, model_name: str,
@@ -262,7 +289,9 @@ class RunHarness:
         self.check_active()
 
     def check_progress(self) -> None:
-        """Stop after bounded rounds without a new usable tool observation."""
+        """Close investigation after rounds without new usable observations."""
+        if self.finalization_reason is not None:
+            return
         if self._last_progress is not None:
             self.state.stalled_rounds = (
                 self.state.stalled_rounds + 1
@@ -272,7 +301,7 @@ class RunHarness:
                 self.state.stalled_rounds
                 >= self.state.limits.no_progress_rounds
             ):
-                self.stop(StopReason.NO_PROGRESS)
+                self.begin_finalization(StopReason.NO_PROGRESS)
         self._last_progress = self._progress
         self.state.last_progress = self._last_progress
         self.save()
@@ -379,7 +408,8 @@ class RunHarness:
             self._signatures.get(signature, 0)
             >= self.state.limits.identical_tool_calls
         ):
-            self.stop(StopReason.REPEATED_TOOL_CALL)
+            self.begin_finalization(StopReason.REPEATED_TOOL_CALL)
+            raise InvestigationClosed()
         self._signatures[signature] = self._signatures.get(signature, 0) + 1
         self.state.tool_signatures = dict(self._signatures)
         self.save()
@@ -432,7 +462,8 @@ class RunHarness:
         """Reserve a shared attempt slot and record one backend execution."""
         self.authorize_tool(name)
         if sum(self.state.tool_calls.values()) >= self.state.limits.tool_calls:
-            self.stop(StopReason.TOOL_BUDGET)
+            self.begin_finalization(StopReason.TOOL_BUDGET)
+            raise InvestigationClosed()
         self.state.tool_calls[name] = self.state.tool_calls.get(name, 0) + 1
         if name != "read_evidence":
             self.state.backend_attempts += 1

@@ -29,6 +29,7 @@ MESSAGES = {
     "model.switched": ("retrying", "正在切换备用模型"),
     "recovery.ambiguous_call": ("resuming", "中断时的调用结果尚未确认"),
     "diagnosis.repair_requested": ("analyzing", "正在修正诊断输出"),
+    "policy.finalizing": ("finalizing", "工具调查已停止，正在根据已有证据整理结论"),
 }
 
 
@@ -55,6 +56,8 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
             phase, message = "error", f"{tool}读取失败"
         elif event.kind == "tool.cancelled":
             phase, message = "cancelling", f"{tool}读取已中止"
+        elif event.kind == "tool.skipped":
+            phase, message = "finalizing", f"{tool}未执行，调查已进入收尾阶段"
         else:
             return None
     elif event.kind == "observations.stored":

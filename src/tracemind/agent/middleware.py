@@ -19,7 +19,7 @@ from langgraph.types import Command
 
 from tracemind.agent.context import select_context
 from tracemind.agent.errors import DiagnosisError
-from tracemind.agent.harness import RunHarness
+from tracemind.agent.harness import InvestigationClosed, RunHarness
 from tracemind.agent.recovery import ModelCallFailed, ToolUnavailable
 from tracemind.models.run import StopReason
 
@@ -47,7 +47,11 @@ class HarnessMiddleware(AgentMiddleware):
         Bind the provider output cap without mutating graph message history.
         """
         self.harness.check_active()
-        self.harness.check_progress()
+        state = self.harness.state
+        if sum(state.tool_calls.values()) >= state.limits.tool_calls:
+            self.harness.begin_finalization(StopReason.TOOL_BUDGET)
+        else:
+            self.harness.check_progress()
         repair_history = []
         while True:
             if self._using_fallback:
@@ -107,10 +111,24 @@ class HarnessMiddleware(AgentMiddleware):
                 ) for item in response.result
             ):
                 malformed = True
+            finalizing = self.harness.finalization_reason is not None
+            if finalizing and (
+                response.structured_response is None or any(
+                    isinstance(item, AIMessage) and (
+                        item.invalid_tool_calls or any(
+                            call["name"] != "DiagnosisDraft"
+                            for call in item.tool_calls
+                        )
+                    ) for item in response.result
+                )
+            ):
+                malformed = True
             if malformed:
                 self.harness.repair_diagnosis()
-                feedback = self._repair_feedback(response)
-                if any(
+                feedback = self._repair_feedback(
+                    response, finalizing=finalizing,
+                )
+                if not finalizing and any(
                     isinstance(item, AIMessage) and any(
                         call["name"] != "DiagnosisDraft"
                         for call in item.tool_calls
@@ -133,7 +151,9 @@ class HarnessMiddleware(AgentMiddleware):
             )
 
     @staticmethod
-    def _repair_feedback(response: ModelResponse) -> ModelResponse:
+    def _repair_feedback(
+        response: ModelResponse, *, finalizing: bool = False,
+    ) -> ModelResponse:
         """Keep message pairing and send bounded schema/citation feedback."""
         feedback = (
             "Diagnosis rejected by schema or evidence validation. Return one "
@@ -141,6 +161,11 @@ class HarnessMiddleware(AgentMiddleware):
             "returned by tools within the investigation window, include a "
             "nonblank explanation, and use inconclusive if unsupported."
         )
+        if finalizing:
+            feedback += (
+                " All investigation tools are disabled. Submit the final "
+                "diagnosis using existing evidence only."
+            )
         messages = []
         for item in response.result:
             if isinstance(item, ToolMessage) and item.name == "DiagnosisDraft":
@@ -152,6 +177,9 @@ class HarnessMiddleware(AgentMiddleware):
                      if c["name"] == "DiagnosisDraft"]
             pending = [c for c in item.tool_calls
                        if c["name"] != "DiagnosisDraft"]
+            if finalizing:
+                calls.extend(pending)
+                pending = []
             rejected = [*calls, *item.invalid_tool_calls]
             if rejected:
                 # LangChain's tools-to-model edge exits if the latest AI
@@ -190,6 +218,19 @@ class HarnessMiddleware(AgentMiddleware):
             "is insufficient."
         )
         system = request.system_message.text if request.system_message else ""
+        reason = self.harness.finalization_reason
+        if reason is not None:
+            budget += (
+                f"\nInvestigation is closed ({reason.value}). "
+                "Do not call telemetry or evidence-reading tools. Submit "
+                "the final structured diagnosis now using only evidence "
+                "already provided. Cite available evidence IDs within the "
+                "investigation window. Explain the cause and its evidence, "
+                "or return inconclusive and explain what is missing."
+            )
+            # The framework still binds the structured diagnosis schema;
+            # DiagnosisDraft is an output mechanism, not an investigation tool.
+            request = request.override(tools=[], tool_choice=None)
         request = request.override(
             system_message=SystemMessage(content=system + budget)
         )
@@ -232,10 +273,29 @@ class HarnessMiddleware(AgentMiddleware):
         authorization. Framework validation errors are returned to the
         agent for bounded repair.
         """
-        # Also intercept hallucinated/hidden tool names before dispatch.
-        self.harness.authorize_tool(request.tool_call["name"])
         try:
+            # Also intercept hallucinated/hidden tool names before dispatch.
+            self.harness.authorize_tool(request.tool_call["name"])
             result = await handler(request)
+        except InvestigationClosed:
+            reason = self.harness.finalization_reason
+            self.harness.emit(
+                "tool.skipped", parent_span_id=self.harness.state.id,
+                data={"tool": request.tool_call["name"],
+                      "reason": reason.value},
+            )
+            return ToolMessage(
+                content=json.dumps({"error": {
+                    "category": "investigation_closed",
+                    "reason": reason.value,
+                    "message": (
+                        "This tool was not executed. Investigation is closed; "
+                        "submit a final diagnosis using existing evidence."
+                    ),
+                }}),
+                tool_call_id=request.tool_call["id"],
+                name=request.tool_call["name"], status="error",
+            )
         except ToolUnavailable as exc:
             self.harness.emit(
                 "tool.unavailable", parent_span_id=self.harness.state.id,
