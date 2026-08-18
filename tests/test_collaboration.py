@@ -12,6 +12,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
+from test_harness import ScriptedModel, tool_call
 
 from tracemind.agent.persistence import RunConflict, RunRepository
 from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
@@ -293,3 +294,120 @@ def test_collaboration_context_bounds_history_without_losing_request():
     assert payload["available_evidence_count"] == 20
     assert len(state.previous_messages[0]) > 800
     assert len(evidence) == 20
+
+
+@pytest.mark.parametrize("detailed", [False, True])
+def test_explanation_uses_cited_details_without_scanning_large_catalogue(
+    tmp_path, detailed,
+):
+    """Exercise both direct answers and targeted reads in durable rounds."""
+    records = [Evidence(
+        source=EvidenceSource.TRACE, service="frontend", observed_at=END,
+        summary=f"Propagated HTTP 500 in request {i}",
+    ) for i in range(12)]
+    payment = Evidence(
+        source=EvidenceSource.TRACE, service="payment", observed_at=END,
+        summary="Error span in payment: Charge",
+        attributes={
+            "operation": "Charge",
+            "otel_status_description": "Payment request failed. Invalid token",
+            "details": "Failure stack: token error at Charge. " + "x" * 9000,
+        },
+    )
+    records += [payment, Evidence(
+        source=EvidenceSource.LOG, service="checkout", observed_at=END,
+        summary="Payment RPC failed; checkout returned HTTP 500",
+    )]
+    records += [Evidence(
+        source=EvidenceSource.TRACE, service="unrelated", observed_at=END,
+        summary=f"Unrelated successful request {i}",
+    ) for i in range(162)]
+
+    class LargeTelemetry:
+        """Return cited failure records followed by a large unrelated batch."""
+
+        calls = 0
+
+        async def search_traces(self, service, *, start, end):
+            self.calls += 1
+            return records
+
+    def respond(messages, calls):
+        prompt = next(m.text for m in messages if isinstance(m, HumanMessage))
+        if not prompt.startswith("Explain"):
+            traces = [m for m in messages if isinstance(m, ToolMessage)]
+            if not traces:
+                return tool_call("search_traces", {"service": "checkout"})
+            ids = [r["id"] for r in json.loads(traces[0].content)[:14]]
+            return tool_call("DiagnosisDraft", {
+                "status": "complete", "confidence": .8,
+                "root_cause": "Payment failed due to JWT validation",
+                "evidence_ids": ids,
+            })
+        context = json.loads(prompt.split("data:\n", 1)[1])
+        assert context["prior_conclusion"]["historical_claim_only"]
+        assert context["available_evidence_count"] == 176
+        assert context["omitted_evidence_previews"] > 0
+        span = next(e for e in context["evidence_previews"]
+                    if e["service"] == "payment")
+        assert span["attributes"]["operation"] == "Charge"
+        assert span["attributes"]["otel_status_description"].endswith(
+            "Invalid token",
+        )
+        assert "details" in span["truncated_attribute_keys"]
+        assert "honoring their requested language, length" in prompt
+        assert "mark unverified mechanisms" in messages[0].text
+        if detailed:
+            assert "Explain the available failure stack in detail" in prompt
+            pages = [m for m in messages if isinstance(m, ToolMessage)
+                     and m.name == "read_evidence"]
+            if not pages:
+                return tool_call("read_evidence", {"evidence_id": span["id"]})
+            page = json.loads(pages[0].content)[0]
+            assert page["id"] == span["id"]
+            assert "Failure stack: token error at Charge" in page["content"]
+            answer = (
+                "Payment Charge reports Invalid token. The retained stack "
+                "places the error at Charge, and checkout reports a failed "
+                "payment RPC. JWT validation is an unverified hypothesis; "
+                "these observations do not establish the underlying mechanism."
+            )
+        else:
+            assert "请用一句中文解释" in prompt
+            answer = "payment 的 Charge 报错并传递到 checkout，底层原因尚未确认。"
+        return tool_call("DiagnosisDraft", {
+            "status": "complete", "confidence": .7,
+            "root_cause": answer, "evidence_ids": [span["id"]],
+            "remediation": [],
+        })
+
+    repository = RunRepository(tmp_path / "runs.sqlite3")
+    initial = create_investigation(repository)
+    model, telemetry = ScriptedModel(respond=respond), LargeTelemetry()
+    worker = make_worker(tmp_path, repository, telemetry, model)
+    assert asyncio.run(worker.run_once())
+    parent = repository.get(initial.id)
+    follow = repository.follow_up(
+        initial.investigation_id,
+        message=("Explain the available failure stack in detail" if detailed
+                 else "请用一句中文解释"),
+        purpose=RunPurpose.EXPLAIN, limits=RunLimits(),
+        allowed_tools=("read_evidence", "discover_metrics", "search_traces"),
+        request_hash="follow-up",
+    )
+    assert follow.state.allowed_tools == ("read_evidence",)
+    assert asyncio.run(worker.run_once())
+    result = repository.get(follow.state.id)
+    assert result.state.status is RunStatus.SUCCEEDED
+    assert result.state.model_calls == (2 if detailed else 1)
+    assert result.state.tool_calls == (
+        {"read_evidence": 1} if detailed else {}
+    )
+    assert telemetry.calls == 1
+    assert result.result.diagnosis.evidence_ids == [payment.id]
+    assert "JWT validation" not in result.result.diagnosis.root_cause or (
+        "unverified" in result.result.diagnosis.root_cause
+    )
+    assert result.result.diagnosis.remediation == []
+    assert result.evidence == follow.evidence
+    assert repository.get(initial.id).state == parent.state

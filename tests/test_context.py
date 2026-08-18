@@ -290,3 +290,43 @@ def test_read_evidence_cannot_cross_run_and_schema_rejects_negative_offset():
     with pytest.raises(ValueError):
         asyncio.run(reader.ainvoke({"offset": -1}))
     assert state.tool_calls == {"read_evidence": 1}
+
+
+def test_catalogue_filters_page_matching_records_and_preserve_direct_reads():
+    collector = EvidenceCollector()
+    traces = [Evidence(source=EvidenceSource.TRACE, observed_at=NOW,
+                       service="checkout", summary=f"span {i}")
+              for i in range(25)]
+    logs = [Evidence(source=EvidenceSource.LOG, observed_at=NOW,
+                     service="payment", summary=f"failure {i}")
+            for i in range(25)]
+    collector.add([*traces, *logs])
+    state = RunState(
+        incident=Incident(title="Incident", description="test"),
+        investigation_start=NOW, investigation_end=NOW + timedelta(hours=1),
+        limits=RunLimits(), allowed_tools=("read_evidence",),
+    )
+    reader = create_telemetry_tools(
+        None, None, None, start=NOW, end=NOW, collector=collector,
+        harness=RunHarness(state),
+    )[0]
+    first = asyncio.run(reader.ainvoke({
+        "service": "payment", "source": "log",
+    }))
+    assert len(first) == 21
+    assert first[-1] == {"total_evidence": 25, "next_offset": 20}
+    assert all(r["source"] == "log" for r in first[:-1])
+    second = asyncio.run(reader.ainvoke({
+        "service": "payment", "source": "log", "offset": 20,
+    }))
+    assert second[-1] == {"total_evidence": 25, "next_offset": None}
+    assert [r["id"] for r in second[:-1]] == [str(e.id) for e in logs[20:]]
+    assert asyncio.run(reader.ainvoke({"service": "missing"})) == [
+        {"total_evidence": 0, "next_offset": None},
+    ]
+    direct = asyncio.run(reader.ainvoke({
+        "evidence_id": str(traces[0].id),
+        "service": "missing", "source": "log",
+    }))
+    assert json.loads(direct[0]["content"])["id"] == str(traces[0].id)
+    assert len(collector.evidence) == 50

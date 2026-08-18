@@ -10,6 +10,66 @@ from tracemind.models import Evidence
 from tracemind.models.run import RunState
 
 
+def _evidence_preview(item: Evidence) -> dict:
+    """Include normalized details, marking any oversized fields omitted.
+
+    Small observations remain complete. Large attributes are bounded
+    separately so a long log body cannot hide the service and error fields.
+    """
+    data = item.model_dump(mode="json")
+    if len(json_text(data).encode()) <= 2000:
+        return data
+    preview = {
+        "id": str(item.id), "source": item.source.value,
+        "service": item.service[:120] if item.service else None,
+        "observed_at": item.observed_at.isoformat(),
+        "summary": item.summary[:240],
+        "query": item.query[:240] if item.query else None,
+        "attributes": {}, "truncated": True,
+        "omitted_attribute_keys": [], "truncated_attribute_keys": [],
+    }
+    priority = (
+        "operation", "error_type", "otel_status_description",
+        "status_message", "body", "trace_id", "span_id", "labels", "value",
+    )
+    keys = sorted(item.attributes, key=lambda k: (
+        priority.index(k) if k in priority else len(priority), k,
+    ))
+    for key in keys:
+        value = item.attributes[key]
+        shortened = isinstance(value, str) and len(value) > 320
+        if shortened:
+            value = value[:320]
+        candidate = {**preview["attributes"], key: value}
+        if len(json_text(candidate).encode()) <= 1200:
+            preview["attributes"] = candidate
+            if shortened:
+                preview["truncated_attribute_keys"].append(key)
+        else:
+            preview["omitted_attribute_keys"].append(key)
+    return preview
+
+
+def _prioritized_evidence(state: RunState, evidence: list[Evidence]):
+    """Yield cited observations first, interleaving services and sources.
+
+    This is a coverage heuristic, not a causal ranking. It prevents a large
+    batch from one service from displacing every downstream observation.
+    """
+    cited = set(state.prior_diagnosis.evidence_ids) if (
+        state.prior_diagnosis is not None
+    ) else set()
+    for is_cited in (True, False):
+        groups = {}
+        for item in evidence:
+            if (item.id in cited) == is_cited:
+                groups.setdefault((item.service, item.source), []).append(item)
+        for offset in range(max(map(len, groups.values()), default=0)):
+            for group in groups.values():
+                if offset < len(group):
+                    yield group[offset]
+
+
 def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
     """Bound prior findings while keeping the current user request intact.
 
@@ -31,27 +91,32 @@ def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
         } if prior else None,
         "available_evidence_count": len(evidence),
         "omitted_prior_evidence": state.omitted_prior_evidence,
-        "evidence_previews": [{
-            "id": str(item.id), "source": item.source.value,
-            "service": item.service[:120] if item.service else None,
-            "observed_at": item.observed_at.isoformat(),
-            "summary": item.summary[:160],
-        } for item in evidence[:10]],
+        "evidence_previews": [
+            _evidence_preview(item)
+            for item in list(_prioritized_evidence(state, evidence))[:20]
+        ],
+        "omitted_evidence_previews": 0,
         "bounded_history": True,
         "detail_retrieval": (
-            "read_evidence lists and pages retained evidence"
+            "Read a known evidence_id directly for missing details. "
+            "Otherwise filter the catalogue by service/source. Do not scan "
+            "all catalogue pages unless the question requires that coverage."
             if "read_evidence" in state.allowed_tools
             else "detail retrieval is unavailable under current tool policy"
         ),
     }
-    allowance = min(6000, max(
+    allowance = min(16000, max(
         0, (state.limits.context_tokens - state.limits.output_tokens) // 3
     ))
+    payload["omitted_evidence_previews"] = (
+        len(evidence) - len(payload["evidence_previews"])
+    )
     while len(json_text(payload).encode()) > allowance:
-        if payload["evidence_previews"]:
-            payload["evidence_previews"].pop()
-        elif payload["recent_user_messages"]:
+        if payload["recent_user_messages"]:
             payload["recent_user_messages"].pop(0)
+        elif payload["evidence_previews"]:
+            payload["evidence_previews"].pop()
+            payload["omitted_evidence_previews"] += 1
         elif payload["prior_conclusion"] is not None:
             payload["prior_conclusion"] = None
         else:

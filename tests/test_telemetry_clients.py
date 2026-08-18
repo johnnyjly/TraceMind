@@ -66,6 +66,149 @@ def test_prometheus_http_failure_has_backend_context() -> None:
         asyncio.run(run_query())
 
 
+def test_metric_discovery_uses_window_and_escaped_service_matchers():
+    service = 'payment"}or{job="other'
+    start = datetime(2024, 9, 1, tzinfo=UTC)
+
+    def handler(request):
+        assert request.url.params.get_list("match[]") == [
+            f'{{__name__=~".+",{label}={json.dumps(service)}}}'
+            for label in ("service_name", "service", "job")
+        ]
+        assert request.url.params["start"] == start.isoformat()
+        assert request.url.params["end"] == start.isoformat()
+        assert request.url.params["limit"] == "3"
+        if request.url.path == "/api/v1/label/__name__/values":
+            return httpx.Response(200, json={"status": "success", "data": [
+                "rpc_calls_total", "process_cpu_seconds_total",
+            ]})
+        assert request.url.path == "/api/v1/series"
+        return httpx.Response(200, json={"status": "success", "data": [
+            {"__name__": "rpc_calls_total", "job": service,
+             "rpc_grpc_status_code": "13"},
+            {"__name__": "rpc_calls_total", "job": service,
+             "rpc_grpc_status_code": "0"},
+            {"__name__": "process_cpu_seconds_total", "job": service},
+        ]})
+
+    async def discover():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as http:
+            return await PrometheusClient("http://prometheus", http)\
+                .discover_metrics(service=service, start=start, end=start,
+                                  limit=3)
+
+    result = asyncio.run(discover())
+    assert result["kind"] == "metric_metadata"
+    assert result["possibly_truncated"]
+    assert result["returned_series"] == 3
+    rpc = next(m for m in result["metrics"]
+               if m["metric"] == "rpc_calls_total")
+    assert rpc["label_keys"] == ["job", "rpc_grpc_status_code"]
+    assert {e["rpc_grpc_status_code"] for e in rpc["example_labels"]} == {
+        "0", "13",
+    }
+    assert "id" not in result
+    assert "without samples" in result["guidance"]
+
+
+def test_metric_discovery_bounds_response_and_marks_omissions():
+    # Simulate a backend ignoring its requested limit and large label sets.
+    series = [{"__name__": f"metric_{i:03}", **{
+        f"label_{j}": "v" * 150 for j in range(40)
+    }} for i in range(100)]
+
+    async def discover():
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"status": "success", "data": (
+                [item["__name__"] for item in series]
+                if request.url.path.endswith("values") else series
+            )},
+        ))
+        async with httpx.AsyncClient(transport=transport) as http:
+            return await PrometheusClient("http://prometheus", http)\
+                .discover_metrics(start=datetime(2024, 9, 1, tzinfo=UTC),
+                                  end=datetime(2024, 9, 1, tzinfo=UTC),
+                                  limit=50)
+
+    result = asyncio.run(discover())
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 8192
+    assert result["returned_series"] == 50
+    assert result["possibly_truncated"]
+    assert result["omitted_metrics"] > 0
+    assert all(m["labels_truncated"] for m in result["metrics"])
+    assert all(int(m["metric"].split("_")[1]) < 50
+               for m in result["metrics"])
+
+
+def test_name_catalogue_survives_histogram_series_limit_and_targets_labels():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("values"):
+            data = ["http_duration_bucket", "rpc_calls_total"]
+        elif '"rpc_calls_total"' in request.url.params["match[]"]:
+            data = [{"__name__": "rpc_calls_total", "job": "payment",
+                     "rpc_grpc_status_code": "13"}]
+        else:
+            # All sampled series belong to the same metric, but the distinct
+            # names endpoint still reveals another metric for investigation.
+            data = [{"__name__": "http_duration_bucket", "le": str(i)}
+                    for i in range(2)]
+        return httpx.Response(200, json={"status": "success", "data": data})
+
+    async def discover():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as http:
+            client = PrometheusClient("http://prometheus", http)
+            now = datetime(2024, 9, 1, tzinfo=UTC)
+            catalogue = await client.discover_metrics(
+                service="payment", start=now, end=now, limit=2,
+            )
+            targeted = await client.discover_metrics(
+                service="payment", metric="rpc_calls_total",
+                start=now, end=now, limit=2,
+            )
+            return catalogue, targeted
+
+    catalogue, targeted = asyncio.run(discover())
+    rpc = next(m for m in catalogue["metrics"]
+               if m["metric"] == "rpc_calls_total")
+    assert rpc["example_labels"] == []
+    assert catalogue["possibly_truncated"]
+    assert targeted["metrics"][0]["example_labels"] == [
+        {"job": "payment", "rpc_grpc_status_code": "13"},
+    ]
+    assert len(requests) == 3  # Targeted lookup does not reread the names.
+    assert requests[-1].url.params.get_list("match[]") == [
+        f'{{__name__="rpc_calls_total",{label}="payment"}}'
+        for label in ("service_name", "service", "job")
+    ]
+
+
+@pytest.mark.parametrize("payload", [
+    {"status": "error", "error": "invalid metadata request"},
+    {"status": "success", "data": {}},
+    {"status": "success", "data": [{"job": "payment"}]},
+    {"status": "success", "data": [{"__name__": "metric", "job": 1}]},
+])
+def test_metric_discovery_rejects_invalid_backend_responses(payload):
+    async def discover():
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200, json=payload,
+        ))
+        async with httpx.AsyncClient(transport=transport) as http:
+            return await PrometheusClient("http://prometheus", http)\
+                .discover_metrics(start=datetime(2024, 9, 1, tzinfo=UTC),
+                                  end=datetime(2024, 9, 1, tzinfo=UTC))
+
+    with pytest.raises(TelemetryClientError, match="Prometheus"):
+        asyncio.run(discover())
+
+
 def test_jaeger_search_returns_trace_evidence() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/traces"

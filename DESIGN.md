@@ -126,8 +126,21 @@ and budgets after the current round finishes. Explain rounds expose only
 read_evidence; investigate rounds can query telemetry. New time windows filter
 inherited observations. The bounded context includes recent user requests and
 previous conclusions as untrusted historical claims, with evidence references.
+Follow-up context prioritizes citations and interleaves services and sources,
+including bounded normalized details and explicit omission markers. Explanation
+answers the requested question, language and level of detail using the pack
+first; necessary extra details use direct IDs or filtered catalogue reads.
 Historical run results are preserved. This does not add cross-incident memory
 or pause a running tool for human approval.
+
+Metric discovery is a separately authorized read-only metadata tool. Distinct
+name discovery avoids a series limit hiding every metric except one histogram;
+targeted series lookup reveals its actual labels. Both name and series responses
+are bounded by time, count and model-facing bytes. Metadata and empty-query
+guidance have no evidence IDs and cannot count as new observational progress.
+They help formulate queries but cannot substantiate a fault or its absence.
+Observed failure propagation and inferred internal mechanisms remain distinct
+in diagnosis prompts; semantic correctness still requires real-model review.
 
 Readable progress is a projection of durable events through SSE. Cursor replay,
 idle heartbeats and a committed terminal notification support reconnection;

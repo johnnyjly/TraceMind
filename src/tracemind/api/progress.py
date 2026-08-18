@@ -17,6 +17,7 @@ TOOLS = {
     "query_metrics": "监控指标", "search_traces": "分布式链路",
     "get_trace_detail": "链路详情", "search_logs": "服务日志",
     "read_evidence": "已保存的证据",
+    "discover_metrics": "指标名称和标签",
 }
 MESSAGES = {
     "run.queued": ("queued", "调查已接收，等待执行"),

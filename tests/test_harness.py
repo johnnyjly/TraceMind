@@ -226,7 +226,7 @@ def test_loop_limits_are_enforced_before_execution(
 
 
 @pytest.mark.parametrize("name", [
-    "search_logs", "read_evidence", "unregistered_tool",
+    "search_logs", "read_evidence", "discover_metrics", "unregistered_tool",
 ])
 def test_hidden_and_unknown_tools_are_denied_in_real_loop(tmp_path, name):
     model = ScriptedModel(

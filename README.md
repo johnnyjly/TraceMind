@@ -249,7 +249,14 @@ provide both timezone-aware `investigation_start` and `investigation_end`.
 Only prior observations inside that window and the new capacity are retained,
 with cited observations selected first. Explain requests must keep the previous
 window. Full evidence stays paginated through `read_evidence`; the prompt uses
-bounded previews, the previous conclusion and at most three recent questions.
+up to 20 bounded observations, prioritizing citations and interleaving services
+and sources. Small observations include normalized attributes; large ones mark
+truncated or omitted fields. The pack is capped at 16 KB or one third of the
+input allowance, with history trimmed first. The previous conclusion remains
+a historical claim, alongside at most three recent questions.
+Explanation follows the user's requested language, length and detail. It can
+answer directly from the pack or read necessary details by ID; a short question
+does not require a complete catalogue scan or new remediation suggestions.
 Older rounds remain available through
 `GET /api/v1/investigations/{id}?offset=0&limit=20` and individual run results.
 This is incident-local history; it is not cross-incident long-term memory.
@@ -310,6 +317,8 @@ still limit which observations are retrieved in the first place.
 The new read-only `read_evidence` tool can:
 
 - list stored previews with no `evidence_id` (20 entries per page);
+- filter that catalogue by exact `service` and/or `source` (`metric`, `trace`,
+  or `log`); offsets and `total_evidence` then refer to matching entries;
 - retrieve an observation's complete JSON in 2,048-character pages by ID;
 - continue either operation using the returned `next_offset`.
 
@@ -317,6 +326,35 @@ Reads are isolated to the current run and consume the same tool-call,
 repetition, and timeout budgets as telemetry queries. Explicit existing
 `TRACEMIND_AGENT_ALLOWED_TOOLS` lists must add `read_evidence` to enable it.
 Without that permission, compressed details are unavailable to the agent.
+
+### Metric discovery and empty queries
+
+`discover_metrics(service="payment")` provides a bounded catalogue of actual
+metric names and label examples. It reads distinct names and series metadata
+within the fixed investigation window, using `service_name`, `service`, or
+`job` matches. Omitting the service permits a bounded global discovery when
+these labels are unknown. `limit` defaults to 20 and cannot exceed 50; the
+model-facing metadata is capped at 8 KB. Truncation is explicit.
+
+Series samples can all belong to one histogram, so the names catalogue is
+queried separately. For a listed name without label examples, use
+`discover_metrics(service="payment", metric="rpc_calls_total")` to inspect
+that metric's labels. An ordinary discovery attempt performs two HTTP reads;
+a targeted attempt performs one. Both use one tool-attempt slot and the same
+harness timeout, retry and permission controls as other tools.
+
+Discovery metadata is not sampled fault evidence: it receives no evidence IDs,
+is not retained in the collector, and does not advance the evidence progress
+counter. Prometheus metadata may describe series without samples in the window.
+Explicit allowlists must add `discover_metrics` to enable it; existing persisted
+runs keep their original permissions. Explain rounds still expose only
+`read_evidence`.
+
+An empty `query_metrics` result includes its query time and guidance to check
+names, labels and sample availability. It creates no evidence or progress.
+Empty results do not prove service health or exclude a fault. Diagnoses must
+separate observed errors from hypotheses about how those errors were generated,
+and label unverified mechanisms and suggested checks accordingly.
 
 Before every model call, middleware budgets the system message, conversation,
 tool schemas, and diagnosis schema, plus an output reservation. The initial

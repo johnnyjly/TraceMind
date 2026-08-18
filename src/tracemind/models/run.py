@@ -13,11 +13,11 @@ from tracemind.models.diagnosis import Diagnosis
 
 ToolName = Literal[
     "query_metrics", "search_traces", "get_trace_detail", "search_logs",
-    "read_evidence"
+    "read_evidence", "discover_metrics"
 ]
 TOOL_NAMES: tuple[ToolName, ...] = (
     "query_metrics", "search_traces", "get_trace_detail", "search_logs",
-    "read_evidence"
+    "read_evidence", "discover_metrics"
 )
 
 
@@ -131,7 +131,7 @@ class RunState(BaseModel):
     investigation_end: datetime
     limits: RunLimits
     allowed_tools: tuple[ToolName, ...]
-    prompt_version: str = "single-agent-v3"
+    prompt_version: str = "single-agent-v4"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

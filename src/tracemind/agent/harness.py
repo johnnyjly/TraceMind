@@ -471,7 +471,7 @@ class RunHarness:
         parent = self._model_span or self.state.id
         started = monotonic()
         display = {}
-        if name in {"search_traces", "search_logs"}:
+        if name in {"search_traces", "search_logs", "discover_metrics"}:
             service = arguments.get("service")
             if isinstance(service, str):
                 display["service"] = "".join(

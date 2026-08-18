@@ -13,7 +13,7 @@ async def request_json(
     url: str,
     *,
     source: str,
-    params: dict[str, str | int] | None = None,
+    params: dict[str, str | int | list[str]] | None = None,
     json: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Perform one HTTP request and require a JSON object response.

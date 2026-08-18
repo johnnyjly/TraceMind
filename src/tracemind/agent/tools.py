@@ -11,7 +11,7 @@ from pydantic import Field
 
 from tracemind.agent.context import json_text
 from tracemind.agent.harness import RunHarness
-from tracemind.models import Evidence
+from tracemind.models import Evidence, EvidenceSource
 from tracemind.models.run import StopReason, ToolName
 from tracemind.telemetry import (
     JaegerClient,
@@ -33,6 +33,7 @@ TOOL_REGISTRY = {
     spec.name: spec
     for spec in (
         ToolSpec("query_metrics", 50),
+        ToolSpec("discover_metrics", 1, capability="telemetry.metadata.read"),
         ToolSpec("search_traces", 20),
         ToolSpec("get_trace_detail", 100),
         ToolSpec("search_logs", 100),
@@ -114,14 +115,20 @@ class EvidenceCollector:
             "detail_chars": len(document),
         }
 
-    def read(self, evidence_id: str | None, offset: int) -> list[dict]:
+    def read(
+        self, evidence_id: str | None, offset: int, *,
+        service: str | None = None, source: EvidenceSource | None = None,
+    ) -> list[dict]:
         """Page previews by entry offset or JSON by character offset.
 
         Callers validate nonnegative offsets. Unknown IDs and out-of-range
         detail offsets return error records; next_offset=None ends paging.
+        Filters apply only to the catalogue, whose offsets count matches.
         """
         if evidence_id is None:
-            ids = list(self._evidence)
+            ids = [key for key, item in self._evidence.items()
+                   if (service is None or item.service == service)
+                   and (source is None or item.source == source)]
             end = offset + TOOL_REGISTRY["read_evidence"].max_results
             result = [self.preview(key) for key in ids[offset:end]]
             result.append({
@@ -234,14 +241,55 @@ def create_telemetry_tools(
 
     @tool(response_format="content_and_artifact")
     async def query_metrics(expression: str) -> tuple[list[dict], dict]:
-        (
-            "Run an instant PromQL query and return normalized metric "
-            "evidence."
-        )
-        return await execute(
+        """Query an instant vector at the investigation end time.
+
+        Discover unknown names/labels first. Empty results do not establish
+        service health and may mean mismatched labels or absent samples.
+        """
+        result, artifact = await execute(
             "query_metrics", {"expression": expression},
             lambda: prometheus.query(expression, at=end),
         )
+        if not result:
+            result = [{
+                "kind": "empty_metric_query", "query_time": end.isoformat(),
+                "guidance": (
+                    "No matching samples for this expression at query_time. "
+                    "This is not evidence of health or absence of a fault. "
+                    "Check metric names, actual label values, and instant "
+                    "sample availability. Use discover_metrics if authorized "
+                    "instead of repeatedly guessing query variants."
+                ),
+            }]
+            artifact = context_index(result)
+        return result, artifact
+
+    @tool(response_format="content_and_artifact")
+    async def discover_metrics(
+        service: Annotated[str | None, Field(max_length=120)] = None,
+        metric: Annotated[str | None, Field(max_length=240)] = None,
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
+    ) -> tuple[list[dict], dict]:
+        """Discover metric names and label examples before writing PromQL.
+
+        Read at most limit distinct names and limit series in the investigation
+        window. Service matches service_name, service or job exactly; omit it
+        for a bounded global catalogue if those labels are unknown. Pass a
+        discovered metric name to inspect its labels when examples are missing.
+        Metadata is not citable fault evidence or sample values.
+        """
+        async def discover() -> list[dict]:
+            """Return metadata without storing observations or evidence IDs."""
+            return [await prometheus.discover_metrics(
+                service=service, metric=metric,
+                start=start, end=end, limit=limit,
+            )]
+
+        result = await harness.tool_call(
+            "discover_metrics", {"service": service, "metric": metric,
+                                 "limit": limit}, discover,
+        )
+        return result, context_index(result)
 
     @tool(response_format="content_and_artifact")
     async def search_traces(service: str) -> tuple[list[dict], dict]:
@@ -279,21 +327,28 @@ def create_telemetry_tools(
     async def read_evidence(
         evidence_id: str | None = None,
         offset: Annotated[int, Field(ge=0)] = 0,
+        service: str | None = None,
+        source: EvidenceSource | None = None,
     ) -> tuple[list[dict], dict]:
         """List stored previews, or page evidence JSON by ID.
 
-        Follow next_offset to request the next page.
+        Prefer a known evidence_id for missing details. Otherwise filter the
+        catalogue by service and/or source. Follow next_offset only when more
+        entries are needed to answer the question.
 
         Without an ID, offset counts evidence entries. With an ID it counts
-        characters in the stored JSON. Only this run's evidence is visible.
+        characters in the stored JSON and ignores catalogue filters.
+        Only this run's evidence is visible.
         """
         async def read() -> list[dict]:
             """Read a page from this run's evidence collector."""
-            return collector.read(evidence_id, offset)
+            return collector.read(evidence_id, offset,
+                                  service=service, source=source)
 
         result = await harness.tool_call(
             "read_evidence",
-            {"evidence_id": evidence_id, "offset": offset}, read
+            {"evidence_id": evidence_id, "offset": offset,
+             "service": service, "source": source}, read
         )
         artifact = context_index(result)
         artifact["detail_page"] = evidence_id is not None
@@ -301,7 +356,8 @@ def create_telemetry_tools(
 
     return [
         item for item in (
-            query_metrics, search_traces, get_trace_detail, search_logs,
+            query_metrics, discover_metrics, search_traces,
+            get_trace_detail, search_logs,
             read_evidence,
         )
         if item.name in harness.state.allowed_tools
