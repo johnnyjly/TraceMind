@@ -379,7 +379,6 @@ def test_model_timeout_records_unknown_usage(tmp_path):
     ({"evidence_ids": [str(uuid4())]}, END),
     ({"evidence_ids": []}, END),
     ({"root_cause": "   "}, END),
-    ({}, START - timedelta(seconds=1)),
 ])
 def test_completion_gate_rejects_unsupported_final_result(
     tmp_path, override, observed_at,
@@ -400,6 +399,93 @@ def test_completion_gate_rejects_unsupported_final_result(
     assert model.calls == 3
     assert run.state.diagnosis_repairs == 1
     assert events_at(tmp_path)[-1]["data"]["status"] == "inconclusive"
+
+
+def test_tools_exclude_outside_window_observations_before_storage(tmp_path):
+    """Keep boundaries and cross-service spans, excluding old data."""
+    trace_id = "0b65b9bea4ee12c63a06603f63ee0811"
+
+    class MixedTraces(Telemetry):
+        async def get_trace_detail(self, value):
+            assert value == trace_id
+            return [Evidence(
+                source=EvidenceSource.TRACE, service="payment",
+                summary=f"Charge failed {i}", observed_at=at,
+                attributes={"trace_id": trace_id},
+            ) for i, at in enumerate([
+                START - timedelta(hours=10), START, END,
+                END + timedelta(microseconds=1),
+            ])]
+
+    def respond(messages, calls):
+        if calls == 1:
+            return tool_call("get_trace_detail", {"trace_id": trace_id})
+        records = json.loads(messages[-1].content)
+        observations = [r for r in records if "id" in r]
+        assert len(observations) == 2
+        assert records[-1]["excluded_outside_window"] == 2
+        return diagnosis(messages, override={
+            "evidence_ids": [r["id"] for r in observations],
+        })
+
+    run = run_service(make_service(ScriptedModel(respond=respond),
+                                   MixedTraces(), tmp_path))
+    assert run.state.stop_reason is StopReason.COMPLETED
+    assert len(run.evidence) == 2
+    assert {e.observed_at for e in run.evidence} == {START, END}
+    assert len(run.diagnosis.evidence_ids) == 2
+    assert any(e.kind == "observations.filtered" and
+               e.data["excluded_outside_window"] == 2
+               for e in run.state.events)
+
+
+def test_old_only_tool_result_is_metadata_not_citable_evidence(tmp_path):
+    def respond(messages, calls):
+        if calls == 1:
+            return tool_call()
+        records = json.loads(messages[-1].content)
+        assert all("id" not in r for r in records)
+        assert records[0]["excluded_outside_window"] == 1
+        return tool_call("DiagnosisDraft", {
+            "status": "inconclusive", "root_cause": "No current observations",
+            "confidence": 0, "evidence_ids": [],
+        })
+
+    run = run_service(make_service(
+        ScriptedModel(respond=respond),
+        Telemetry(observed_at=START - timedelta(seconds=1)), tmp_path,
+    ))
+    assert run.state.stop_reason is StopReason.INSUFFICIENT_EVIDENCE
+    assert run.evidence == []
+    assert run.state.progress_count == 0
+
+
+@pytest.mark.parametrize("trace_id", ["a" * 16, "a" * 32])
+def test_invalid_trace_id_is_repaired_before_dispatch(tmp_path, trace_id):
+    invalid = "5b0b3a1e-0000-0000-0000-000000000000"
+
+    class Traces(Telemetry):
+        async def get_trace_detail(self, value):
+            self.calls.append(value)
+            return [Evidence(source=EvidenceSource.TRACE, observed_at=END,
+                             summary="Payment Charge failed")]
+
+    def respond(messages, calls):
+        if calls == 1:
+            return tool_call("get_trace_detail", {"trace_id": invalid})
+        if calls == 2:
+            assert messages[-1].status == "error"
+            assert "trace_id" in messages[-1].content
+            return tool_call("get_trace_detail", {"trace_id": trace_id})
+        return diagnosis(messages)
+
+    telemetry = Traces()
+    run = run_service(make_service(ScriptedModel(respond=respond),
+                                   telemetry, tmp_path))
+    assert run.state.stop_reason is StopReason.COMPLETED
+    assert telemetry.calls == [trace_id]
+    assert run.tool_calls == {"get_trace_detail": 1}
+    assert any(e.kind == "tool.rejected" for e in run.state.events)
 
 
 def test_backend_errors_preserve_safe_trace_without_raw_data(tmp_path):

@@ -97,8 +97,8 @@ class RunEvent(BaseModel):
     span_id: UUID
     parent_span_id: UUID | None = None
     duration_ms: float | None = None
-    # Only allowlisted operational metadata belongs here,
-    # never prompts or logs.
+    # Allowlisted metadata and bounded rejected diagnosis excerpts only;
+    # never full prompts or raw tool logs.
     data: dict[str, str | int | float | bool | list[str] | None] = Field(
         default_factory=dict
     )

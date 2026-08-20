@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -22,7 +23,9 @@ from tracemind.agent.harness import InvestigationClosed, RunHarness, RunStopped
 from tracemind.agent.llm import create_chat_model, create_fallback_model
 from tracemind.agent.recovery import classify_failure, retry_after_seconds
 from tracemind.config import Settings
-from tracemind.models import DiagnosisStatus, Incident
+from tracemind.models import (
+    DiagnosisStatus, Evidence, EvidenceSource, Incident,
+)
 from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
 from tracemind.telemetry.errors import TelemetryClientError
 
@@ -308,6 +311,7 @@ def test_citation_repair_reuses_graph_messages_and_accounts_usage(tmp_path):
         if calls == 2:
             return diagnosis(messages, override={"evidence_ids": []})
         assert messages[-1].status == "error"
+        assert '"code":"missing_evidence"' in messages[-1].content
         return diagnosis(messages)
 
     run = run_service(make_service(ScriptedModel(respond=respond),
@@ -318,6 +322,112 @@ def test_citation_repair_reuses_graph_messages_and_accounts_usage(tmp_path):
     assert run.state.usage.reported_total_tokens == 45
     assert run.tool_call_count == 1
     assert run.diagnosis.evidence_ids == [run.evidence[0].id]
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("failure", ["unknown", "duplicate"])
+def test_specific_citation_feedback_repairs_output(tmp_path, native, failure):
+    """Both output strategies receive the exact rejected citation IDs."""
+    unknown = str(uuid4())
+    invalid_ids = []
+
+    def respond(messages, calls):
+        assert_tool_pairs(messages)
+        if calls == 1:
+            return tool_call()
+        fields = diagnosis(messages).tool_calls[0]["args"]
+        if calls == 2:
+            invalid_ids.extend([unknown] if failure == "unknown"
+                               else fields["evidence_ids"] * 2)
+            fields["evidence_ids"] = invalid_ids
+        else:
+            feedback = messages[-1].text
+            assert ("unknown_evidence" if failure == "unknown" else
+                    "duplicate_evidence") in feedback
+            assert invalid_ids[0] in feedback
+        return (AIMessage(content=json.dumps(fields)) if native
+                else tool_call("DiagnosisDraft", fields))
+
+    model = ScriptedModel(respond=respond, profile={
+        "structured_output": native, "tool_calling": True,
+    })
+    run = run_service(make_service(model, Telemetry(), tmp_path))
+    assert run.state.stop_reason is StopReason.COMPLETED
+    assert run.state.model_calls == 3
+    assert run.state.diagnosis_repairs == 1
+    rejected = next(e for e in run.state.events
+                    if e.kind == "diagnosis.rejected")
+    assert rejected.data["validation_evidence_ids"] == [invalid_ids[0]]
+    candidate = json.loads(rejected.data["candidate_preview"])
+    assert candidate["evidence_ids"] == invalid_ids
+
+
+def test_old_persisted_citation_is_rejected_with_window_feedback(tmp_path):
+    """Legacy observations still pass through strict final validation."""
+    old = Evidence(source=EvidenceSource.TRACE, summary="historical trace",
+                   observed_at=START - timedelta(hours=10))
+
+    def respond(messages, calls):
+        assert_tool_pairs(messages)
+        if calls == 1:
+            return tool_call()
+        if calls == 2:
+            return diagnosis(messages, override={
+                "evidence_ids": [str(old.id)],
+            })
+        assert "evidence_outside_window" in messages[-1].text
+        assert str(old.id) in messages[-1].text
+        assert START.isoformat() in messages[-1].text
+        return diagnosis(messages)
+
+    service = make_service(ScriptedModel(respond=respond),
+                           Telemetry(), tmp_path)
+    state = RunState(incident=INCIDENT, investigation_start=START,
+                     investigation_end=END, limits=RunLimits(),
+                     allowed_tools=("query_metrics",))
+    snapshots = []
+    run = asyncio.run(service.run_persisted(
+        state, [old], persist=lambda state, evidence: snapshots.append(
+            state.model_dump_json()),
+        is_cancelled=lambda: False, resume=False, graph_resume=False,
+    ))
+    assert run.state.stop_reason is StopReason.COMPLETED
+    assert old.id not in run.diagnosis.evidence_ids
+    assert any("evidence_outside_window" in snapshot for snapshot in snapshots)
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_exhausted_schema_repairs_keep_bounded_audit(tmp_path, native):
+    """Even the last rejected draft survives outside graph checkpoints."""
+    def respond(messages, calls):
+        assert_tool_pairs(messages)
+        if calls > 1:
+            assert "confidence: less_than_equal" in messages[-1].text
+        fields = {"status": "inconclusive", "root_cause": "原因" * 4000,
+                  "confidence": 2, "evidence_ids": []}
+        return (AIMessage(content=json.dumps(fields)) if native else
+                tool_call("DiagnosisDraft", fields))
+
+    model = ScriptedModel(respond=respond, profile={
+        "structured_output": native, "tool_calling": True,
+    })
+    run = run_service(make_service(
+        model, Telemetry(), tmp_path,
+        limits=RunLimits(context_tokens=131072, output_tokens=8192),
+    ))
+    assert run.state.stop_reason is StopReason.INVALID_DIAGNOSIS
+    assert run.state.model_calls == 2
+    events = [json.loads(line) for line in
+              (tmp_path / f"{run.state.id}.jsonl").read_text().splitlines()]
+    rejected = [e["data"] for e in events if e["kind"] == "diagnosis.rejected"]
+    assert len(rejected) == 2
+    for data in rejected:
+        assert data["validation_code"] == "schema_validation"
+        assert data["validation_fields"] == ["confidence: less_than_equal"]
+        assert len(data["candidate_preview"].encode()) <= 4096
+        assert "原因" in data["candidate_preview"]
+        assert data["candidate_truncated"]
+    assert events[-1]["kind"] == "run.finished"
 
 
 @pytest.mark.parametrize("native", [True, False])

@@ -1,6 +1,7 @@
 """Diagnosis orchestration, structured proposals, and completion checks."""
 
 import asyncio
+from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,9 @@ from langgraph.errors import GraphRecursionError
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, Field
 
-from tracemind.agent.errors import DiagnosisCancelled, DiagnosisError
+from tracemind.agent.errors import (
+    DiagnosisCancelled, DiagnosisError, DiagnosisValidationError,
+)
 from tracemind.agent.context import collaboration_context
 from tracemind.agent.harness import RunHarness, RunStopped
 from tracemind.agent.middleware import HarnessMiddleware
@@ -392,8 +395,13 @@ class DiagnosisService:
                 ) from exc
         except DiagnosisError as exc:
             reason = StopReason.INVALID_DIAGNOSIS
+            validation = (exc.details() if isinstance(
+                exc, DiagnosisValidationError
+            ) else {})
             harness.emit("diagnosis.rejected", parent_span_id=state.id,
-                         data={"reason": reason.value})
+                         data={"reason": reason.value,
+                               **{f"validation_{key}": value for key, value
+                                  in validation.items()}})
             exc.state = state
             exc.evidence = collector.evidence
             raise
@@ -440,26 +448,41 @@ class DiagnosisService:
         correctness.
         """
         observed = {item.id: item for item in evidence}
-        if set(draft.evidence_ids) - observed.keys():
-            raise DiagnosisError(
-                "agent cited evidence that no telemetry tool returned"
+        unknown = list(dict.fromkeys(
+            i for i in draft.evidence_ids if i not in observed
+        ))
+        if unknown:
+            raise DiagnosisValidationError(
+                "agent cited evidence that no telemetry tool returned",
+                code="unknown_evidence", evidence_ids=unknown,
             )
-        if len(set(draft.evidence_ids)) != len(draft.evidence_ids):
-            raise DiagnosisError(
-                "diagnosis contains duplicate evidence references"
+        duplicates = [i for i, count in Counter(draft.evidence_ids).items()
+                      if count > 1]
+        if duplicates:
+            raise DiagnosisValidationError(
+                "diagnosis contains duplicate evidence references",
+                code="duplicate_evidence", evidence_ids=duplicates,
             )
         if not draft.root_cause.strip():
-            raise DiagnosisError("diagnosis must explain the result")
-        if draft.status is DiagnosisStatus.COMPLETE and not draft.evidence_ids:
-            raise DiagnosisError(
-                "a complete diagnosis must cite telemetry evidence"
+            raise DiagnosisValidationError(
+                "diagnosis must explain the result", code="blank_root_cause",
             )
+        if draft.status is DiagnosisStatus.COMPLETE and not draft.evidence_ids:
+            raise DiagnosisValidationError(
+                "a complete diagnosis must cite telemetry evidence",
+                code="missing_evidence",
+            )
+        outside = []
         for evidence_id in draft.evidence_ids:
             observed_at = observed[evidence_id].observed_at
             if (
                 observed_at.utcoffset() is None
                 or not start <= observed_at <= end
             ):
-                raise DiagnosisError(
-                    "diagnosis cites evidence outside the investigation window"
-                )
+                outside.append(evidence_id)
+        if outside:
+            raise DiagnosisValidationError(
+                "diagnosis cites evidence outside the investigation window "
+                f"[{start.isoformat()}, {end.isoformat()}]",
+                code="evidence_outside_window", evidence_ids=outside,
+            )

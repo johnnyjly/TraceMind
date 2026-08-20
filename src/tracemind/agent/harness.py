@@ -147,7 +147,7 @@ class RunHarness:
         parent_span_id: UUID | None = None, duration_ms: float | None = None,
         data: dict | None = None,
     ) -> None:
-        """Append ordered operational metadata and attempt a JSONL write.
+        """Append metadata or bounded diagnosis excerpts and write JSONL.
 
         Callers must supply sanitized metadata; this method does not redact
         it. File I/O errors disable the file sink while retaining in-memory
@@ -306,10 +306,22 @@ class RunHarness:
         self.state.last_progress = self._last_progress
         self.save()
 
-    def repair_diagnosis(self) -> None:
-        """Reserve one schema or citation repair under the run limits."""
+    def repair_diagnosis(
+        self, *, validation: dict | None = None,
+        candidate_preview: str | None = None,
+        candidate_truncated: bool = False,
+    ) -> None:
+        """Persist rejection details before reserving a bounded repair.
+
+        Failed model nodes may never checkpoint their messages. The event
+        therefore retains a bounded candidate even when repairs are exhausted.
+        """
         self.emit("diagnosis.rejected", parent_span_id=self.state.id,
-                  data={"reason": StopReason.INVALID_DIAGNOSIS.value})
+                  data={"reason": StopReason.INVALID_DIAGNOSIS.value,
+                        **{f"validation_{key}": value for key, value in
+                           (validation or {}).items()},
+                        "candidate_preview": candidate_preview,
+                        "candidate_truncated": candidate_truncated})
         if self.state.diagnosis_repairs >= self.state.limits.diagnosis_repairs:
             self.stop(StopReason.INVALID_DIAGNOSIS)
         self.state.diagnosis_repairs += 1

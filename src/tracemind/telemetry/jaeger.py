@@ -30,8 +30,8 @@ class JaegerClient:
         """Query service traces within a window and normalize each result.
 
         Send start/end as epoch microseconds and request a backend
-        result limit. Return trace summaries; this method does not
-        locally truncate the response.
+        result limit. Summarize only spans starting in the inclusive window;
+        omit traces with no such spans even if the backend returned them.
         """
         payload = await request_json(
             self._http_client,
@@ -52,7 +52,9 @@ class JaegerClient:
                 "Jaeger response is missing trace results"
             )
 
-        return [self._to_evidence(trace, service) for trace in traces]
+        evidence = [self._to_evidence(trace, service, start=start, end=end)
+                    for trace in traces]
+        return [item for item in evidence if item is not None]
 
     async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
         """Fetch one trace and return evidence for spans carrying error
@@ -89,9 +91,13 @@ class JaegerClient:
         return evidence
 
     @staticmethod
-    def _to_evidence(trace: Any, service: str) -> Evidence:
-        """Summarize trace duration, span counts, and earliest observed
-        time.
+    def _to_evidence(
+        trace: Any, service: str, *, start: datetime, end: datetime,
+    ) -> Evidence | None:
+        """Summarize selected spans without assigning an old trace start.
+
+        A trace can include historical spans alongside current spans. The
+        selected span extent is not a whole-request latency measurement.
         """
         if not isinstance(trace, dict):
             raise TelemetryClientError("Jaeger returned an invalid trace")
@@ -106,6 +112,13 @@ class JaegerClient:
             raise TelemetryClientError("Jaeger returned an incomplete trace")
 
         try:
+            received = len(spans)
+            spans = [span for span in spans if (
+                start.timestamp() * 1_000_000 <= int(span["startTime"])
+                <= end.timestamp() * 1_000_000
+            )]
+            if not spans:
+                return None
             starts = [int(span["startTime"]) for span in spans]
             ends = [
                 int(span["startTime"]) + int(span["duration"])
@@ -123,8 +136,9 @@ class JaegerClient:
         return Evidence(
             source=EvidenceSource.TRACE,
             summary=(
-                f"Trace {trace_id}: {len(spans)} spans, "
-                f"{error_span_count} error spans, {duration_ms:.2f} ms"
+                f"Trace {trace_id}: {len(spans)} spans starting in the "
+                f"investigation window, {error_span_count} error spans, "
+                f"{duration_ms:.2f} ms selected span extent"
             ),
             observed_at=observed_at,
             service=service,
@@ -134,6 +148,8 @@ class JaegerClient:
                 "span_count": len(spans),
                 "error_span_count": error_span_count,
                 "duration_ms": duration_ms,
+                "summary_scope": "spans_started_in_window",
+                "excluded_span_count": received - len(spans),
             },
         )
 

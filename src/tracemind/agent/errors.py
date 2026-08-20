@@ -1,7 +1,9 @@
 """Configuration and diagnosis failures shared across service boundaries."""
 
 import asyncio
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 if TYPE_CHECKING:
     from tracemind.models import Evidence
@@ -44,3 +46,23 @@ class DiagnosisError(RuntimeError):
         super().__init__(message)
         self.state = state
         self.evidence = evidence or []
+
+
+class DiagnosisValidationError(DiagnosisError):
+    """Carry a contract rule and offending citations for targeted repair."""
+
+    def __init__(
+        self, message: str, *, code: str, evidence_ids: Sequence[UUID] = (),
+    ) -> None:
+        """Keep validation details separate from provider exception text."""
+        super().__init__(message)
+        self.code = code
+        self.evidence_ids = evidence_ids
+
+    def details(self) -> dict:
+        """Bound citation feedback without hiding that more IDs failed."""
+        return {
+            "code": self.code, "message": str(self),
+            "evidence_ids": [str(i) for i in self.evidence_ids[:20]],
+            "omitted_evidence_ids": max(0, len(self.evidence_ids) - 20),
+        }

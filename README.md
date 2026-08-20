@@ -512,9 +512,18 @@ increase the unreported-call counter, rather than reporting zero token cost.
 Missing diagnosis structure (including text-only or empty responses), schema
 errors, and citation errors allow one diagnosis repair by default. Native
 structured output and tool-based output use the same bounded repair loop.
+Repair feedback identifies the violated rule and up to 20 offending evidence
+IDs or schema field errors. `diagnosis.rejected` records `validation_code`,
+`validation_message`, and the relevant `validation_evidence_ids` or
+`validation_fields` in the run ledger and JSONL. Its `candidate_preview` retains
+at most 4096 UTF-8 bytes of rejected diagnosis output; `candidate_truncated`
+marks incomplete excerpts. These events are persisted before checking the
+repair allowance, so the final rejected candidate survives even if its model
+node never commits a graph checkpoint. Full prompts and tool payloads are not
+copied into these events, and raw provider exceptions are excluded.
 Repair calls consume model/time/context budgets and reported token usage,
-but do not advance the no-progress counter. Rejected diagnosis exchanges stay
-in graph history, and mixed batches still execute ordinary telemetry calls
+but do not advance the no-progress counter. Rejected exchanges enter graph
+history when the model node completes, and mixed batches execute telemetry calls
 with paired call IDs. Exhaustion returns an inconclusive diagnosis with
 `invalid_diagnosis`. Three consecutive investigation rounds without new
 usable observations trigger `no_progress`; this is an observation-based
@@ -522,6 +531,20 @@ stall heuristic, not a judgment of reasoning quality. Rereading a previously
 returned preview does not advance it; reading a previously unseen detail page
 can. Configure these limits through
 `TRACEMIND_AGENT_DIAGNOSIS_REPAIRS` and `TRACEMIND_AGENT_NO_PROGRESS_ROUNDS`.
+
+Jaeger trace summaries count only spans starting within the inclusive
+investigation window. `summary_scope=spans_started_in_window` and
+`excluded_span_count` describe the selection; `duration_ms` is the selected
+span extent, not whole-request latency. Traces without selected spans are
+omitted. Tool bindings exclude out-of-window observations before storage and
+return exclusion guidance without evidence IDs. `observations.filtered` records
+these exclusions; an empty result does not prove service health. Legacy stored
+evidence still receives the same strict final citation validation.
+
+`get_trace_detail` requires an exact 16- or 32-character hexadecimal ID copied
+from returned `attributes.trace_id`, rather than an evidence UUID or span ID.
+Invalid formats are rejected before a backend request; the model receives
+argument-validation feedback to correct the call.
 
 ### Final diagnosis after tool investigation closes
 

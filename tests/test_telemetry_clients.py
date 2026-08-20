@@ -213,6 +213,8 @@ def test_jaeger_search_returns_trace_evidence() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/traces"
         assert request.url.params["service"] == "checkout"
+        assert request.url.params["start"] == "1725148800000000"
+        assert request.url.params["end"] == "1725152400000000"
         return httpx.Response(
             200,
             json={
@@ -221,12 +223,12 @@ def test_jaeger_search_returns_trace_evidence() -> None:
                         "traceID": "trace-123",
                         "spans": [
                             {
-                                "startTime": 1_725_192_000_000_000,
+                                "startTime": 1_725_148_800_000_000,
                                 "duration": 250_000,
                                 "tags": [],
                             },
                             {
-                                "startTime": 1_725_192_000_050_000,
+                                "startTime": 1_725_148_800_050_000,
                                 "duration": 100_000,
                                 "tags": [{"key": "error", "value": True}],
                             },
@@ -253,6 +255,45 @@ def test_jaeger_search_returns_trace_evidence() -> None:
     assert evidence[0].attributes["trace_id"] == "trace-123"
     assert evidence[0].attributes["error_span_count"] == 1
     assert evidence[0].attributes["duration_ms"] == 250.0
+
+
+def test_jaeger_search_scopes_mixed_age_spans_to_inclusive_window():
+    """An old span must not date or inflate a current trace summary."""
+    start = datetime(2024, 9, 1, tzinfo=UTC)
+    end = datetime(2024, 9, 1, 1, tzinfo=UTC)
+    first = int(start.timestamp() * 1_000_000)
+    last = int(end.timestamp() * 1_000_000)
+
+    def span(at, error=False):
+        return {"startTime": at, "duration": 100_000,
+                "tags": [{"key": "error", "value": error}]}
+
+    payload = {"data": [
+        {"traceID": "mixed", "spans": [
+            span(first - 36_000_000_000, True), span(first),
+            span(last, True), span(last + 1, True),
+        ]},
+        {"traceID": "old-only", "spans": [span(first - 1, True)]},
+    ]}
+
+    async def search():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=payload)
+        )) as http:
+            return await JaegerClient("http://jaeger", http).search_traces(
+                "checkout", start=start, end=end,
+            )
+
+    evidence = asyncio.run(search())
+    assert len(evidence) == 1
+    assert evidence[0].observed_at == start
+    attrs = evidence[0].attributes
+    assert attrs["span_count"] == 2
+    assert attrs["error_span_count"] == 1
+    assert attrs["excluded_span_count"] == 2
+    assert attrs["summary_scope"] == "spans_started_in_window"
+    assert attrs["duration_ms"] == 3_600_100
+    assert "selected span extent" in evidence[0].summary
 
 
 def test_jaeger_trace_detail_returns_error_span_evidence() -> None:

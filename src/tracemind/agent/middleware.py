@@ -8,7 +8,9 @@ from langchain.agents.middleware import (
     ModelRequest,
     ModelResponse,
 )
-from langchain.agents.structured_output import StructuredOutputError
+from langchain.agents.structured_output import (
+    MultipleStructuredOutputsError, StructuredOutputError,
+)
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage, HumanMessage, SystemMessage, ToolMessage,
@@ -16,9 +18,10 @@ from langchain_core.messages import (
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+from pydantic import ValidationError
 
-from tracemind.agent.context import select_context
-from tracemind.agent.errors import DiagnosisError
+from tracemind.agent.context import json_text, select_context
+from tracemind.agent.errors import DiagnosisError, DiagnosisValidationError
 from tracemind.agent.harness import InvestigationClosed, RunHarness
 from tracemind.agent.recovery import ModelCallFailed, ToolUnavailable
 from tracemind.models.run import StopReason
@@ -58,14 +61,16 @@ class HarnessMiddleware(AgentMiddleware):
                 request = request.override(model=self._fallback)
             prepared = self._prepare_request(request)
             malformed = False
+            validation = None
 
             async def invoke():
                 """Retain provider output and usage after schema rejection."""
-                nonlocal malformed
+                nonlocal malformed, validation
                 try:
                     return await handler(prepared)
                 except StructuredOutputError as exc:
                     malformed = True
+                    validation = self._schema_failure(exc)
                     return ModelResponse(result=[exc.ai_message])
 
             model_name = (
@@ -100,8 +105,15 @@ class HarnessMiddleware(AgentMiddleware):
                         self.harness.validate_draft(
                             response.structured_response
                         )
+                    except DiagnosisValidationError as exc:
+                        malformed = True
+                        validation = exc.details()
                     except DiagnosisError:
                         malformed = True
+                        validation = {
+                            "code": "diagnosis_contract",
+                            "message": "Diagnosis contract validation failed.",
+                        }
             elif request.response_format is not None and any(
                 isinstance(item, AIMessage) and (
                     not item.tool_calls or item.invalid_tool_calls or any(
@@ -111,6 +123,9 @@ class HarnessMiddleware(AgentMiddleware):
                 ) for item in response.result
             ):
                 malformed = True
+                validation = validation or self._output_failure(
+                    response, request.response_format,
+                )
             finalizing = self.harness.finalization_reason is not None
             if finalizing and (
                 response.structured_response is None or any(
@@ -123,10 +138,21 @@ class HarnessMiddleware(AgentMiddleware):
                 )
             ):
                 malformed = True
+                validation = validation or {
+                    "code": "finalization_output",
+                    "message": (
+                        "Investigation tools are disabled; return only one "
+                        "valid DiagnosisDraft using existing evidence."
+                    ),
+                }
             if malformed:
-                self.harness.repair_diagnosis()
+                preview, truncated = self._candidate_preview(response)
+                self.harness.repair_diagnosis(
+                    validation=validation, candidate_preview=preview,
+                    candidate_truncated=truncated,
+                )
                 feedback = self._repair_feedback(
-                    response, finalizing=finalizing,
+                    response, finalizing=finalizing, validation=validation,
                 )
                 if not finalizing and any(
                     isinstance(item, AIMessage) and any(
@@ -151,8 +177,100 @@ class HarnessMiddleware(AgentMiddleware):
             )
 
     @staticmethod
+    def _schema_failure(error: Exception) -> dict:
+        """Report field paths and error types without raw provider errors."""
+        if isinstance(error, MultipleStructuredOutputsError):
+            return {
+                "code": "multiple_diagnoses",
+                "message": "Submit exactly one DiagnosisDraft per response.",
+            }
+        source = getattr(error, "source", error)
+        seen = set()
+        while source is not None and id(source) not in seen:
+            seen.add(id(source))
+            if isinstance(source, ValidationError):
+                errors = source.errors(include_input=False,
+                                       include_context=False)
+                return {
+                    "code": "schema_validation",
+                    "message": "Correct the listed DiagnosisDraft fields.",
+                    "fields": [
+                        ".".join(str(p) for p in e["loc"])[:160]
+                        + ": " + e["type"] for e in errors[:20]
+                    ],
+                    "omitted_fields": max(0, len(errors) - 20),
+                }
+            if isinstance(source, json.JSONDecodeError):
+                return {
+                    "code": "invalid_json",
+                    "message": "Return valid JSON matching DiagnosisDraft.",
+                }
+            source = source.__cause__ or source.__context__
+        return {
+            "code": "schema_validation",
+            "message": "Return one valid DiagnosisDraft matching its schema.",
+        }
+
+    @staticmethod
+    def _output_failure(response: ModelResponse, response_format) -> dict:
+        """Recover field errors already converted to framework tool messages.
+
+        ToolStrategy can return an error ToolMessage instead of raising.
+        Revalidate only its rejected arguments to extract safe field metadata.
+        """
+        calls = [call for item in response.result
+                 if isinstance(item, AIMessage) for call in item.tool_calls
+                 if call["name"] == "DiagnosisDraft"]
+        if len(calls) > 1:
+            return {
+                "code": "multiple_diagnoses",
+                "message": "Submit exactly one DiagnosisDraft per response.",
+            }
+        if any(item.invalid_tool_calls for item in response.result
+               if isinstance(item, AIMessage)):
+            return {
+                "code": "invalid_tool_arguments",
+                "message": "Return valid JSON arguments for each tool call.",
+            }
+        if calls:
+            schema = response_format.schema
+            try:
+                schema.model_validate(calls[0]["args"])
+            except ValidationError as exc:
+                return HarnessMiddleware._schema_failure(exc)
+        return {
+            "code": "missing_structured_output",
+            "message": "Return a single valid DiagnosisDraft.",
+        }
+
+    @staticmethod
+    def _candidate_preview(response: ModelResponse) -> tuple[str, bool]:
+        """Retain at most 4096 UTF-8 bytes of rejected diagnosis output."""
+        candidate = response.structured_response
+        if candidate is not None:
+            candidate = candidate.model_dump(mode="json")
+        else:
+            candidate = [
+                call.get("args")
+                for item in response.result if isinstance(item, AIMessage)
+                for call in [*item.tool_calls, *item.invalid_tool_calls]
+                if call.get("name") == "DiagnosisDraft"
+            ]
+            if not candidate:
+                candidate = []
+                for item in response.result:
+                    if isinstance(item, AIMessage):
+                        try:
+                            candidate.append(json.loads(item.text))
+                        except json.JSONDecodeError:
+                            candidate.append(item.content)
+        encoded = json_text(candidate).encode()
+        return encoded[:4096].decode(errors="ignore"), len(encoded) > 4096
+
+    @staticmethod
     def _repair_feedback(
         response: ModelResponse, *, finalizing: bool = False,
+        validation: dict | None = None,
     ) -> ModelResponse:
         """Keep message pairing and send bounded schema/citation feedback."""
         feedback = (
@@ -161,6 +279,10 @@ class HarnessMiddleware(AgentMiddleware):
             "returned by tools within the investigation window, include a "
             "nonblank explanation, and use inconclusive if unsupported."
         )
+        if validation is not None:
+            feedback += (
+                " Specific validation failure: " + json_text(validation)
+            )
         if finalizing:
             feedback += (
                 " All investigation tools are disabled. Submit the final "

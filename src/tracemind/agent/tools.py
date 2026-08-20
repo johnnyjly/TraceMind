@@ -193,7 +193,8 @@ def create_telemetry_tools(
     Filter visibility by the harness allowlist. Execution rechecks
     authorization and reserves budgets. Store observations before selecting
     bounded previews, retaining omitted details for paginated retrieval.
-    Final citation validation checks observation times.
+    Exclude observations outside the inclusive window before storing them;
+    final citation validation still checks retained and legacy evidence.
     """
     async def execute(
         name: ToolName,
@@ -207,6 +208,18 @@ def create_telemetry_tools(
             """Store observations, select previews, and trace retention."""
             observations = await call()
             harness.check_active()
+            retained = [item for item in observations if (
+                item.observed_at.utcoffset() is not None
+                and start <= item.observed_at <= end
+            )]
+            excluded = len(observations) - len(retained)
+            if excluded:
+                harness.emit(
+                    "observations.filtered", parent_span_id=harness.state.id,
+                    data={"tool": name, "received": len(observations),
+                          "excluded_outside_window": excluded},
+                )
+            observations = retained
             before = len(collector.evidence)
             try:
                 previews = collector.add(observations)
@@ -223,6 +236,15 @@ def create_telemetry_tools(
                 result.append({
                     "omitted_count": omitted,
                     "retrieval": "read_evidence without evidence_id lists all",
+                })
+            if excluded:
+                result.append({
+                    "excluded_outside_window": excluded,
+                    "guidance": (
+                        "Observations outside the investigation window were "
+                        "excluded and cannot be cited. An empty remaining "
+                        "result does not establish service health."
+                    ),
                 })
             harness.emit("observations.stored",
                          parent_span_id=harness.state.id,
@@ -347,11 +369,22 @@ def create_telemetry_tools(
         )
 
     @tool(response_format="content_and_artifact")
-    async def get_trace_detail(trace_id: str) -> tuple[list[dict], dict]:
-        (
-            "Inspect one Jaeger trace and return its normalized error-span "
-            "evidence."
-        )
+    async def get_trace_detail(
+        trace_id: Annotated[str, Field(
+            pattern=r"^(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32})$",
+            description=(
+                "Copy the exact attributes.trace_id from returned trace or "
+                "log evidence: a 16 or 32 character hexadecimal Jaeger ID. "
+                "Not an evidence UUID or span_id. Never invent or pad an ID."
+            ),
+        )],
+    ) -> tuple[list[dict], dict]:
+        """Inspect a known trace and return error spans within the window.
+
+        Use its returned attributes.trace_id, not the evidence's id. If no
+        trace ID is available, search_traces or search_logs first. Do not
+        reconstruct a trace ID from an abbreviated value.
+        """
         return await execute(
             "get_trace_detail", {"trace_id": trace_id},
             lambda: jaeger.get_trace_detail(trace_id),
