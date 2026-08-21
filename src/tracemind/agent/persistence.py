@@ -13,12 +13,15 @@ from uuid import UUID, uuid4
 
 from tracemind.agent.service import DiagnosisRun
 from tracemind.models import Evidence, Incident
+from tracemind.models.memory import (
+    MemoryCreate, MemoryPolicy, MemoryRecord, MemorySnapshot,
+)
 from tracemind.models.run import (
     RunEvent, RunLimits, RunPurpose, RunState, RunStatus, StopReason, ToolName,
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TERMINAL = {
     RunStatus.SUCCEEDED, RunStatus.INCONCLUSIVE,
     RunStatus.FAILED, RunStatus.CANCELLED,
@@ -95,7 +98,7 @@ class RunRepository:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, SCHEMA_VERSION):
+            if version not in (0, 1, 2, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"unsupported run database schema version: {version}"
                 )
@@ -132,6 +135,26 @@ class RunRepository:
                     CREATE INDEX runs_investigation ON runs(investigation_id)
                 """)
                 connection.execute("PRAGMA user_version=2")
+            if version < 3:
+                connection.execute("""
+                    CREATE TABLE incident_memories (
+                        id TEXT PRIMARY KEY,
+                        revision INTEGER NOT NULL,
+                        environment TEXT NOT NULL,
+                        deployment_version TEXT NOT NULL,
+                        source_incident_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        confirmed_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        record_json TEXT NOT NULL
+                    )
+                """)
+                connection.execute("""
+                    CREATE INDEX memories_scope ON incident_memories
+                    (environment,deployment_version,status,expires_at)
+                """)
+                connection.execute("PRAGMA user_version=3")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -258,6 +281,7 @@ class RunRepository:
         limits: RunLimits, allowed_tools: tuple[ToolName, ...],
         start: datetime | None = None, end: datetime | None = None,
         request_hash: str, idempotency_key: str | None = None,
+        memory_policy: MemoryPolicy | None = None,
     ) -> StoredRun:
         """Append one round after the previous round commits its outcome.
 
@@ -330,6 +354,8 @@ class RunRepository:
                                    if s.user_message],
                 prior_diagnosis=prior,
                 omitted_prior_evidence=len(parent.evidence) - len(evidence),
+                memory_policy=(memory_policy if purpose is
+                               RunPurpose.INVESTIGATE else None),
                 investigation_start=start, investigation_end=end,
                 limits=limits.model_copy(deep=True),
                 allowed_tools=(tuple(t for t in allowed_tools
@@ -580,3 +606,187 @@ class RunRepository:
                 (state.model_dump_json(), time.time(), str(run_id)),
             )
         return self.get(run_id)
+
+
+class MemoryNotFound(KeyError):
+    """The historical experience has been deleted or never existed."""
+
+
+class MemoryRepository:
+    """Manage human confirmations using the existing local run database.
+
+    The agent has no write access. Revisions use optimistic concurrency;
+    previously captured run snapshots retain the exact historical content.
+    """
+
+    def __init__(self, runs: RunRepository) -> None:
+        """Reuse SQLite transactions and source-run provenance checks."""
+        self.runs = runs
+
+    def get(self, memory_id: UUID) -> MemoryRecord:
+        """Read current content, including revoked or expired records."""
+        with self.runs._connect() as connection:
+            row = connection.execute(
+                "SELECT record_json FROM incident_memories WHERE id=?",
+                (str(memory_id),),
+            ).fetchone()
+        if row is None:
+            raise MemoryNotFound(str(memory_id))
+        return MemoryRecord.model_validate_json(row[0])
+
+    def list(self, *, offset: int = 0, limit: int = 20) -> list[MemoryRecord]:
+        """Page current records for manual review, without hiding expiry."""
+        with self.runs._connect() as connection:
+            rows = connection.execute(
+                """SELECT record_json FROM incident_memories
+                   ORDER BY updated_at DESC,id LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+        return [MemoryRecord.model_validate_json(row[0]) for row in rows]
+
+    def confirm(
+        self, content: MemoryCreate, *, memory_id: UUID | None = None,
+        expected_revision: int | None = None,
+    ) -> MemoryRecord:
+        """Create or reconfirm content after explicit human review.
+
+        A successful model run alone never calls this method. The resolution
+        and confirmation note are human assertions, not machine verification.
+        """
+        now = datetime.now(UTC)
+        if content.expires_at <= now:
+            raise RunConflict("memory expiry must be in the future")
+        with self.runs._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            revision = 1
+            if memory_id is not None:
+                current = connection.execute(
+                    "SELECT revision FROM incident_memories WHERE id=?",
+                    (str(memory_id),),
+                ).fetchone()
+                if current is None:
+                    raise MemoryNotFound(str(memory_id))
+                if current[0] != expected_revision:
+                    raise RunConflict("memory revision changed; reload it")
+                revision = current[0] + 1
+            source = connection.execute(
+                "SELECT * FROM runs WHERE id=?", (str(content.source_run_id),),
+            ).fetchone()
+            if source is None:
+                raise RunNotFound(str(content.source_run_id))
+            run = self.runs._decode(source)
+            if (run.state.status is not RunStatus.SUCCEEDED or
+                    run.result is None or
+                    not run.result.diagnosis.evidence_ids):
+                raise RunConflict(
+                    "memory source must be a completed diagnosis")
+            known = {e.id: e for e in run.evidence}
+            citations = list(dict.fromkeys(run.result.diagnosis.evidence_ids))
+            if any(
+                i not in known or
+                known[i].observed_at.utcoffset() is None or not (
+                    run.state.investigation_start <= known[i].observed_at
+                    <= run.state.investigation_end
+                ) for i in citations
+            ):
+                raise RunConflict(
+                    "memory source has invalid evidence citations")
+            services = set(run.state.incident.affected_services) | {
+                e.service for e in run.evidence if e.service
+            }
+            if not set(content.services) <= services:
+                raise RunConflict(
+                    "memory services must occur in the source run")
+            source_policy = run.state.memory_policy
+            if source_policy is not None and (
+                content.environment != source_policy.scope.environment or
+                content.deployment_version !=
+                    source_policy.scope.deployment_version
+            ):
+                raise RunConflict("memory scope differs from the source run")
+            data = content.model_dump(exclude={"expected_revision"})
+            record = MemoryRecord(
+                **data, id=memory_id or uuid4(), revision=revision,
+                source_incident_id=run.state.incident.id,
+                source_evidence_ids=citations[:20],
+                omitted_source_evidence_ids=max(0, len(citations) - 20),
+                confirmed_at=now, updated_at=now,
+            )
+            connection.execute(
+                """INSERT INTO incident_memories
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                   revision=excluded.revision,environment=excluded.environment,
+                   deployment_version=excluded.deployment_version,
+                   source_incident_id=excluded.source_incident_id,
+                   status=excluded.status,confirmed_at=excluded.confirmed_at,
+                   expires_at=excluded.expires_at,updated_at=excluded.updated_at,
+                   record_json=excluded.record_json""",
+                (str(record.id), revision, record.environment,
+                 record.deployment_version, str(record.source_incident_id),
+                 record.status, now.timestamp(), record.expires_at.timestamp(),
+                 now.timestamp(), record.model_dump_json()),
+            )
+        return record
+
+    def revoke(
+        self, memory_id: UUID, *, expected_revision: int,
+    ) -> MemoryRecord:
+        """Stop future retrieval while retaining the record for review."""
+        with self.runs._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT record_json FROM incident_memories WHERE id=?",
+                (str(memory_id),),
+            ).fetchone()
+            if row is None:
+                raise MemoryNotFound(str(memory_id))
+            current = MemoryRecord.model_validate_json(row[0])
+            if current.revision != expected_revision:
+                raise RunConflict("memory revision changed; reload it")
+            current.status = "revoked"
+            current.revision += 1
+            current.updated_at = datetime.now(UTC)
+            connection.execute(
+                """UPDATE incident_memories SET revision=?,status='revoked',
+                   updated_at=?,record_json=? WHERE id=?""",
+                (current.revision, current.updated_at.timestamp(),
+                 current.model_dump_json(), str(memory_id)),
+            )
+        return current
+
+    def delete(self, memory_id: UUID, *, expected_revision: int) -> None:
+        """Delete current content; prior run snapshots retain their audit."""
+        with self.runs._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM incident_memories WHERE id=? AND revision=?",
+                (str(memory_id), expected_revision),
+            )
+            if cursor.rowcount != 1:
+                raise RunConflict("memory missing or revision changed")
+
+    def snapshot(
+        self, policy: MemoryPolicy, incident: Incident, at: datetime,
+    ) -> MemorySnapshot:
+        """Select current, same-deployment experience from other incidents."""
+        services = incident.affected_services
+        records = []
+        if services:
+            placeholders = ",".join("?" for _ in services)
+            with self.runs._connect() as connection:
+                rows = connection.execute(
+                    f"""SELECT record_json FROM incident_memories
+                        WHERE environment=? AND deployment_version=?
+                        AND status='confirmed' AND expires_at>?
+                        AND confirmed_at<=? AND source_incident_id!=?
+                        AND EXISTS (SELECT 1 FROM json_each(record_json,
+                            '$.services') WHERE value IN ({placeholders}))
+                        ORDER BY updated_at DESC,id LIMIT ?""",
+                    (policy.scope.environment, policy.scope.deployment_version,
+                     at.timestamp(), at.timestamp(), str(incident.id),
+                     *services, policy.max_records),
+                ).fetchall()
+            records = [MemoryRecord.model_validate_json(row[0])
+                       for row in rows]
+        return MemorySnapshot(scope=policy.scope, selected_at=at,
+                              records=records)

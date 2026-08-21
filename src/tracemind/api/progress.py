@@ -31,6 +31,7 @@ MESSAGES = {
     "recovery.ambiguous_call": ("resuming", "中断时的调用结果尚未确认"),
     "diagnosis.repair_requested": ("analyzing", "正在修正诊断输出"),
     "policy.finalizing": ("finalizing", "工具调查已停止，正在根据已有证据整理结论"),
+    "memory.selected": ("historical_context", "历史经验检索完成，正在核对本次证据"),
 }
 
 
@@ -39,7 +40,7 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
     data = {key: value for key, value in event.data.items() if key in {
         "tool", "service", "investigation_start", "investigation_end",
         "result_count", "reason", "status", "error_type", "category",
-        "added", "received", "duplicates",
+        "added", "received", "duplicates", "record_count",
     } and isinstance(value, (str, int, float, bool))}
     if event.kind.startswith("tool."):
         tool = TOOLS.get(data.get("tool"), "工具")

@@ -11,11 +11,13 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from tracemind.agent import DiagnosisService, LangChainAgentRunner
+from tracemind.agent.memory import evaluation_memory
 from tracemind.config import Settings
 from tracemind.evaluation.models import EvaluationCase, EvaluationReport
 from tracemind.evaluation.runner import run_service_evaluation
 from tracemind.evaluation.summary import trace_issues
 from tracemind.models import Evidence
+from tracemind.models.memory import MemorySnapshot
 from tracemind.models.run import StopReason
 from tracemind.telemetry.errors import TelemetryClientError
 
@@ -155,8 +157,14 @@ class ScriptedReplayModel(BaseChatModel):
 async def run_replay_evaluation(
     fixture: ReplayFixture, settings: Settings, *,
     model: BaseChatModel | None = None,
+    memory_snapshot: MemorySnapshot | None = None,
 ) -> EvaluationReport:
     """Run scripted regression or an explicitly supplied real model offline."""
+    policy, lookup = evaluation_memory(
+        memory_snapshot, settings.memory_policy, start=fixture.start,
+        max_records=settings.agent_memory_max_records,
+        context_bytes=settings.agent_memory_context_bytes,
+    )
     telemetry = ReplayTelemetry(fixture.responses)
     selected_model = (model if model is not None else
                       ScriptedReplayModel(script=fixture.script))
@@ -168,12 +176,15 @@ async def run_replay_evaluation(
         limits=limits, allowed_tools=settings.agent_allowed_tools,
         recursion_limit=settings.agent_recursion_limit,
         event_directory=settings.agent_trace_directory,
+        memory_policy=policy, memory_lookup=lookup,
     )
     report = await run_service_evaluation(
         fixture.case, service, start=fixture.start, end=fixture.end,
         model_provider=settings.llm_provider if model else "scripted",
         model_name=settings.llm_model if model else "scripted-replay",
         execution_mode="model_replay" if model else "scripted_replay",
+        memory_corpus_id=(memory_snapshot.fingerprint
+                          if memory_snapshot else None),
     )
     outcome = (
         report.run_state is not None and

@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -88,3 +89,5 @@ class EvaluationReport(BaseModel):
     execution_mode: str = "live"
     elapsed_ms: float = Field(default=0, ge=0)
     regression_passed: bool | None = None
+    memory_mode: Literal["off", "frozen"] = "off"
+    memory_corpus_id: str | None = None

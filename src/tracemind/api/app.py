@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -22,7 +23,8 @@ from tracemind.agent import (
     create_chat_model,
 )
 from tracemind.agent.persistence import (
-    RunConflict, RunNotFound, RunRepository, StoredRun,
+    MemoryNotFound, MemoryRepository, RunConflict, RunNotFound, RunRepository,
+    StoredRun,
 )
 from tracemind.api.schemas import (
     DiagnosisRequest, FollowUpRequest, InvestigationCreated,
@@ -31,7 +33,11 @@ from tracemind.api.schemas import (
 from tracemind.api.progress import stream_progress
 from tracemind.agent.llm import create_fallback_model
 from tracemind.config import Settings, get_settings
-from tracemind.models import Diagnosis
+from tracemind.models import Diagnosis, Incident
+from tracemind.models.memory import (
+    MemoryCreate, MemoryPolicy, MemoryRecord, MemoryRevision, MemoryScope,
+    MemorySnapshot, ScopeName,
+)
 from tracemind.models.run import RunPurpose, RunState, RunStatus, StopReason
 from tracemind.telemetry import (
     JaegerClient,
@@ -77,6 +83,8 @@ async def get_diagnosis_service(
     request.
     """
     async with httpx.AsyncClient(timeout=20) as http_client:
+        memory = (MemoryRepository(RunRepository(settings.agent_run_database))
+                  if settings.agent_memory_enabled else None)
         yield DiagnosisService(
             PrometheusClient(str(settings.prometheus_url), http_client),
             JaegerClient(str(settings.jaeger_url), http_client),
@@ -90,6 +98,8 @@ async def get_diagnosis_service(
             limits=settings.run_limits,
             allowed_tools=settings.agent_allowed_tools,
             event_directory=settings.agent_trace_directory,
+            memory_policy=settings.memory_policy,
+            memory_lookup=memory.snapshot if memory is not None else None,
         )
 
 
@@ -212,6 +222,7 @@ def create_app() -> FastAPI:
         """Queue a diagnosis for the independent persistent worker."""
         state = RunState(
             incident=request.incident,
+            memory_policy=settings.memory_policy,
             investigation_start=request.investigation_start,
             investigation_end=request.investigation_end,
             limits=settings.run_limits,
@@ -313,6 +324,7 @@ def create_app() -> FastAPI:
         """Start autonomous diagnosis with optional later human follow-up."""
         state = RunState(
             investigation_id=uuid4(), incident=request.incident,
+            memory_policy=settings.memory_policy,
             investigation_start=request.investigation_start,
             investigation_end=request.investigation_end,
             limits=settings.run_limits,
@@ -385,6 +397,7 @@ def create_app() -> FastAPI:
                 purpose=RunPurpose(request.purpose),
                 limits=settings.run_limits,
                 allowed_tools=settings.agent_allowed_tools,
+                memory_policy=settings.memory_policy,
                 start=request.investigation_start,
                 end=request.investigation_end,
                 request_hash=request_fingerprint(request,
@@ -431,6 +444,111 @@ def create_app() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @application.post("/api/v1/memories", status_code=201,
+                      response_model=MemoryRecord, tags=["memory"])
+    async def confirm_memory(
+        request: MemoryCreate,
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> MemoryRecord:
+        """Attest a resolution manually; no diagnostic tool writes memories."""
+        try:
+            return MemoryRepository(repository).confirm(request)
+        except RunNotFound as exc:
+            raise HTTPException(404, "source run not found") from exc
+        except RunConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @application.get("/api/v1/memories", response_model=list[MemoryRecord],
+                     tags=["memory"])
+    async def list_memories(
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> list[MemoryRecord]:
+        """Page confirmations, including expired and revoked entries."""
+        return MemoryRepository(repository).list(offset=offset, limit=limit)
+
+    @application.get("/api/v1/memories/snapshot",
+                     response_model=MemorySnapshot, tags=["memory"])
+    async def export_memory_snapshot(
+        environment: Annotated[ScopeName, Query()],
+        deployment_version: Annotated[ScopeName, Query()],
+        service: Annotated[list[ScopeName], Query(
+            min_length=1, max_length=20)],
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+        limit: Annotated[int, Query(ge=1, le=10)] = 3,
+    ) -> MemorySnapshot:
+        """Freeze a scoped corpus before collecting held-out test incidents."""
+        policy = MemoryPolicy(scope=MemoryScope(
+            environment=environment, deployment_version=deployment_version,
+        ), max_records=limit)
+        return MemoryRepository(repository).snapshot(
+            policy, Incident(title="Memory export", description="Snapshot",
+                             affected_services=service), datetime.now(UTC),
+        )
+
+    @application.get("/api/v1/memories/{memory_id}",
+                     response_model=MemoryRecord, tags=["memory"])
+    async def get_memory(
+        memory_id: UUID,
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> MemoryRecord:
+        """Inspect confirmation and provenance without agent retrieval."""
+        try:
+            return MemoryRepository(repository).get(memory_id)
+        except MemoryNotFound as exc:
+            raise HTTPException(404, "memory not found") from exc
+
+    @application.put("/api/v1/memories/{memory_id}",
+                     response_model=MemoryRecord, tags=["memory"])
+    async def revise_memory(
+        memory_id: UUID, request: MemoryRevision,
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> MemoryRecord:
+        """Reconfirm a correction with the revision the reviewer inspected."""
+        try:
+            return MemoryRepository(repository).confirm(
+                request, memory_id=memory_id,
+                expected_revision=request.expected_revision,
+            )
+        except (MemoryNotFound, RunNotFound) as exc:
+            raise HTTPException(404, "memory or source run not found") from exc
+        except RunConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @application.post("/api/v1/memories/{memory_id}/revoke",
+                      response_model=MemoryRecord, tags=["memory"])
+    async def revoke_memory(
+        memory_id: UUID,
+        expected_revision: Annotated[int, Query(ge=1)],
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> MemoryRecord:
+        """Remove a disputed resolution from future retrieval."""
+        try:
+            return MemoryRepository(repository).revoke(
+                memory_id, expected_revision=expected_revision,
+            )
+        except MemoryNotFound as exc:
+            raise HTTPException(404, "memory not found") from exc
+        except RunConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @application.delete("/api/v1/memories/{memory_id}", status_code=204,
+                        tags=["memory"])
+    async def delete_memory(
+        memory_id: UUID,
+        expected_revision: Annotated[int, Query(ge=1)],
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> Response:
+        """Delete current content; prior run snapshots remain auditable."""
+        try:
+            MemoryRepository(repository).delete(
+                memory_id, expected_revision=expected_revision,
+            )
+        except RunConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return Response(status_code=204)
 
     return application
 

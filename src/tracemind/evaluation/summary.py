@@ -30,6 +30,15 @@ def trace_issues(state: RunState) -> list[str]:
         issues.append("terminal_event")
     elif terminal[0].data.get("status") != state.status.value:
         issues.append("terminal_status")
+    if state.memory_snapshot is not None:
+        selected = [e for e in events if e.kind == "memory.selected"]
+        if len(selected) != 1 or selected[0].data.get("snapshot_id") != (
+            state.memory_snapshot.fingerprint
+        ):
+            issues.append("memory_snapshot")
+        elif any(e.kind == "model.started" and
+                 e.sequence < selected[0].sequence for e in events):
+            issues.append("memory_selection_order")
     for kind, expected in (("model", state.model_calls),
                            ("tool", sum(state.tool_calls.values()))):
         starts = [e.span_id for e in events if e.kind == f"{kind}.started"]
@@ -91,6 +100,8 @@ def build_batch_report(
     for report in reports:
         key = (f"{report.execution_mode}/"
                f"{report.model_provider}:{report.model_name}")
+        if report.memory_mode == "frozen":
+            key += f"/memory:{report.memory_corpus_id}"
         groups.setdefault(key, []).append(report)
     return BatchReport(
         reports=reports, summary=summarize_reports(reports, pricing=pricing),

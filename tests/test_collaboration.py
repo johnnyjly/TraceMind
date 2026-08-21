@@ -231,7 +231,7 @@ def test_version_one_migration_preserves_existing_runs(tmp_path: Path):
     migrated = RunRepository(path)
     assert migrated.get(state.id).state == state
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     create_investigation(migrated)
     assert RunRepository(path).get(state.id).state == state
 

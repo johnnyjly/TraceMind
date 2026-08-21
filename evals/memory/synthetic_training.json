@@ -1,0 +1,30 @@
+{
+  "scope": {
+    "environment": "otel-demo-local",
+    "deployment_version": "demo-3.1.0-local-v1"
+  },
+  "selected_at": "2024-08-31T00:00:00Z",
+  "records": [
+    {
+      "id": "4752b185-3a7a-4151-a34a-20e6c2990a85",
+      "revision": 1,
+      "status": "confirmed",
+      "environment": "otel-demo-local",
+      "deployment_version": "demo-3.1.0-local-v1",
+      "services": ["checkout"],
+      "symptom": "An earlier synthetic checkout request timed out",
+      "resolution": "A network configuration change resolved that earlier timeout",
+      "diagnostic_queries": ["Check current traces for downstream connection failures"],
+      "remediation": ["Verify network configuration only if current evidence supports it"],
+      "confirmed_by": "synthetic-fixture-reviewer",
+      "confirmation_note": "Artificial training record for harness isolation tests; not a real incident or an evaluation answer",
+      "expires_at": "2024-10-01T00:00:00Z",
+      "source_run_id": "96047e55-cb49-4cd0-9efe-e62869972756",
+      "source_incident_id": "c8d6a377-51ad-48fe-976b-528e42fec81b",
+      "source_evidence_ids": ["9b2f8a40-9042-45bc-8f24-a3a2f47be3db"],
+      "omitted_source_evidence_ids": 0,
+      "confirmed_at": "2024-08-30T00:00:00Z",
+      "updated_at": "2024-08-30T00:00:00Z"
+    }
+  ]
+}

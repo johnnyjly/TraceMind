@@ -14,7 +14,9 @@ from tracemind.agent.errors import (
     DiagnosisCancelled, DiagnosisError, ModelConfigurationError,
 )
 from tracemind.agent.llm import create_chat_model, create_fallback_model
-from tracemind.agent.persistence import ClaimedRun, RunConflict, RunRepository
+from tracemind.agent.persistence import (
+    ClaimedRun, MemoryRepository, RunConflict, RunRepository,
+)
 from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
 from tracemind.config import Settings
 from tracemind.models.run import RunStatus, StopReason
@@ -62,6 +64,8 @@ class RunWorker:
             limits=settings.run_limits,
             allowed_tools=settings.agent_allowed_tools,
             event_directory=settings.agent_trace_directory,
+            memory_policy=settings.memory_policy,
+            memory_lookup=MemoryRepository(self.repository).snapshot,
         )
 
     async def _monitor(self, claim: ClaimedRun, task: asyncio.Task) -> None:

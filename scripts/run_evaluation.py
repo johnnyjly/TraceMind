@@ -8,6 +8,7 @@ from tracemind.config import get_settings
 from tracemind.evaluation import (
     EvaluationCase, EvaluationReport, run_live_evaluation,
 )
+from tracemind.models.memory import MemorySnapshot
 
 
 logger = logging.getLogger("tracemind.evaluation.cli")
@@ -21,6 +22,7 @@ async def run(
     case_path: Path,
     lookback_minutes: int,
     output_path: Path,
+    memory_snapshot_path: Path | None = None,
 ) -> EvaluationReport:
     case = EvaluationCase.load(case_path)
     end = datetime.now(UTC)
@@ -30,6 +32,9 @@ async def run(
         get_settings(),
         start=start,
         end=end,
+        memory_snapshot=(MemorySnapshot.model_validate_json(
+            memory_snapshot_path.read_text())
+            if memory_snapshot_path else None),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report.model_dump_json(indent=2) + "\n")
@@ -60,6 +65,8 @@ def main() -> None:
     )
     parser.add_argument("--case", type=Path, default=DEFAULT_CASE_PATH)
     parser.add_argument("--lookback-minutes", type=int, default=10)
+    parser.add_argument("--memory-snapshot", type=Path,
+                        help="Frozen JSON corpus captured before this window")
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -81,6 +88,7 @@ def main() -> None:
             args.case,
             args.lookback_minutes,
             args.output,
+            args.memory_snapshot,
         )
     )
     raise SystemExit(0 if report.result and report.result.passed else 1)

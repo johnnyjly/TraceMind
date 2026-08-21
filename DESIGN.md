@@ -20,9 +20,10 @@ input estimate plus enforced provider output cap. Compression retains evidence
 references and tool-call/result pairing; oversized fixed input stops explicitly.
 Store size limits retain partial evidence with a context_limit outcome.
 
-Queued runs now have resumable checkpoints and durable evidence. Cross-incident
-memory, service/tenant authorization, and full payload trace export remain
-pending. S1 disables SDK retries and records provider usage when available. Its
+Queued runs now have resumable checkpoints and durable evidence. S6 adds opt-in,
+human-confirmed structured memory with fixed run snapshots. Service/tenant
+authorization and full payload trace export remain pending. S1 disables SDK
+retries and records provider usage when available. Its
 event files contain operational metadata and evidence IDs, not full observations
 or recoverable graph state. Optional DEBUG logging exposes the same sanitized
 event metadata in the terminal without changing persisted events.
@@ -164,6 +165,26 @@ Start with structured retrieval and add semantic search when cases justify it.
 Evaluate with a frozen memory snapshot and held-out incidents. Ground truth
 and evaluation labels must never enter diagnosis context or memory.
 
+The first S6 increment is implemented with the existing SQLite ledger (schema
+v3), typed manual confirmations, correction/reconfirmation, revocation and
+deletion. Source runs require successful results and valid telemetry citations;
+confirmation notes and identity remain trusted-local human attestations.
+There is no automatic promotion, vector search or agent write tool. Retrieval
+uses exact environment/version, affected-service overlap and explicit expiry.
+Queued runs capture an opt-in policy and persist selected contents/revisions
+before model execution; restart never refreshes that run's library view.
+Historical hints are bounded separately and cannot become current Evidence.
+Explanation rounds do not perform new retrieval. Full original snapshots remain
+in prior run records after edits or library deletion.
+
+Evaluations default to memory-off even when runtime memory is enabled. An
+explicit frozen corpus predating the held-out window is required for memory-on;
+retrieval excludes the same incident, late confirmations, wrong scope and
+records expired by the evaluation start. Reports record corpus hashes and group
+memory modes separately. Paired scripted replay checks the workflow; no claim
+of improved real-model accuracy is made. Training/test separation still needs
+dataset review because IDs cannot identify copied labels or future answer text.
+
 ## 4. Tool registry and permissions
 
 Registry entries specify schemas, read/write capability, permitted scope,
@@ -254,7 +275,7 @@ mock telemetry, plus relevant live scenarios. The following are planned gates.
 | S3: recovery (implemented; supports injected-failure testing) | Error taxonomy, retry ownership, fallback, no-progress detection | Injected 429/5xx/timeout/malformed output has bounded attempts, accounted usage, and useful terminal results |
 | S4: persistence (implemented for local queued runs) | Checkpoints, run store, resume/cancel, scheduling recovery | Restart retains evidence and budgets; concurrent resume is controlled; cancellation stops new work |
 | S5: evaluation and operations (evaluation increment implemented) | Broader cases, replay fixtures, metrics report, trace export, shared-service controls | Report accuracy, false completion, attempts, latency, usage/cost, and recovery; verify run isolation and trace coverage |
-| S6: optional memory | Confirmed records, scoped retrieval, provenance and expiry | Memory-on/off comparison on held-out cases; reject stale/unconfirmed records and prevent ground-truth leakage |
+| S6: optional memory (first increment implemented; real-model quality pending) | Human-confirmed records, structured scoped retrieval, immutable run snapshots, provenance and expiry | Frozen memory-on/off replay; reject stale/unconfirmed/same-incident records and keep evaluation labels outside runtime |
 
 S3 implements harness-owned retries, opt-in model fallback, bounded diagnosis
 repair, and observation-based no-progress detection, with injected-failure tests.

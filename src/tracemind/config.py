@@ -8,6 +8,7 @@ from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tracemind.models.run import TOOL_NAMES, RunLimits, ToolName
+from tracemind.models.memory import MemoryPolicy, MemoryScope
 
 
 class Settings(BaseSettings):
@@ -62,6 +63,15 @@ class Settings(BaseSettings):
     )
     agent_diagnosis_repairs: int = Field(default=1, ge=0, le=3)
     agent_no_progress_rounds: int = Field(default=3, ge=1)
+    agent_memory_enabled: bool = False
+    agent_memory_environment: str | None = Field(
+        default=None, min_length=1, max_length=120,
+    )
+    agent_memory_deployment_version: str | None = Field(
+        default=None, min_length=1, max_length=120,
+    )
+    agent_memory_max_records: int = Field(default=3, ge=1, le=10)
+    agent_memory_context_bytes: int = Field(default=4096, ge=512, le=16000)
 
     @model_validator(mode="after")
     def validate_fallback(self) -> "Settings":
@@ -73,6 +83,30 @@ class Settings(BaseSettings):
                 "fallback provider and model must be set together"
             )
         return self
+
+    @model_validator(mode="after")
+    def validate_memory_scope(self) -> "Settings":
+        """Require explicit deployment identity before enabling memory."""
+        if self.agent_memory_enabled:
+            self.memory_policy
+        return self
+
+    @property
+    def memory_policy(self) -> MemoryPolicy | None:
+        """Freeze an opt-in policy; disabled memory performs no DB lookup."""
+        if not self.agent_memory_enabled:
+            return None
+        if (not self.agent_memory_environment or
+                not self.agent_memory_deployment_version):
+            raise ValueError(
+                "memory requires environment and deployment version")
+        return MemoryPolicy(
+            scope=MemoryScope(environment=self.agent_memory_environment,
+                              deployment_version=(
+                                  self.agent_memory_deployment_version)),
+            max_records=self.agent_memory_max_records,
+            context_bytes=self.agent_memory_context_bytes,
+        )
 
     @property
     def run_limits(self) -> RunLimits:

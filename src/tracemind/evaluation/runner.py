@@ -17,6 +17,8 @@ from tracemind.agent import (
 from tracemind.agent.errors import DiagnosisCancelled, ModelConfigurationError
 from tracemind.config import Settings
 from tracemind.agent.llm import create_fallback_model
+from tracemind.agent.memory import evaluation_memory
+from tracemind.models.memory import MemorySnapshot
 from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.evaluation.models import EvaluationCase, EvaluationReport
 from tracemind.telemetry import (
@@ -30,6 +32,7 @@ async def run_service_evaluation(
     case: EvaluationCase, service: DiagnosisService, *,
     start: datetime, end: datetime, model_provider: str, model_name: str,
     execution_mode: str = "live",
+    memory_corpus_id: str | None = None,
 ) -> EvaluationReport:
     """Retain operational failures and cancellations in a scored report.
 
@@ -38,6 +41,10 @@ async def run_service_evaluation(
     boundary propagate rather than becoming scores.
     """
     started = perf_counter()
+    memory_metadata = {
+        "memory_mode": "frozen" if memory_corpus_id else "off",
+        "memory_corpus_id": memory_corpus_id,
+    }
     try:
         run = await service.diagnose_with_evidence(
             case.incident, start=start, end=end,
@@ -50,6 +57,7 @@ async def run_service_evaluation(
             run_state=exc.state, error_type=type(exc).__name__,
             execution_mode=execution_mode,
             elapsed_ms=(perf_counter() - started) * 1000,
+            **memory_metadata,
         )
     except asyncio.CancelledError as exc:
         return EvaluationReport(
@@ -62,6 +70,7 @@ async def run_service_evaluation(
             else None,
             error_type="CancelledError", execution_mode=execution_mode,
             elapsed_ms=(perf_counter() - started) * 1000,
+            **memory_metadata,
         )
     elapsed_ms = (perf_counter() - started) * 1000
     return EvaluationReport(
@@ -71,6 +80,7 @@ async def run_service_evaluation(
         result=evaluate_diagnosis(case, run, elapsed_ms=elapsed_ms),
         run_state=run.state, execution_mode=execution_mode,
         elapsed_ms=elapsed_ms,
+        **memory_metadata,
     )
 
 
@@ -81,6 +91,7 @@ async def run_live_evaluation(
     start: datetime,
     end: datetime,
     callbacks: Sequence[BaseCallbackHandler] | None = None,
+    memory_snapshot: MemorySnapshot | None = None,
 ) -> EvaluationReport:
     """Run a live investigation and score its result against the case.
 
@@ -88,6 +99,12 @@ async def run_live_evaluation(
     truth is used only after diagnosis. Operational failures retain their
     partial state in a report; no report file is written here.
     """
+    policy, lookup = evaluation_memory(
+        memory_snapshot, settings.memory_policy, start=start,
+        max_records=settings.agent_memory_max_records,
+        context_bytes=settings.agent_memory_context_bytes,
+    )
+    corpus_id = memory_snapshot.fingerprint if memory_snapshot else None
     try:
         model = create_chat_model(settings)
         fallback = create_fallback_model(settings)
@@ -97,6 +114,8 @@ async def run_live_evaluation(
             model_name=settings.llm_model,
             investigation_start=start, investigation_end=end,
             evidence=[], error_type=type(exc).__name__,
+            memory_mode="frozen" if corpus_id else "off",
+            memory_corpus_id=corpus_id,
         )
     limits = settings.run_limits
     limits.tool_calls = min(limits.tool_calls, case.max_tool_calls)
@@ -117,9 +136,11 @@ async def run_live_evaluation(
             limits=limits,
             allowed_tools=settings.agent_allowed_tools,
             event_directory=settings.agent_trace_directory,
+            memory_policy=policy, memory_lookup=lookup,
         )
         return await run_service_evaluation(
             case, service, start=start, end=end,
             model_provider=settings.llm_provider,
             model_name=settings.llm_model,
+            memory_corpus_id=corpus_id,
         )

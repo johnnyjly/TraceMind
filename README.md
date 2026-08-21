@@ -261,6 +261,115 @@ Older rounds remain available through
 `GET /api/v1/investigations/{id}?offset=0&limit=20` and individual run results.
 This is incident-local history; it is not cross-incident long-term memory.
 
+### Optional cross-incident memory (S6, first increment)
+
+Memory is **disabled by default**. Completed diagnoses and confidence scores
+never populate the library automatically. A human must review a persisted,
+successful source run and explicitly confirm the resolution and recovery.
+The management API is for trusted local use; `confirmed_by` is an attestation,
+not an authenticated identity. Shared-service authentication remains S5 work.
+
+After reviewing a source run, write a `memory-confirmation.json` file:
+
+```json
+{
+  "source_run_id": "<completed-run-UUID>",
+  "environment": "otel-demo-local",
+  "deployment_version": "demo-3.1.0-local-v1",
+  "services": ["checkout", "payment"],
+  "symptom": "Checkout requests returned HTTP 500",
+  "resolution": "<human-verified cause and resolution>",
+  "diagnostic_queries": ["<useful query or check>"],
+  "remediation": ["<verified recovery action>"],
+  "confirmed_by": "<reviewer>",
+  "confirmation_note": "<how the cause and recovery were verified>",
+  "expires_at": "<future timezone-aware timestamp>"
+}
+```
+
+Submit it with:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/v1/memories \
+  -H 'Content-Type: application/json' --data-binary @memory-confirmation.json
+```
+
+The workflow checks the source run, citations, time window and services, and
+stores provenance. Environment/version are human attestations for older runs
+without captured memory scope; scoped runs must match their saved policy.
+An incorrect model diagnosis can be corrected in the confirmed resolution.
+Only future, explicitly enabled investigations retrieve these records:
+
+```dotenv
+TRACEMIND_AGENT_MEMORY_ENABLED=true
+TRACEMIND_AGENT_MEMORY_ENVIRONMENT=otel-demo-local
+TRACEMIND_AGENT_MEMORY_DEPLOYMENT_VERSION=demo-3.1.0-local-v1
+TRACEMIND_AGENT_MEMORY_MAX_RECORDS=3
+TRACEMIND_AGENT_MEMORY_CONTEXT_BYTES=4096
+```
+
+Restart the API and worker after configuring them. Retrieval requires exact
+environment/version and at least one affected-service match, excludes the same
+incident and revoked/expired records, and selects recent confirmations first.
+A run captures its policy at creation and freezes selected content before its
+first model call. Recovery reuses that snapshot even after library changes.
+Explain rounds perform no new cross-incident lookup; investigate rounds can.
+The prompt labels bounded previews as untrusted historical hints. Historical
+IDs cannot substitute for current telemetry citations or establish completion.
+`memory.selected` records the snapshot hash, record IDs/revisions and context
+omissions; SSE shows retrieval progress without exposing resolution content.
+
+| Management route | Action |
+| --- | --- |
+| `GET /api/v1/memories?offset=0&limit=20` | Review current records, including expired/revoked entries |
+| `GET /api/v1/memories/{id}` | Inspect confirmation and provenance |
+| `PUT /api/v1/memories/{id}` | Replace and reconfirm all fields with `expected_revision` |
+| `POST /api/v1/memories/{id}/revoke?expected_revision=1` | Exclude from future retrieval |
+| `DELETE /api/v1/memories/{id}?expected_revision=2` | Remove from the active library |
+
+Concurrent stale edits return 409. Reconfirmation increments the revision.
+Deletion does not erase copies already saved in run snapshots, checkpoints or
+evaluation files. SQLite schema v3 adds the memory table without changing
+existing run data or checkpoint schema. No vector search or new dependency is
+introduced. Memory does not reduce the existing evidence, context or call gates.
+
+### Frozen memory evaluation
+
+Evaluation **always defaults to memory-off**, regardless of application memory
+enablement. It reads historical hints only from `--memory-snapshot`, never the
+live database. Export a scoped corpus **before** collecting held-out incidents:
+
+```bash
+curl -sS --get http://127.0.0.1:8000/api/v1/memories/snapshot \
+  --data-urlencode environment=otel-demo-local \
+  --data-urlencode deployment_version=demo-3.1.0-local-v1 \
+  --data-urlencode service=checkout --data-urlencode limit=10 \
+  -o artifacts/evaluations/memory-corpus.json
+```
+
+The snapshot timestamp must precede the evaluation window. Same-incident,
+post-freeze confirmations, mismatched scope and expired entries are excluded;
+expiry is also checked at the held-out window's start. Ground Truth and replay
+scripts are never inputs to retrieval. Dataset authors must keep training and
+test incidents separate; timestamps/IDs cannot detect copied answer text.
+
+Try the fully offline synthetic memory-on/off comparison:
+
+```bash
+uv run python scripts/run_evaluation_suite.py \
+  --memory-snapshot evals/memory/synthetic_training.json --compare-memory \
+  --output artifacts/evaluations/memory-comparison.json
+```
+
+Each replay gets independent telemetry/model state and identical budgets.
+Reports include memory mode and full-corpus hash; aggregation separates modes
+and corpora. This scripted comparison verifies workflow isolation, **not model
+accuracy improvement**. The synthetic record is deliberately an earlier network
+failure, not the held-out payment answer. For a real-model comparison, run
+`scripts/run_evaluation.py` twice on controlled equivalent fault windows, once
+without the flag and once with `--memory-snapshot <frozen-file>`, keeping model,
+limits and deployment fixed. Evaluate real-model memory quality separately.
+
 Subscribe to `GET /api/v1/runs/{run_id}/events` for readable SSE progress.
 It replays saved events then tails updates, including tool/service/window,
 observations added, retries, recovery and termination. It excludes raw prompts,

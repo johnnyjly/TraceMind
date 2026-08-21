@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from tracemind.models.incident import Incident
 from tracemind.models.diagnosis import Diagnosis
+from tracemind.models.memory import MemoryPolicy, MemorySnapshot
 
 
 ToolName = Literal[
@@ -126,6 +127,8 @@ class RunState(BaseModel):
     previous_messages: list[str] = Field(default_factory=list)
     prior_diagnosis: Diagnosis | None = None
     omitted_prior_evidence: int = 0
+    memory_policy: MemoryPolicy | None = None
+    memory_snapshot: MemorySnapshot | None = None
     incident: Incident
     investigation_start: datetime
     investigation_end: datetime

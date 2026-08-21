@@ -10,6 +10,41 @@ from tracemind.models import Evidence
 from tracemind.models.run import RunState
 
 
+def memory_context(state: RunState) -> str:
+    """Bound historical hints without turning them into incident evidence.
+
+    Full selected records live in the run snapshot for reproducible audit.
+    Each preview marks its truncation; no historical evidence IDs are exposed.
+    """
+    snapshot = state.memory_snapshot
+    payload = {
+        "scope": snapshot.scope.model_dump(),
+        "snapshot_id": snapshot.fingerprint,
+        "historical_experience_only": True,
+        "records": [{
+            "memory_id": str(r.id), "revision": r.revision,
+            "services": r.services, "symptom": r.symptom[:240],
+            "resolution": r.resolution[:640],
+            "diagnostic_queries": [q[:240] for q in r.diagnostic_queries[:2]],
+            "remediation": [q[:240] for q in r.remediation[:2]],
+            "source_run_id": str(r.source_run_id),
+            "confirmed_by": r.confirmed_by,
+            "confirmation_note": r.confirmation_note[:160],
+            "confirmed_at": r.confirmed_at.isoformat(),
+            "expires_at": r.expires_at.isoformat(), "bounded_preview": True,
+        } for r in snapshot.records],
+        "omitted_records": 0,
+    }
+    while (len(json_text(payload).encode()) > state.memory_policy.context_bytes
+           and payload["records"]):
+        payload["records"].pop()
+        payload["omitted_records"] += 1
+    if len(json_text(payload).encode()) > state.memory_policy.context_bytes:
+        payload.pop("scope")
+        payload["scope_omitted"] = True
+    return json_text(payload)
+
+
 def _evidence_preview(item: Evidence) -> dict:
     """Include normalized details, marking any oversized fields omitted.
 
