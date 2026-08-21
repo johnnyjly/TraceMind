@@ -32,6 +32,8 @@ MESSAGES = {
     "diagnosis.repair_requested": ("analyzing", "正在修正诊断输出"),
     "policy.finalizing": ("finalizing", "工具调查已停止，正在根据已有证据整理结论"),
     "memory.selected": ("historical_context", "历史经验检索完成，正在核对本次证据"),
+    "guidance.selected": ("historical_context", "已读取用户偏好和调查 Skill"),
+    "memory.feedback_saved": ("memory_updated", "反馈记忆处理完成"),
 }
 
 
@@ -41,6 +43,7 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         "tool", "service", "investigation_start", "investigation_end",
         "result_count", "reason", "status", "error_type", "category",
         "added", "received", "duplicates", "record_count",
+        "applied", "skipped", "rejected_count",
     } and isinstance(value, (str, int, float, bool))}
     if event.kind.startswith("tool."):
         tool = TOOLS.get(data.get("tool"), "工具")

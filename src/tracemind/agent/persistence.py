@@ -1,5 +1,7 @@
 """SQLite run records, durable evidence snapshots, and worker leases."""
 
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
@@ -11,9 +13,13 @@ from pathlib import Path
 from typing import Iterator
 from uuid import UUID, uuid4
 
+from pydantic import ValidationError
+
 from tracemind.agent.service import DiagnosisRun
 from tracemind.models import Evidence, Incident
 from tracemind.models.memory import (
+    FeedbackResult, FeedbackUpdate, GuidanceRecord, GuidanceRevision,
+    GuidanceSnapshot,
     MemoryCreate, MemoryPolicy, MemoryRecord, MemorySnapshot,
 )
 from tracemind.models.run import (
@@ -21,7 +27,7 @@ from tracemind.models.run import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TERMINAL = {
     RunStatus.SUCCEEDED, RunStatus.INCONCLUSIVE,
     RunStatus.FAILED, RunStatus.CANCELLED,
@@ -98,7 +104,7 @@ class RunRepository:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                 raise RuntimeError(
                     f"unsupported run database schema version: {version}"
                 )
@@ -155,6 +161,21 @@ class RunRepository:
                     (environment,deployment_version,status,expires_at)
                 """)
                 connection.execute("PRAGMA user_version=3")
+            if version < 4:
+                connection.execute("""
+                    CREATE TABLE agent_guidance (
+                        id TEXT PRIMARY KEY,
+                        key TEXT NOT NULL UNIQUE,
+                        record_json TEXT NOT NULL
+                    )
+                """)
+                connection.execute("""
+                    CREATE TABLE memory_feedback (
+                        run_id TEXT PRIMARY KEY,
+                        result_json TEXT NOT NULL
+                    )
+                """)
+                connection.execute("PRAGMA user_version=4")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -356,6 +377,7 @@ class RunRepository:
                 omitted_prior_evidence=len(parent.evidence) - len(evidence),
                 memory_policy=(memory_policy if purpose is
                                RunPurpose.INVESTIGATE else None),
+                learning_policy=memory_policy,
                 investigation_start=start, investigation_end=end,
                 limits=limits.model_copy(deep=True),
                 allowed_tools=(tuple(t for t in allowed_tools
@@ -790,3 +812,263 @@ class MemoryRepository:
                        for row in rows]
         return MemorySnapshot(scope=policy.scope, selected_at=at,
                               records=records)
+
+    def guidance_snapshot(self) -> GuidanceSnapshot:
+        """Retrieve bounded local-user guidance, independent of deployment."""
+        with self.runs._connect() as connection:
+            rows = connection.execute(
+                """SELECT record_json FROM agent_guidance
+                   WHERE json_extract(record_json,'$.status')='active'
+                   ORDER BY json_extract(record_json,'$.updated_at') DESC,key
+                   LIMIT 20""",
+            ).fetchall()
+        return GuidanceSnapshot(selected_at=datetime.now(UTC), records=[
+            GuidanceRecord.model_validate_json(row[0]) for row in rows
+        ])
+
+    def list_guidance(
+        self, *, offset: int = 0, limit: int = 20,
+    ) -> list[GuidanceRecord]:
+        """Review all active or revoked local-user instructions."""
+        with self.runs._connect() as connection:
+            rows = connection.execute(
+                "SELECT record_json FROM agent_guidance ORDER BY key "
+                "LIMIT ? OFFSET ?", (limit, offset),
+            ).fetchall()
+        return [GuidanceRecord.model_validate_json(row[0]) for row in rows]
+
+    def revise_guidance(
+        self, guidance_id: UUID, revision: GuidanceRevision,
+    ) -> GuidanceRecord:
+        """Correct a learned instruction; preserve old run snapshots."""
+        with self.runs._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT record_json FROM agent_guidance WHERE id=?",
+                (str(guidance_id),),
+            ).fetchone()
+            if row is None:
+                raise MemoryNotFound(str(guidance_id))
+            record = GuidanceRecord.model_validate_json(row[0])
+            if record.revision != revision.expected_revision:
+                raise RunConflict("guidance revision changed; reload it")
+            record.instruction = revision.instruction
+            record.status = "active"
+            record.revision += 1
+            record.origin = "manual"
+            record.source_run_id = None
+            record.source_quote = revision.instruction[:400]
+            record.rationale = "Corrected through the management API."
+            record.updated_at = datetime.now(UTC)
+            connection.execute(
+                "UPDATE agent_guidance SET record_json=? WHERE id=?",
+                (record.model_dump_json(), str(guidance_id)),
+            )
+        return record
+
+    def delete_guidance(
+        self, guidance_id: UUID, *, expected_revision: int,
+    ) -> None:
+        """Remove an instruction with optimistic concurrency protection."""
+        with self.runs._connect() as connection:
+            cursor = connection.execute(
+                """DELETE FROM agent_guidance WHERE id=?
+                   AND json_extract(record_json,'$.revision')=?""",
+                (str(guidance_id), expected_revision),
+            )
+            if cursor.rowcount != 1:
+                raise RunConflict("guidance missing or revision changed")
+
+    def apply_feedback(self, state: RunState, *, owner: str) -> FeedbackResult:
+        """Validate agent proposals and atomically learn once per leased run.
+
+        Proposals must quote the current human message. The durable receipt
+        makes replay safe even if a crash precedes the workflow progress event.
+        Conflicts are reported; SQLite failures propagate.
+        """
+        with self.runs._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = connection.execute(
+                """SELECT lease_owner,status,cancel_requested FROM runs
+                   WHERE id=?""", (str(state.id),),
+            ).fetchone()
+            if (lease is None or lease["lease_owner"] != owner or
+                    lease["status"] != "running" or lease["cancel_requested"]):
+                raise RunConflict("feedback run lease lost or cancelled")
+            receipt = connection.execute(
+                "SELECT result_json FROM memory_feedback WHERE run_id=?",
+                (str(state.id),),
+            ).fetchone()
+            if receipt is not None:
+                return FeedbackResult.model_validate_json(receipt[0])
+            result = FeedbackResult()
+            if state.learning_policy is None or not state.user_message:
+                return result
+            result.updates = [u.model_copy(deep=True)
+                              for u in state.feedback_updates]
+            for update in state.feedback_updates:
+                if update.durability == "turn":
+                    result.skipped += 1
+                    continue
+                if update.quote not in state.user_message:
+                    result.rejected.append("quote_not_in_current_feedback")
+                    continue
+                try:
+                    if update.kind == "diagnosis":
+                        record_id = self._learn_diagnosis(connection,
+                                                          state, update)
+                        if record_id is not None:
+                            result.memory_ids.append(record_id)
+                    else:
+                        record_id = self._learn_guidance(connection,
+                                                         state, update)
+                        if record_id is not None:
+                            result.guidance_ids.append(record_id)
+                except RunConflict as exc:
+                    result.rejected.append(str(exc))
+                except ValidationError:
+                    result.rejected.append("memory_record_validation")
+                else:
+                    if record_id is None:
+                        result.skipped += 1
+                    else:
+                        result.applied += 1
+            connection.execute("INSERT INTO memory_feedback VALUES (?,?)",
+                               (str(state.id), result.model_dump_json()))
+        return result
+
+    def _learn_guidance(
+        self, connection: sqlite3.Connection, state: RunState,
+        update: FeedbackUpdate,
+    ) -> UUID | None:
+        """Reject stale learning using the captured key revision."""
+        row = connection.execute(
+            "SELECT record_json FROM agent_guidance WHERE key=?",
+            (update.key,),
+        ).fetchone()
+        current = GuidanceRecord.model_validate_json(row[0]) if row else None
+        if state.guidance_snapshot is None:
+            raise RunConflict("guidance_snapshot_missing")
+        captured = next((r for r in state.guidance_snapshot.records
+                         if r.key == update.key), None)
+        recreating = (current is not None and current.status == "revoked"
+                      and captured is None and
+                      current.updated_at <=
+                      state.guidance_snapshot.selected_at)
+        if (current is not None and not recreating and (
+            captured is None or current.id != captured.id or
+            current.revision != captured.revision
+        )) or (current is None and captured is not None):
+            raise RunConflict("guidance_revision_conflict")
+        if update.action == "delete":
+            if current is not None:
+                current.status = "revoked"
+                current.origin = "feedback"
+                current.revision += 1
+                current.source_run_id = state.id
+                current.source_quote = update.quote
+                current.rationale = update.rationale
+                current.updated_at = datetime.now(UTC)
+                connection.execute(
+                    "UPDATE agent_guidance SET record_json=? WHERE id=?",
+                    (current.model_dump_json(), str(current.id)),
+                )
+            return current.id if current else None
+        record = GuidanceRecord(
+            id=current.id if current else uuid4(), key=update.key,
+            kind=update.kind, instruction=update.content,
+            revision=current.revision + 1 if current else 1,
+            source_run_id=state.id, source_quote=update.quote,
+            rationale=update.rationale, updated_at=datetime.now(UTC),
+        )
+        connection.execute(
+            """INSERT INTO agent_guidance VALUES (?,?,?) ON CONFLICT(key)
+               DO UPDATE SET record_json=excluded.record_json""",
+            (str(record.id), record.key, record.model_dump_json()),
+        )
+        return record.id
+
+    def _learn_diagnosis(
+        self, connection: sqlite3.Connection, state: RunState,
+        update: FeedbackUpdate,
+    ) -> UUID | None:
+        """Associate human recovery/correction feedback with its parent run."""
+        row = connection.execute("SELECT * FROM runs WHERE id=?",
+                                 (str(state.parent_run_id),)).fetchone()
+        if row is None:
+            raise RunConflict("diagnosis_source_missing")
+        source = self.runs._decode(row)
+        if source.state.incident.id != state.incident.id:
+            raise RunConflict("diagnosis_source_incident_mismatch")
+        scope = state.learning_policy.scope
+        source_scope = (source.state.learning_policy or
+                        source.state.memory_policy)
+        if source_scope is not None and source_scope.scope != scope:
+            raise RunConflict("diagnosis_source_scope_mismatch")
+        prior = connection.execute(
+            """SELECT record_json FROM incident_memories
+               WHERE source_incident_id=? AND environment=?
+               AND deployment_version=? ORDER BY updated_at DESC LIMIT 1""",
+            (str(state.incident.id), scope.environment,
+             scope.deployment_version),
+        ).fetchone()
+        current = MemoryRecord.model_validate_json(prior[0]) if prior else None
+        if current is not None and current.updated_at > state.started_at:
+            raise RunConflict("diagnosis_revision_conflict")
+        if update.action == "delete":
+            if current is not None:
+                current.status = "revoked"
+                current.revision += 1
+                current.updated_at = datetime.now(UTC)
+                current.feedback_run_id = state.id
+                current.feedback_quote = update.quote
+                connection.execute(
+                    """UPDATE incident_memories SET revision=?,status=?,
+                       updated_at=?,record_json=? WHERE id=?""",
+                    (current.revision, current.status,
+                     current.updated_at.timestamp(), current.model_dump_json(),
+                     str(current.id)),
+                )
+            return current.id if current else None
+        anchors = [e for e in source.evidence
+                   if e.observed_at.utcoffset() is not None and
+                   source.state.investigation_start <= e.observed_at
+                   <= source.state.investigation_end]
+        if not anchors:
+            raise RunConflict("diagnosis_source_has_no_observations")
+        services = list(dict.fromkeys([
+            *source.state.incident.affected_services,
+            *(e.service for e in anchors if e.service),
+        ]))[:20]
+        if not services:
+            raise RunConflict("diagnosis_source_has_no_services")
+        now = datetime.now(UTC)
+        record = MemoryRecord(
+            id=current.id if current else uuid4(),
+            revision=current.revision + 1 if current else 1,
+            environment=scope.environment,
+            deployment_version=scope.deployment_version, services=services,
+            symptom=source.state.incident.title[:1000],
+            resolution=update.content, confirmed_by="local-user-feedback",
+            confirmation_note=f"{update.rationale}\nFeedback: {update.quote}",
+            expires_at=now + timedelta(
+                days=state.learning_policy.auto_expiry_days),
+            source_run_id=source.state.id,
+            source_incident_id=source.state.incident.id,
+            source_evidence_ids=[e.id for e in anchors[:20]],
+            omitted_source_evidence_ids=max(0, len(anchors) - 20),
+            confirmed_at=now, updated_at=now,
+            feedback_run_id=state.id, feedback_quote=update.quote,
+        )
+        connection.execute(
+            """INSERT INTO incident_memories VALUES (?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,
+               status=excluded.status,confirmed_at=excluded.confirmed_at,
+               expires_at=excluded.expires_at,updated_at=excluded.updated_at,
+               record_json=excluded.record_json""",
+            (str(record.id), record.revision, record.environment,
+             record.deployment_version, str(record.source_incident_id),
+             record.status, now.timestamp(), record.expires_at.timestamp(),
+             now.timestamp(), record.model_dump_json()),
+        )
+        return record.id

@@ -20,13 +20,17 @@ from pydantic import BaseModel, Field
 from tracemind.agent.errors import (
     DiagnosisCancelled, DiagnosisError, DiagnosisValidationError,
 )
-from tracemind.agent.context import collaboration_context, memory_context
-from tracemind.agent.memory import MemoryLookup
+from tracemind.agent.context import (
+    collaboration_context, guidance_context, memory_context,
+)
+from tracemind.agent.memory import (
+    FeedbackWriter, GuidanceLookup, LEARNING_INSTRUCTIONS, MemoryLookup,
+)
 from tracemind.agent.harness import RunHarness, RunStopped
 from tracemind.agent.middleware import HarnessMiddleware
 from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
-from tracemind.models.memory import MemoryPolicy
+from tracemind.models.memory import FeedbackUpdate, MemoryPolicy
 from tracemind.models.run import (
     TOOL_NAMES,
     RunLimits,
@@ -72,6 +76,8 @@ SYSTEM_PROMPT = (
     "an empty result, inspect the names, labels and query time instead of "
     "repeatedly guessing variants or scanning unrelated services. Metric "
     "metadata is query guidance, never citable fault evidence."
+    " Return feedback_updates=[] unless application learning instructions "
+    "are provided for this human follow-up."
 )
 
 
@@ -85,6 +91,9 @@ class DiagnosisDraft(BaseModel):
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
+    feedback_updates: list[FeedbackUpdate] = Field(
+        default_factory=list, max_length=3,
+    )
 
 
 class DiagnosisRun(BaseModel):
@@ -196,6 +205,7 @@ class DiagnosisService:
         event_directory: Path | None = None,
         memory_policy: MemoryPolicy | None = None,
         memory_lookup: MemoryLookup | None = None,
+        guidance_lookup: GuidanceLookup | None = None,
     ) -> None:
         """Configure telemetry dependencies, runner, and per-run controls."""
         self._prometheus = prometheus
@@ -208,6 +218,7 @@ class DiagnosisService:
         self._event_directory = event_directory
         self._memory_policy = memory_policy
         self._memory_lookup = memory_lookup
+        self._guidance_lookup = guidance_lookup
 
     async def diagnose(
         self,
@@ -254,6 +265,8 @@ class DiagnosisService:
             limits=self._limits.model_copy(deep=True),
             allowed_tools=self._allowed_tools,
             memory_policy=self._memory_policy,
+            learning_policy=(self._memory_policy
+                             if self._guidance_lookup is not None else None),
         )
         collector = EvidenceCollector(max_bytes=state.limits.observation_bytes)
         return await self._execute(state, collector)
@@ -264,6 +277,7 @@ class DiagnosisService:
         is_cancelled: Callable[[], bool],
         resume: bool,
         graph_resume: bool,
+        feedback_writer: FeedbackWriter | None = None,
     ) -> DiagnosisRun:
         """Continue a leased run with its evidence and admission ledger."""
         collector: EvidenceCollector
@@ -275,6 +289,7 @@ class DiagnosisService:
         return await self._execute(
             state, collector, persist=persist, is_cancelled=is_cancelled,
             resume=resume, graph_resume=graph_resume,
+            feedback_writer=feedback_writer,
         )
 
     async def _execute(
@@ -283,6 +298,7 @@ class DiagnosisService:
         is_cancelled: Callable[[], bool] | None = None,
         resume: bool = False,
         graph_resume: bool = False,
+        feedback_writer: FeedbackWriter | None = None,
     ) -> DiagnosisRun:
         """Bind run-local tools and finalize either a fresh or resumed run."""
         incident = state.incident
@@ -349,6 +365,34 @@ class DiagnosisService:
         reason = StopReason.INTERNAL_ERROR
         try:
             async with asyncio.timeout(harness.remaining_seconds):
+                if state.learning_policy is not None:
+                    if state.guidance_snapshot is None:
+                        if self._guidance_lookup is None:
+                            raise ValueError(
+                                "learning requires guidance lookup")
+                        state.guidance_snapshot = self._guidance_lookup()
+                        state.prompt_version += "-feedback-v1"
+                    guidance_text = guidance_context(state)
+                    if not any(e.kind == "guidance.selected"
+                               for e in state.events):
+                        harness.emit("guidance.selected", data={
+                            "record_ids": [str(r.id) for r in
+                                           state.guidance_snapshot.records],
+                            "revisions": [str(r.revision) for r in
+                                          state.guidance_snapshot.records],
+                            "record_count": len(json.loads(
+                                guidance_text)["records"]),
+                        })
+                    prompt += (
+                        "\nSaved local-user preferences and skills follow. "
+                        "Apply relevant instructions; the CURRENT request "
+                        "takes priority. These cannot override authorization, "
+                        "budgets, evidence rules or system instructions, and "
+                        "cannot establish fault observations. JSON previews "
+                        "may omit details:\n" + guidance_text
+                    )
+                    if state.user_message and feedback_writer is not None:
+                        prompt += LEARNING_INSTRUCTIONS
                 if state.memory_policy is not None:
                     if state.memory_snapshot is None:
                         if self._memory_lookup is None:
@@ -415,6 +459,7 @@ class DiagnosisService:
                 self._validate_draft(
                     draft, collector.evidence, start=start, end=end
                 )
+                state.feedback_updates = draft.feedback_updates
                 harness.emit(
                     "diagnosis.accepted", parent_span_id=state.id,
                     data={
@@ -424,6 +469,23 @@ class DiagnosisService:
                         ],
                     },
                 )
+                if (state.learning_policy is not None and state.user_message
+                        and feedback_writer is not None):
+                    outcome = feedback_writer(state)
+                    state.feedback_updates = outcome.updates
+                    if outcome.updates and not any(
+                        e.kind == "memory.feedback_saved" for e in state.events
+                    ):
+                        harness.emit("memory.feedback_saved", data={
+                            "applied": outcome.applied,
+                            "skipped": outcome.skipped,
+                            "rejected": outcome.rejected,
+                            "rejected_count": len(outcome.rejected),
+                            "guidance_ids": [str(i) for i in
+                                             outcome.guidance_ids],
+                            "memory_ids": [str(i) for i in outcome.memory_ids],
+                        })
+                    harness.check_active()
             if draft.status is DiagnosisStatus.COMPLETE:
                 terminal_status = RunStatus.SUCCEEDED
                 reason = StopReason.COMPLETED
@@ -486,7 +548,8 @@ class DiagnosisService:
             if terminal_status in {RunStatus.SUCCEEDED,
                                    RunStatus.INCONCLUSIVE}:
                 state.diagnosis = Diagnosis(
-                    incident_id=incident.id, **draft.model_dump(),
+                    incident_id=incident.id,
+                    **draft.model_dump(exclude={"feedback_updates"}),
                 )
             harness.finish(terminal_status, reason)
 

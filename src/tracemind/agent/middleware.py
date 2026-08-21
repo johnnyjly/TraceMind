@@ -264,6 +264,19 @@ class HarnessMiddleware(AgentMiddleware):
                             candidate.append(json.loads(item.text))
                         except json.JSONDecodeError:
                             candidate.append(item.content)
+
+        # Feedback quotes belong in the ledger, not rejected-output logs.
+        def diagnostic_only(value):
+            if isinstance(value, dict):
+                return {k: diagnostic_only(v) for k, v in value.items()
+                        if k != "feedback_updates"}
+            if isinstance(value, list):
+                return [diagnostic_only(item) for item in value]
+            if isinstance(value, str) and "feedback_updates" in value:
+                return "Unparseable output containing feedback omitted."
+            return value
+
+        candidate = diagnostic_only(candidate)
         encoded = json_text(candidate).encode()
         return encoded[:4096].decode(errors="ignore"), len(encoded) > 4096
 

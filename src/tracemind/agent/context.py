@@ -10,6 +10,24 @@ from tracemind.models import Evidence
 from tracemind.models.run import RunState
 
 
+def guidance_context(state: RunState) -> str:
+    """Expose bounded reusable instructions; saved snapshots retain origins."""
+    payload = {
+        "profile": state.guidance_snapshot.profile,
+        "records": [{
+            "id": str(r.id), "key": r.key, "kind": r.kind,
+            "revision": r.revision, "instruction": r.instruction[:1000],
+            "bounded_preview": True,
+        } for r in state.guidance_snapshot.records],
+        "omitted_records": 0,
+    }
+    while (len(json_text(payload).encode()) >
+           state.learning_policy.context_bytes and payload["records"]):
+        payload["records"].pop()
+        payload["omitted_records"] += 1
+    return json_text(payload)
+
+
 def memory_context(state: RunState) -> str:
     """Bound historical hints without turning them into incident evidence.
 

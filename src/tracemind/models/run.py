@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field
 
 from tracemind.models.incident import Incident
 from tracemind.models.diagnosis import Diagnosis
-from tracemind.models.memory import MemoryPolicy, MemorySnapshot
+from tracemind.models.memory import (
+    FeedbackUpdate, GuidanceSnapshot, MemoryPolicy, MemorySnapshot,
+)
 
 
 ToolName = Literal[
@@ -129,6 +131,11 @@ class RunState(BaseModel):
     omitted_prior_evidence: int = 0
     memory_policy: MemoryPolicy | None = None
     memory_snapshot: MemorySnapshot | None = None
+    learning_policy: MemoryPolicy | None = None
+    guidance_snapshot: GuidanceSnapshot | None = None
+    feedback_updates: list[FeedbackUpdate] = Field(
+        default_factory=list, max_length=3,
+    )
     incident: Incident
     investigation_start: datetime
     investigation_end: datetime

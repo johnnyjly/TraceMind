@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     )
     agent_memory_max_records: int = Field(default=3, ge=1, le=10)
     agent_memory_context_bytes: int = Field(default=4096, ge=512, le=16000)
+    agent_memory_auto_expiry_days: int = Field(default=30, ge=1, le=365)
 
     @model_validator(mode="after")
     def validate_fallback(self) -> "Settings":
@@ -106,6 +107,7 @@ class Settings(BaseSettings):
                                   self.agent_memory_deployment_version)),
             max_records=self.agent_memory_max_records,
             context_bytes=self.agent_memory_context_bytes,
+            auto_expiry_days=self.agent_memory_auto_expiry_days,
         )
 
     @property

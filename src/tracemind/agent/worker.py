@@ -66,6 +66,8 @@ class RunWorker:
             event_directory=settings.agent_trace_directory,
             memory_policy=settings.memory_policy,
             memory_lookup=MemoryRepository(self.repository).snapshot,
+            guidance_lookup=(
+                MemoryRepository(self.repository).guidance_snapshot),
         )
 
     async def _monitor(self, claim: ClaimedRun, task: asyncio.Task) -> None:
@@ -132,6 +134,9 @@ class RunWorker:
                         ),
                         resume=claim.resuming,
                         graph_resume=claim.resuming and checkpoint is not None,
+                        feedback_writer=lambda current: MemoryRepository(
+                            self.repository).apply_feedback(
+                                current, owner=claim.owner),
                     ))
                     monitor = asyncio.create_task(self._monitor(claim, task))
                     try:

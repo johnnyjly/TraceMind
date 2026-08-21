@@ -174,8 +174,34 @@ uses exact environment/version, affected-service overlap and explicit expiry.
 Queued runs capture an opt-in policy and persist selected contents/revisions
 before model execution; restart never refreshes that run's library view.
 Historical hints are bounded separately and cannot become current Evidence.
-Explanation rounds do not perform new retrieval. Full original snapshots remain
+Explanation rounds do not perform new incident-memory retrieval. Snapshots remain
 in prior run records after edits or library deletion.
+
+The feedback-learning increment adds local-user preferences/skills and inferred
+human confirmations. `DiagnosisDraft.feedback_updates` is bounded to three
+proposals in the existing model response; no extraction model or additional
+call budget is introduced. The agent classifies ordinary feedback into lasting
+habits, reusable investigation methods, temporary requests or human-reported
+confirmed/corrected diagnoses. It reuses stable instruction keys and cites exact
+current feedback quotes. No user request to remember or register is required.
+Model confidence, questions and permission to try a repair are not confirmation.
+This semantic classification depends on the model and remains to be evaluated.
+
+Workflow validates quotes, source scope/observations, worker ownership and
+concurrent revisions. SQLite v4 adds guidance records and transactional per-run
+receipts. A receipt preserves original proposals and outcomes for idempotent
+recovery, including after a human deletes the resulting library record. Invalid
+proposals are reported separately from diagnosis acceptance. Preference/skill
+snapshots are loaded even for explanation rounds; historical incident retrieval
+remains disabled there. Guidance is scoped to one local user and survives
+deployment-version changes. It is subordinate to current requests and execution
+policy, and cannot grant permissions or become citable observations. Manual
+review/edit/delete endpoints complement automatic inference. Automated human
+confirmation can correct an inconclusive parent with observed telemetry and
+stores its feedback run/quote; it is a human report, not independent machine
+verification. Automatically confirmed records use a configurable 30-day expiry.
+Autonomous/frozen evaluations neither read this live guidance nor write feedback
+memories. A separate fixed-feedback benchmark is needed to measure learning.
 
 Evaluations default to memory-off even when runtime memory is enabled. An
 explicit frozen corpus predating the held-out window is required for memory-on;

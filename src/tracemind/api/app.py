@@ -35,6 +35,7 @@ from tracemind.agent.llm import create_fallback_model
 from tracemind.config import Settings, get_settings
 from tracemind.models import Diagnosis, Incident
 from tracemind.models.memory import (
+    GuidanceRecord, GuidanceRevision,
     MemoryCreate, MemoryPolicy, MemoryRecord, MemoryRevision, MemoryScope,
     MemorySnapshot, ScopeName,
 )
@@ -100,6 +101,8 @@ async def get_diagnosis_service(
             event_directory=settings.agent_trace_directory,
             memory_policy=settings.memory_policy,
             memory_lookup=memory.snapshot if memory is not None else None,
+            guidance_lookup=(memory.guidance_snapshot
+                             if memory is not None else None),
         )
 
 
@@ -223,6 +226,7 @@ def create_app() -> FastAPI:
         state = RunState(
             incident=request.incident,
             memory_policy=settings.memory_policy,
+            learning_policy=settings.memory_policy,
             investigation_start=request.investigation_start,
             investigation_end=request.investigation_end,
             limits=settings.run_limits,
@@ -325,6 +329,7 @@ def create_app() -> FastAPI:
         state = RunState(
             investigation_id=uuid4(), incident=request.incident,
             memory_policy=settings.memory_policy,
+            learning_policy=settings.memory_policy,
             investigation_start=request.investigation_start,
             investigation_end=request.investigation_end,
             limits=settings.run_limits,
@@ -546,6 +551,46 @@ def create_app() -> FastAPI:
             MemoryRepository(repository).delete(
                 memory_id, expected_revision=expected_revision,
             )
+        except RunConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return Response(status_code=204)
+
+    @application.get("/api/v1/guidance", response_model=list[GuidanceRecord],
+                     tags=["memory"])
+    async def list_guidance(
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> list[GuidanceRecord]:
+        """Review the local user's inferred preferences and skills."""
+        return MemoryRepository(repository).list_guidance(
+            offset=offset, limit=limit)
+
+    @application.put("/api/v1/guidance/{guidance_id}",
+                     response_model=GuidanceRecord, tags=["memory"])
+    async def revise_guidance(
+        guidance_id: UUID, request: GuidanceRevision,
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> GuidanceRecord:
+        """Correct an inferred instruction with optimistic concurrency."""
+        try:
+            return MemoryRepository(repository).revise_guidance(
+                guidance_id, request)
+        except MemoryNotFound as exc:
+            raise HTTPException(404, "guidance not found") from exc
+        except RunConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @application.delete("/api/v1/guidance/{guidance_id}", status_code=204,
+                        tags=["memory"])
+    async def delete_guidance(
+        guidance_id: UUID, expected_revision: Annotated[int, Query(ge=1)],
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> Response:
+        """Remove an inferred instruction from future retrieval."""
+        try:
+            MemoryRepository(repository).delete_guidance(
+                guidance_id, expected_revision=expected_revision)
         except RunConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         return Response(status_code=204)

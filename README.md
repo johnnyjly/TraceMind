@@ -263,11 +263,63 @@ This is incident-local history; it is not cross-incident long-term memory.
 
 ### Optional cross-incident memory (S6, first increment)
 
-Memory is **disabled by default**. Completed diagnoses and confidence scores
-never populate the library automatically. A human must review a persisted,
-successful source run and explicitly confirm the resolution and recovery.
-The management API is for trusted local use; `confirmed_by` is an attestation,
-not an authenticated identity. Shared-service authentication remains S5 work.
+Memory is **disabled by default**. When enabled, the agent learns from ordinary
+follow-up feedback; no "remember this" request or manual registration is needed.
+It proposes reusable preferences/skills and human-reported confirmed or
+corrected diagnoses alongside its answer. The workflow verifies the feedback
+quote and provenance, then persists the proposal. Model confidence and a
+completed run alone never establish human confirmation.
+
+Examples of ordinary follow-up messages:
+
+```json
+{"message":"以后先给简短结论，再列证据。","purpose":"explain"}
+```
+
+```json
+{"message":"已确认是路由配置，修正路由后恢复了。","purpose":"explain"}
+```
+
+Use `POST /api/v1/investigations/{id}/messages`, or the interactive
+`scripts/demo_investigation.py` follow-up prompt. Existing diagnosis/model/time
+budgets still apply. Learning uses the same structured model response and adds
+no separate extraction call. The model chooses whether feedback is enduring;
+"这次简短输出" should be classified as temporary and is not written to long-term
+memory. A later correction updates the same stable key; disputed items can be
+revoked through feedback. The inference is a model decision, not a keyword
+rule, so mistaken classifications remain possible and reviewable.
+
+Preferences/skills use a local-user profile independent of deployment version.
+New rounds capture a bounded instruction snapshot, including explain rounds;
+current requests take priority over saved habits. Skills cannot authorize tools,
+change budgets or create evidence. Inferred diagnostic confirmations reference
+the parent run and the current feedback run/quote, with normalized source
+observations as provenance. Human feedback can correct an inconclusive source
+with observations; it does not independently prove causality for a new run.
+Automatic confirmations expire after `TRACEMIND_AGENT_MEMORY_AUTO_EXPIRY_DAYS`
+(default 30). Explanation still performs no new historical-diagnosis retrieval.
+
+`guidance.selected` and `memory.feedback_saved` expose sanitized progress and
+counts; full quotes/proposals remain in SQLite. Writes check the active worker
+lease, quoted current input and concurrent revisions. A transaction stores the
+updates and a per-run receipt, so restart cannot duplicate learning or recreate
+a record subsequently deleted by a human. Previous snapshots and receipt
+contents remain available for audit. Failed quote/revision/record validation
+does not invalidate an otherwise valid diagnosis; database failures propagate.
+
+| Guidance route | Action |
+| --- | --- |
+| `GET /api/v1/guidance?offset=0&limit=20` | Review inferred preferences and skills with source feedback |
+| `PUT /api/v1/guidance/{id}` | Correct `instruction` with `expected_revision` |
+| `DELETE /api/v1/guidance/{id}?expected_revision=1` | Remove from future retrieval |
+
+The API is for trusted local use; this profile is not a tenant boundary and
+`confirmed_by` is an attestation, not an authenticated identity. Shared-service
+authentication remains S5 work. Autonomous evaluations never load live user
+guidance or learn from follow-up feedback; human-assisted learning needs a
+separate fixed-feedback evaluation. Evaluate real-model classification quality separately.
+
+The existing manual confirmation API remains available for review and import.
 
 After reviewing a source run, write a `memory-confirmation.json` file:
 
@@ -306,6 +358,7 @@ TRACEMIND_AGENT_MEMORY_ENVIRONMENT=otel-demo-local
 TRACEMIND_AGENT_MEMORY_DEPLOYMENT_VERSION=demo-3.1.0-local-v1
 TRACEMIND_AGENT_MEMORY_MAX_RECORDS=3
 TRACEMIND_AGENT_MEMORY_CONTEXT_BYTES=4096
+TRACEMIND_AGENT_MEMORY_AUTO_EXPIRY_DAYS=30
 ```
 
 Restart the API and worker after configuring them. Retrieval requires exact
@@ -313,7 +366,8 @@ environment/version and at least one affected-service match, excludes the same
 incident and revoked/expired records, and selects recent confirmations first.
 A run captures its policy at creation and freezes selected content before its
 first model call. Recovery reuses that snapshot even after library changes.
-Explain rounds perform no new cross-incident lookup; investigate rounds can.
+Explain rounds perform no new historical-diagnosis lookup; investigate rounds
+can. Both can load saved preferences and skills.
 The prompt labels bounded previews as untrusted historical hints. Historical
 IDs cannot substitute for current telemetry citations or establish completion.
 `memory.selected` records the snapshot hash, record IDs/revisions and context
@@ -328,9 +382,10 @@ omissions; SSE shows retrieval progress without exposing resolution content.
 | `DELETE /api/v1/memories/{id}?expected_revision=2` | Remove from the active library |
 
 Concurrent stale edits return 409. Reconfirmation increments the revision.
-Deletion does not erase copies already saved in run snapshots, checkpoints or
-evaluation files. SQLite schema v3 adds the memory table without changing
-existing run data or checkpoint schema. No vector search or new dependency is
+Deletion does not erase copies already saved in run snapshots, receipts,
+checkpoints or evaluation files. SQLite schema v4 adds guidance and feedback
+receipts to the v3 memory table, preserving existing run data and checkpoint
+schema. No vector search or new dependency is
 introduced. Memory does not reduce the existing evidence, context or call gates.
 
 ### Frozen memory evaluation

@@ -196,12 +196,14 @@ def test_v2_migration_preserves_existing_run(tmp_path):
     original = runs.get(source.id)
     with sqlite3.connect(runs.path) as connection:
         connection.execute("DROP TABLE incident_memories")
+        connection.execute("DROP TABLE agent_guidance")
+        connection.execute("DROP TABLE memory_feedback")
         connection.execute("PRAGMA user_version=2")
     reopened = RunRepository(runs.path)
     assert reopened.get(source.id) == original
     assert MemoryRepository(reopened).list() == []
     with sqlite3.connect(runs.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
     assert RunRepository(runs.path).get(source.id) == original
 
 
