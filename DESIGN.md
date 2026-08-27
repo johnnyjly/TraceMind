@@ -37,6 +37,27 @@ in response headers; timezone-aware inputs remain required.
 
 ## Agent and workflow responsibilities
 
+### Optional RAG infrastructure
+
+The separate `tracemind.rag` package implements the approved LightRAG baseline:
+Qdrant vectors, NetworkX relationships, SQLite FTS5 BM25 recall, RRF fusion and
+local BGE reranking. It exposes structured canonical knowledge chunks with
+document hashes and source revisions. `mix` and `naive` share the same downstream
+fusion and ranking. No knowledge enters diagnosis context automatically.
+
+This increment supplies setup/check/query commands and an unpublished bootstrap
+workspace. It does not ingest `knowledge/`, build a production corpus, publish
+immutable snapshots or register an Agent tool. Tokenizer limits prevent silent
+embedding/reranker truncation. Injected model calls have bounded accounting;
+future Agent integration must also charge them to the outer run budget.
+The library accepts an async completion callback; the CLI owns provider
+selection, credential loading and provider-specific request options.
+One process owns each local workspace. Source verification, ingestion recovery,
+snapshot publication, English query planning and knowledge-specific evaluation
+remain required before enabling retrieval in diagnosis runs.
+
+### Diagnosis execution
+
 One diagnostic agent chooses queries, interprets evidence, revises hypotheses,
 and proposes conclusions. Application code owns execution and termination.
 

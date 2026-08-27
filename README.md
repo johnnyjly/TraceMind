@@ -9,7 +9,7 @@ The single-agent baseline includes context management, execution controls,
 recovery, persistence, tracing and optional feedback memory; see
 [the single-agent design](DESIGN.md). Telemetry tools are discovered from an
 independently deployed MCP service over Streamable HTTP. Multi-agent orchestration, repository
-and Runbook tools, RAG, mutation approval and reinforcement learning remain
+and Runbook tools, RAG integration, mutation approval and reinforcement learning remain
 later phases.
 
 ## Current status
@@ -76,6 +76,84 @@ The harness applies the same output, context, call, and time limits.
 Never commit the populated `.env` file. Model configuration is loaded only
 when the diagnosis endpoint is called, so the health endpoint remains usable
 without an API key.
+
+## RAG infrastructure (optional)
+
+The first RAG increment provides an isolated retrieval runtime. It is not
+registered as an Agent tool and does not change the single-agent baseline.
+No documents are automatically imported from `knowledge/`.
+
+```text
+Query → LightRAG mix (graph + vector recall) ─┐
+      → SQLite FTS5 BM25 recall ────────────┤
+                         deduplicate / RRF → local BGE reranking
+                                          → cited knowledge chunks
+```
+
+LightRAG uses Qdrant for vectors, NetworkX for relationships, and local JSON
+stores for framework metadata. A separate SQLite database holds canonical
+chunk provenance and two FTS5 indexes: stemmed English prose and literal
+identifiers. LightRAG's extracted keywords drive entity/relationship vector
+search; they are not a BM25 full-text index. Our FTS5 branch supplies that
+independent lexical recall. `mix` is the primary mode; `naive` provides vector recall for
+comparison. Both use the same BM25 fusion and reranker. Knowledge references
+remain separate from current-incident telemetry evidence.
+
+### Set up and check
+
+```bash
+uv sync --extra rag --dev
+docker compose -f deploy/compose.rag.yaml up -d
+uv run --extra rag python scripts/rag.py models
+uv run --extra rag python scripts/rag.py init
+uv run --extra rag python scripts/rag.py check
+```
+
+The `models` command downloads revision-pinned `BAAI/bge-small-en-v1.5`
+(384 dimensions) and `BAAI/bge-reranker-base`, then checks local inference.
+Subsequent runtime initialization uses cached weights only. CPU is the default;
+Apple Silicon MPS can be selected through `TRACEMIND_RAG_DEVICE=mps`.
+Qdrant is an independent Docker service on localhost:6333 with a named volume.
+It does not require the OpenTelemetry Demo or receive model credentials.
+
+Settings are listed in `.env.example` under `TRACEMIND_RAG_*`. Workspaces and
+model caches live under ignored `artifacts/rag/`. Each workspace records model
+revisions, dimensions and chunk settings in `runtime.json`; incompatible
+configuration requires a different `TRACEMIND_RAG_SNAPSHOT` identifier.
+The default `bootstrap` workspace contains zero knowledge chunks and is
+explicitly marked unpublished.
+
+```bash
+uv run --extra rag python scripts/rag.py query --query "RPC connection errors" --mode mix
+```
+
+An empty workspace returns `[]` without model calls. Once populated, retrieval
+returns structured references, not a generated diagnosis. LightRAG keyword
+extraction can call the configured model; the bridge enforces per-operation call, output
+and time limits and logs reported tokens. Embedding and reranking run locally,
+with tokenizer checks that reject inputs exceeding model limits.
+
+The CLI selects `TRACEMIND_RAG_LLM_PROVIDER` and `TRACEMIND_RAG_LLM_MODEL`,
+using the selected provider's existing application credential. DeepSeek is the
+configuration default, not an automatic fallback. The retrieval library never
+loads application credentials or chooses a provider: callers inject an async
+completion function into `RagRuntime`. Missing injection raises an explicit
+error only when retrieval needs an LLM. Provider-specific request options are
+owned by the CLI adapter. Initializing empty stores requires no model key.
+
+### Remaining boundaries
+
+Source verification, format selection, section-aware chunking, extraction,
+immutable snapshot publication and retrieval evaluation are the next stage.
+Agent integration will additionally supply English query planning, charge
+internal model calls to the outer run budget, and keep knowledge citations
+distinct from telemetry evidence IDs. The CLI is not a distributed retrieval
+service: use one process per workspace; local graph/JSON stores do not support
+concurrent cross-process writers. Qdrant does not make those stores distributed.
+
+Interfaces follow the pinned [LightRAG core documentation](https://github.com/HKUDS/LightRAG/blob/main/docs/ProgramingWithCore.md)
+and the [BGE embedding](https://huggingface.co/BAAI/bge-small-en-v1.5) and
+[reranker](https://huggingface.co/BAAI/bge-reranker-base) model contracts.
 
 ## Telemetry MCP service
 

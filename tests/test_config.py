@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from tracemind.config import Settings
+from tracemind.rag.config import RagSettings
 
 
 def test_example_covers_all_settings_and_loads_diagnostic_profile():
@@ -13,6 +14,8 @@ def test_example_covers_all_settings_and_loads_diagnostic_profile():
     assert len(entries) == len(set(entries))
     assert set(entries) == {
         f"TRACEMIND_{name.upper()}" for name in Settings.model_fields
+    } | {
+        f"TRACEMIND_RAG_{name.upper()}" for name in RagSettings.model_fields
     }
     settings = Settings(_env_file=example)
     assert settings.agent_recursion_limit == 50
