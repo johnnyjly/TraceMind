@@ -19,10 +19,12 @@ from tracemind.agent.persistence import (
 )
 from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
 from tracemind.config import Settings
+from tracemind.mcp.client import HttpMcpClient, open_telemetry_backend
 from tracemind.models.run import RunStatus, StopReason
 from tracemind.telemetry import (
     JaegerClient, OpenSearchClient, PrometheusClient,
 )
+from tracemind.telemetry.backend import TelemetryBackend
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ class RunWorker:
 
     def _service(
         self, saver: AsyncSqliteSaver, http_client: httpx.AsyncClient,
+        telemetry_backend: TelemetryBackend | HttpMcpClient | None = None,
     ) -> DiagnosisService:
         if self._service_factory is not None:
             return self._service_factory(saver, http_client)
@@ -68,6 +71,7 @@ class RunWorker:
             memory_lookup=MemoryRepository(self.repository).snapshot,
             guidance_lookup=(
                 MemoryRepository(self.repository).guidance_snapshot),
+            telemetry_backend=telemetry_backend,
         )
 
     async def _monitor(self, claim: ClaimedRun, task: asyncio.Task) -> None:
@@ -120,8 +124,12 @@ class RunWorker:
                 checkpoint = await saver.aget_tuple({
                     "configurable": {"thread_id": str(run_id)}
                 })
-                async with httpx.AsyncClient(timeout=20) as http_client:
-                    service = self._service(saver, http_client)
+                async with (
+                    httpx.AsyncClient(timeout=20) as http_client,
+                    open_telemetry_backend(self.settings) as telemetry_backend,
+                ):
+                    service = self._service(saver, http_client,
+                                            telemetry_backend)
                     task = asyncio.create_task(service.run_persisted(
                         state, evidence,
                         persist=lambda current, items: (

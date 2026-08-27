@@ -91,3 +91,4 @@ class EvaluationReport(BaseModel):
     regression_passed: bool | None = None
     memory_mode: Literal["off", "frozen"] = "off"
     memory_corpus_id: str | None = None
+    telemetry_transport: Literal["direct", "mcp"] = "direct"

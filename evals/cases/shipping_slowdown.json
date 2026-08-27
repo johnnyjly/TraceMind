@@ -1,0 +1,17 @@
+{
+  "id": "shipping_slowdown",
+  "description": "International shipments introduce a five-second checkout delay.",
+  "incident": {
+    "title": "Checkout is slow for customers with international addresses",
+    "description": "Customers shipping outside the United States report much slower checkout, while US-address orders appear normal. Requests may still succeed. Investigate the source of the latency.",
+    "severity": "medium",
+    "affected_services": ["checkout"]
+  },
+  "fault": {"feature_flag": "intlShippingSlowdown", "variant": "5sec"},
+  "ground_truth": {
+    "root_cause_service": "shipping",
+    "root_cause_terms": ["delay", "slowdown", "international", "5sec"],
+    "required_evidence_source": "log"
+  },
+  "max_tool_calls": 12
+}

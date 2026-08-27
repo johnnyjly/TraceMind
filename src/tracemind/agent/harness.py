@@ -101,11 +101,14 @@ class RunHarness:
         if not resume:
             self.emit("run.started", span_id=state.id, data={
                 "prompt_version": state.prompt_version,
+                "telemetry_transport": state.telemetry_transport,
                 "allowed_tools": list(state.allowed_tools),
                 **state.limits.model_dump(),
             })
         else:
-            self.emit("run.resumed", span_id=state.id)
+            self.emit("run.resumed", span_id=state.id, data={
+                "telemetry_transport": state.telemetry_transport,
+            })
             started = {
                 event.span_id: event for event in state.events
                 if event.kind in {"model.started", "tool.started"}

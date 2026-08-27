@@ -16,6 +16,7 @@ from tracemind.agent import (
 )
 from tracemind.agent.errors import DiagnosisCancelled, ModelConfigurationError
 from tracemind.config import Settings
+from tracemind.mcp.client import open_telemetry_backend
 from tracemind.agent.llm import create_fallback_model
 from tracemind.agent.memory import evaluation_memory
 from tracemind.models.memory import MemorySnapshot
@@ -57,6 +58,8 @@ async def run_service_evaluation(
             run_state=exc.state, error_type=type(exc).__name__,
             execution_mode=execution_mode,
             elapsed_ms=(perf_counter() - started) * 1000,
+            telemetry_transport=(exc.state.telemetry_transport
+                                 if exc.state else "direct"),
             **memory_metadata,
         )
     except asyncio.CancelledError as exc:
@@ -69,6 +72,9 @@ async def run_service_evaluation(
             run_state=exc.state if isinstance(exc, DiagnosisCancelled)
             else None,
             error_type="CancelledError", execution_mode=execution_mode,
+            telemetry_transport=(exc.state.telemetry_transport
+                                 if isinstance(exc, DiagnosisCancelled)
+                                 and exc.state else "direct"),
             elapsed_ms=(perf_counter() - started) * 1000,
             **memory_metadata,
         )
@@ -80,6 +86,8 @@ async def run_service_evaluation(
         result=evaluate_diagnosis(case, run, elapsed_ms=elapsed_ms),
         run_state=run.state, execution_mode=execution_mode,
         elapsed_ms=elapsed_ms,
+        telemetry_transport=(run.state.telemetry_transport
+                             if run.state else "direct"),
         **memory_metadata,
     )
 
@@ -116,10 +124,14 @@ async def run_live_evaluation(
             evidence=[], error_type=type(exc).__name__,
             memory_mode="frozen" if corpus_id else "off",
             memory_corpus_id=corpus_id,
+            telemetry_transport=settings.telemetry_transport,
         )
     limits = settings.run_limits
     limits.tool_calls = min(limits.tool_calls, case.max_tool_calls)
-    async with httpx.AsyncClient(timeout=20) as http_client:
+    async with (
+        httpx.AsyncClient(timeout=20) as http_client,
+        open_telemetry_backend(settings) as telemetry_backend,
+    ):
         service = DiagnosisService(
             PrometheusClient(str(settings.prometheus_url), http_client),
             JaegerClient(str(settings.jaeger_url), http_client),
@@ -137,6 +149,7 @@ async def run_live_evaluation(
             allowed_tools=settings.agent_allowed_tools,
             event_directory=settings.agent_trace_directory,
             memory_policy=policy, memory_lookup=lookup,
+            telemetry_backend=telemetry_backend,
         )
         return await run_service_evaluation(
             case, service, start=start, end=end,

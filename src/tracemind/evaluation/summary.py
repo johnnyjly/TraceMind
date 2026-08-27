@@ -102,6 +102,8 @@ def build_batch_report(
                f"{report.model_provider}:{report.model_name}")
         if report.memory_mode == "frozen":
             key += f"/memory:{report.memory_corpus_id}"
+        if report.telemetry_transport != "direct":
+            key += f"/telemetry:{report.telemetry_transport}"
         groups.setdefault(key, []).append(report)
     return BatchReport(
         reports=reports, summary=summarize_reports(reports, pricing=pricing),

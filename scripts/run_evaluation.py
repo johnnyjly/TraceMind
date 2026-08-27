@@ -75,11 +75,12 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=(
-            PROJECT_ROOT / "artifacts" / "evaluations" / "payment-failure.json"
-        ),
+        help="Report path; default: artifacts/evaluations/<case-name>.json",
     )
     args = parser.parse_args()
+    if args.output is None:
+        args.output = (PROJECT_ROOT / "artifacts" / "evaluations"
+                       / f"{args.case.stem.replace('_', '-')}.json")
     if args.lookback_minutes < 1:
         parser.error("--lookback-minutes must be at least 1")
     configure_logging(verbose=args.verbose)

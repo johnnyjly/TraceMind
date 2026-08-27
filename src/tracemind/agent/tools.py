@@ -4,19 +4,27 @@ import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from copy import deepcopy
+from time import monotonic
 from typing import Annotated
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
+from mcp.types import Tool
 from pydantic import Field
 
 from tracemind.agent.context import json_text
 from tracemind.agent.harness import RunHarness
 from tracemind.models import Evidence, EvidenceSource
 from tracemind.models.run import StopReason, ToolName
+from tracemind.mcp.client import HttpMcpClient
+from tracemind.telemetry.errors import RemoteTelemetryError
 from tracemind.telemetry import (
     JaegerClient,
     OpenSearchClient,
     PrometheusClient,
+)
+from tracemind.telemetry.backend import (
+    DirectTelemetryBackend, TelemetryBackend,
 )
 
 
@@ -178,24 +186,11 @@ def context_index(items: list[dict]) -> dict:
     return {"context_index": index}
 
 
-def create_telemetry_tools(
-    prometheus: PrometheusClient,
-    jaeger: JaegerClient,
-    opensearch: OpenSearchClient,
-    *,
-    start: datetime,
-    end: datetime,
-    collector: EvidenceCollector,
-    harness: RunHarness,
-) -> list[BaseTool]:
-    """Bind read-only telemetry tools to a fixed investigation window.
-
-    Filter visibility by the harness allowlist. Execution rechecks
-    authorization and reserves budgets. Store observations before selecting
-    bounded previews, retaining omitted details for paginated retrieval.
-    Exclude observations outside the inclusive window before storing them;
-    final citation validation still checks retained and legacy evidence.
-    """
+def _query_executor(
+    start: datetime, end: datetime,
+    collector: EvidenceCollector, harness: RunHarness,
+):
+    """Reuse evidence retention and preview policy for every transport."""
     async def execute(
         name: ToolName,
         arguments: dict[str, object],
@@ -261,6 +256,177 @@ def create_telemetry_tools(
         result = await harness.tool_call(name, arguments, collect)
         return result, context_index(result)
 
+    return execute
+
+
+def create_local_tools(
+    collector: EvidenceCollector, harness: RunHarness,
+) -> list[BaseTool]:
+    """Bind tools that operate solely on the current investigation state."""
+    @tool(response_format="content_and_artifact")
+    async def read_evidence(
+        evidence_id: str | None = None,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        service: str | None = None,
+        source: EvidenceSource | None = None,
+    ) -> tuple[list[dict], dict]:
+        """List stored previews, or page evidence JSON by ID.
+
+        Prefer a known evidence_id for missing details. Otherwise filter the
+        catalogue by service and/or source. Follow next_offset only when more
+        entries are needed to answer the question.
+
+        Without an ID, offset counts evidence entries. With an ID it counts
+        characters in the stored JSON and ignores catalogue filters.
+        Only this run's evidence is visible.
+        """
+        async def read() -> list[dict]:
+            """Read a page from this run's evidence collector."""
+            return collector.read(evidence_id, offset,
+                                  service=service, source=source)
+
+        result = await harness.tool_call(
+            "read_evidence",
+            {"evidence_id": evidence_id, "offset": offset,
+             "service": service, "source": source}, read
+        )
+        artifact = context_index(result)
+        artifact["detail_page"] = evidence_id is not None
+        return result, artifact
+
+    return ([read_evidence]
+            if "read_evidence" in harness.state.allowed_tools else [])
+
+
+async def create_mcp_tools(
+    client: HttpMcpClient, *, start: datetime, end: datetime,
+    collector: EvidenceCollector, harness: RunHarness,
+) -> list[BaseTool]:
+    """Bind server-discovered schemas to the existing execution policy.
+
+    Application-owned investigation dates are declared by the server schema,
+    removed from model inputs and injected at dispatch. Discovery cannot
+    expand the local allowlist or replace a local tool.
+    """
+    local = create_local_tools(collector, harness)
+    allowed = set(harness.state.allowed_tools) - {t.name for t in local}
+    if not allowed or harness.finalization_reason is not None:
+        return local
+    started = monotonic()
+    harness.check_active()
+    harness.emit("mcp.discovery.started")
+    try:
+        definitions = await client.discover_tools()
+    except RemoteTelemetryError as exc:
+        harness.emit("mcp.discovery.failed", data={
+            "error_type": type(exc).__name__},
+            duration_ms=(monotonic() - started) * 1000)
+        harness.stop(StopReason.TOOL_ERROR)
+    selected = {t.name: t for t in definitions if t.name in allowed}
+    if not allowed.issubset(selected):
+        harness.emit("mcp.discovery.failed", data={
+            "category": "tool_contract_mismatch"})
+        harness.stop(StopReason.TOOL_ERROR)
+    execute = _query_executor(start, end, collector, harness)
+
+    def bind(definition: Tool) -> BaseTool:
+        """Capture one remote definition without writing a query function."""
+        schema = deepcopy(definition.inputSchema)
+        properties = schema.get("properties", {})
+        injected = {}
+        for field, spec in list(properties.items()):
+            context = spec.get("x-investigation-context")
+            if context is not None:
+                if context not in {"start", "end"}:
+                    raise RemoteTelemetryError("tool_contract_mismatch")
+                value = start if context == "start" else end
+                injected[field] = value.isoformat()
+                del properties[field]
+        schema["required"] = [key for key in schema.get("required", [])
+                              if key not in injected]
+        if not definition.description:
+            raise RemoteTelemetryError("tool_contract_mismatch")
+        name = definition.name
+
+        async def invoke(**arguments):
+            """Execute an admitted RPC and apply run-local result handling."""
+            async def remote():
+                """Never let model arguments override bound context fields."""
+                if set(arguments) & injected.keys():
+                    raise RemoteTelemetryError(
+                        "invalid_request", status_code=400)
+                return await client.call(name, {**arguments, **injected})
+
+            if TOOL_REGISTRY[name].capability == "telemetry.metadata.read":
+                async def metadata():
+                    """Keep server metadata outside the evidence store."""
+                    reply = await remote()
+                    return [reply.metadata]
+                result = await harness.tool_call(name, arguments, metadata)
+                return result, context_index(result)
+
+            async def observations():
+                """Return validated observations for the shared collector."""
+                reply = await remote()
+                return reply.evidence
+
+            result, artifact = await execute(name, arguments, observations)
+            if not result and name == "query_metrics":
+                result = [{
+                    "kind": "empty_metric_query",
+                    "query_time": end.isoformat(),
+                    "guidance": (
+                        "No matching samples. This is not evidence of health. "
+                        "Check names, labels and sample availability; "
+                        "discover metrics if unknown instead of guessing "
+                        "variants."
+                    ),
+                }]
+                artifact = context_index(result)
+            return result, artifact
+
+        return StructuredTool.from_function(
+            coroutine=invoke, name=name, description=definition.description,
+            args_schema=schema, response_format="content_and_artifact",
+        )
+
+    try:
+        tools = [bind(definition) for definition in selected.values()]
+    except RemoteTelemetryError as exc:
+        harness.emit("mcp.discovery.failed", data={"category": exc.category})
+        harness.stop(StopReason.TOOL_ERROR)
+    harness.emit("mcp.discovery.completed", data={
+        "tool_names": [t.name for t in tools]},
+        duration_ms=(monotonic() - started) * 1000)
+    harness.check_active()
+    return [*tools, *local]
+
+
+def create_telemetry_tools(
+    prometheus: PrometheusClient,
+    jaeger: JaegerClient,
+    opensearch: OpenSearchClient,
+    *,
+    start: datetime,
+    end: datetime,
+    collector: EvidenceCollector,
+    harness: RunHarness,
+    backend: TelemetryBackend | None = None,
+) -> list[BaseTool]:
+    """Deprecated direct/stdio bindings retained for compatibility tests.
+
+    Bind read-only telemetry tools to a fixed investigation window.
+
+    Filter visibility by the harness allowlist. Execution rechecks
+    authorization and reserves budgets. Store observations before selecting
+    bounded previews, retaining omitted details for paginated retrieval.
+    Exclude observations outside the inclusive window before storing them;
+    final citation validation still checks retained and legacy evidence.
+    """
+    backend = backend or DirectTelemetryBackend(prometheus, jaeger, opensearch)
+
+    execute = _query_executor(start, end, collector, harness)
+
     @tool(response_format="content_and_artifact")
     async def query_metrics(
         expression: Annotated[str, Field(description=(
@@ -286,7 +452,7 @@ def create_telemetry_tools(
         """
         result, artifact = await execute(
             "query_metrics", {"expression": expression},
-            lambda: prometheus.query(expression, at=end),
+            lambda: backend.query_metrics(expression, at=end),
         )
         if not result:
             result = [{
@@ -349,7 +515,7 @@ def create_telemetry_tools(
         """
         async def discover() -> list[dict]:
             """Return metadata without storing observations or evidence IDs."""
-            return [await prometheus.discover_metrics(
+            return [await backend.discover_metrics(
                 service=service, metric=metric,
                 start=start, end=end, limit=limit,
             )]
@@ -365,7 +531,7 @@ def create_telemetry_tools(
         """Find recent Jaeger traces for one service in the incident window."""
         return await execute(
             "search_traces", {"service": service},
-            lambda: jaeger.search_traces(service, start=start, end=end),
+            lambda: backend.search_traces(service, start=start, end=end),
         )
 
     @tool(response_format="content_and_artifact")
@@ -387,7 +553,7 @@ def create_telemetry_tools(
         """
         return await execute(
             "get_trace_detail", {"trace_id": trace_id},
-            lambda: jaeger.get_trace_detail(trace_id),
+            lambda: backend.get_trace_detail(trace_id),
         )
 
     @tool(response_format="content_and_artifact")
@@ -398,47 +564,16 @@ def create_telemetry_tools(
         """Find OpenSearch logs for one service, optionally matching text."""
         return await execute(
             "search_logs", {"service": service, "text": text},
-            lambda: opensearch.search_logs(
+            lambda: backend.search_logs(
                 service, start=start, end=end, text=text
             ),
         )
-
-    @tool(response_format="content_and_artifact")
-    async def read_evidence(
-        evidence_id: str | None = None,
-        offset: Annotated[int, Field(ge=0)] = 0,
-        service: str | None = None,
-        source: EvidenceSource | None = None,
-    ) -> tuple[list[dict], dict]:
-        """List stored previews, or page evidence JSON by ID.
-
-        Prefer a known evidence_id for missing details. Otherwise filter the
-        catalogue by service and/or source. Follow next_offset only when more
-        entries are needed to answer the question.
-
-        Without an ID, offset counts evidence entries. With an ID it counts
-        characters in the stored JSON and ignores catalogue filters.
-        Only this run's evidence is visible.
-        """
-        async def read() -> list[dict]:
-            """Read a page from this run's evidence collector."""
-            return collector.read(evidence_id, offset,
-                                  service=service, source=source)
-
-        result = await harness.tool_call(
-            "read_evidence",
-            {"evidence_id": evidence_id, "offset": offset,
-             "service": service, "source": source}, read
-        )
-        artifact = context_index(result)
-        artifact["detail_page"] = evidence_id is not None
-        return result, artifact
 
     return [
         item for item in (
             query_metrics, discover_metrics, search_traces,
             get_trace_detail, search_logs,
-            read_evidence,
+            *create_local_tools(collector, harness),
         )
         if item.name in harness.state.allowed_tools
     ]

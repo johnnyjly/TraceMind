@@ -1,4 +1,4 @@
-"""OpenSearch incident-window log queries and evidence normalization."""
+"""Deprecated local client retained for explicit direct/replay callers."""
 
 import json
 from datetime import datetime

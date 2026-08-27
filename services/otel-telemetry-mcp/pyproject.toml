@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "otel-telemetry-mcp"
+version = "0.1.0"
+description = "Read-only MCP telemetry tools for the OpenTelemetry Demo."
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.26,<2",
+    "httpx>=0.28,<1",
+    "pydantic-settings>=2.0,<3",
+    "uvicorn>=0.35,<1",
+]
+
+[project.scripts]
+otel-telemetry-mcp = "otel_telemetry_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/otel_telemetry_mcp"]

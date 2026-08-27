@@ -1,0 +1,17 @@
+{
+  "id": "cart_failure",
+  "description": "Cart clearing fails while other cart operations can still work.",
+  "incident": {
+    "title": "Customers cannot clear their shopping carts",
+    "description": "Removing all cart items fails, and some customers still see items after placing an order. Investigate the cause; do not assume checkout itself failed.",
+    "severity": "high",
+    "affected_services": ["frontend"]
+  },
+  "fault": {"feature_flag": "cartFailure", "variant": "100%"},
+  "ground_truth": {
+    "root_cause_service": "cart",
+    "root_cause_terms": ["emptycart", "clear", "redis", "valkey", "badhost"],
+    "required_evidence_source": "trace"
+  },
+  "max_tool_calls": 12
+}

@@ -15,6 +15,8 @@ from langchain_core.exceptions import (
 )
 from openai import APIConnectionError
 
+from tracemind.telemetry.errors import RemoteTelemetryError
+
 
 @dataclass(frozen=True)
 class Failure:
@@ -49,6 +51,9 @@ def classify_failure(error: Exception) -> Failure:
         chain.append(current)
         current = current.__cause__ or current.__context__
     for item in reversed(chain):
+        if isinstance(item, RemoteTelemetryError):
+            return Failure(item.category, item.retryable,
+                           item.status_code, item.retry_after)
         response = getattr(item, "response", None)
         status = getattr(item, "status_code", None)
         if status is None and response is not None:

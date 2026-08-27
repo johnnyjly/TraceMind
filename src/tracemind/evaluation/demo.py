@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 DEMO_COMMIT = "dedc0178918e260823323b8d95005a8cb924b007"
+SCENARIO_NAMES = ("payment_failure", "cart_failure", "shipping_slowdown")
 
 
 def prepare_flag_config(
@@ -38,6 +39,29 @@ def prepare_flag_config(
     return output_path.resolve()
 
 
+def activate_flag_config(
+    prepared_path: Path, active_path: Path, backup_path: Path,
+) -> Path:
+    """Save the previous configuration before updating the mounted file.
+
+    Write in place so an existing Docker file bind keeps the same inode.
+    Callers restart flagd after the complete write, before using new data.
+    """
+    content = prepared_path.read_bytes()
+    if active_path.exists():
+        backup_path.write_bytes(active_path.read_bytes())
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    active_path.write_bytes(content)
+    return active_path.resolve()
+
+
+def restore_flag_config(active_path: Path, backup_path: Path) -> Path:
+    """Restore the last saved configuration without replacing its backup."""
+    content = backup_path.read_bytes()
+    active_path.write_bytes(content)
+    return active_path.resolve()
+
+
 def verify_demo_commit(demo_path: Path) -> None:
     """Reject a Demo checkout whose HEAD differs from the pinned commit."""
     result = subprocess.run(
@@ -61,7 +85,7 @@ def compose_command(
     """Build, but do not execute, a Docker Compose command for the
     scenario.
 
-    Support start, stop, and status; reject other actions. The stop
+    Support start, switch, restore, stop, and status. The stop
     command includes volume removal, while start recreates containers
     without building.
     """
@@ -89,6 +113,9 @@ def compose_command(
                 "--detach",
             )
         )
+    elif action in {"switch", "restore"}:
+        command.extend(("up", "--no-build", "--force-recreate", "--detach",
+                        "--no-deps", "flagd"))
     elif action == "stop":
         command.extend(("down", "--remove-orphans", "--volumes"))
     elif action == "status":

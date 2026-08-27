@@ -28,7 +28,10 @@ from tracemind.agent.memory import (
 )
 from tracemind.agent.harness import RunHarness, RunStopped
 from tracemind.agent.middleware import HarnessMiddleware
-from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
+from tracemind.agent.tools import (
+    EvidenceCollector, create_mcp_tools, create_telemetry_tools,
+)
+from tracemind.mcp.client import HttpMcpClient
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
 from tracemind.models.memory import FeedbackUpdate, MemoryPolicy
 from tracemind.models.run import (
@@ -45,6 +48,7 @@ from tracemind.telemetry import (
     OpenSearchClient,
     PrometheusClient,
 )
+from tracemind.telemetry.backend import TelemetryBackend
 
 
 SYSTEM_PROMPT = (
@@ -194,9 +198,9 @@ class DiagnosisService:
 
     def __init__(
         self,
-        prometheus: PrometheusClient,
-        jaeger: JaegerClient,
-        opensearch: OpenSearchClient,
+        prometheus: PrometheusClient | None,
+        jaeger: JaegerClient | None,
+        opensearch: OpenSearchClient | None,
         runner: AgentRunner,
         *,
         recursion_limit: int = 12,
@@ -206,6 +210,7 @@ class DiagnosisService:
         memory_policy: MemoryPolicy | None = None,
         memory_lookup: MemoryLookup | None = None,
         guidance_lookup: GuidanceLookup | None = None,
+        telemetry_backend: TelemetryBackend | HttpMcpClient | None = None,
     ) -> None:
         """Configure telemetry dependencies, runner, and per-run controls."""
         self._prometheus = prometheus
@@ -219,6 +224,7 @@ class DiagnosisService:
         self._memory_policy = memory_policy
         self._memory_lookup = memory_lookup
         self._guidance_lookup = guidance_lookup
+        self._telemetry_backend = telemetry_backend
 
     async def diagnose(
         self,
@@ -304,6 +310,10 @@ class DiagnosisService:
         incident = state.incident
         start = state.investigation_start
         end = state.investigation_end
+        state.telemetry_transport = (
+            "mcp" if self._telemetry_backend is not None
+            and self._telemetry_backend.transport == "mcp" else "direct"
+        )
         harness = RunHarness(
             state, event_directory=self._event_directory,
             persist=(lambda current: persist(current, collector.evidence))
@@ -313,15 +323,6 @@ class DiagnosisService:
         )
         harness.validate_draft = lambda draft: self._validate_draft(
             draft, collector.evidence, start=start, end=end
-        )
-        tools = create_telemetry_tools(
-            self._prometheus,
-            self._jaeger,
-            self._opensearch,
-            start=start,
-            end=end,
-            collector=collector,
-            harness=harness,
         )
         prompt = (
             "Investigate this incident. Use telemetry tools before reaching "
@@ -365,6 +366,17 @@ class DiagnosisService:
         reason = StopReason.INTERNAL_ERROR
         try:
             async with asyncio.timeout(harness.remaining_seconds):
+                if isinstance(self._telemetry_backend, HttpMcpClient):
+                    tools = await create_mcp_tools(
+                        self._telemetry_backend, start=start, end=end,
+                        collector=collector, harness=harness,
+                    )
+                else:
+                    tools = create_telemetry_tools(
+                        self._prometheus, self._jaeger, self._opensearch,
+                        start=start, end=end, collector=collector,
+                        harness=harness, backend=self._telemetry_backend,
+                    )
                 if state.learning_policy is not None:
                     if state.guidance_snapshot is None:
                         if self._guidance_lookup is None:

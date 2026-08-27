@@ -142,6 +142,7 @@ class RunState(BaseModel):
     limits: RunLimits
     allowed_tools: tuple[ToolName, ...]
     prompt_version: str = "single-agent-v4"
+    telemetry_transport: Literal["direct", "mcp"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

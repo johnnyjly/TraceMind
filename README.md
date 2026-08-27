@@ -5,11 +5,12 @@ microservices. It will investigate synthetic incidents in the OpenTelemetry
 Demo by querying metrics, traces, and logs, then return a structured diagnosis
 with supporting evidence.
 
-The first implementation phase starts with a single-agent baseline. The next
-priority is its context management, execution controls, recovery, persistence,
-and tracing; see [the single-agent design](DESIGN.md). Multi-agent orchestration,
-MCP, RAG, human approval, and reinforcement learning are later phases and are
-not part of the current implementation.
+The single-agent baseline includes context management, execution controls,
+recovery, persistence, tracing and optional feedback memory; see
+[the single-agent design](DESIGN.md). Telemetry tools are discovered from an
+independently deployed MCP service over Streamable HTTP. Multi-agent orchestration, repository
+and Runbook tools, RAG, mutation approval and reinforcement learning remain
+later phases.
 
 ## Current status
 
@@ -18,7 +19,8 @@ The current single-agent baseline provides:
 - typed incident, evidence, and diagnosis models;
 - environment-based application settings;
 - a minimal FastAPI application and health endpoint;
-- asynchronous Prometheus, Jaeger, and OpenSearch clients;
+- independent Docker MCP service querying Prometheus, Jaeger and OpenSearch;
+- server-owned tool descriptions/schemas discovered over Streamable HTTP;
 - normalization of backend responses into typed evidence;
 - a bounded LangGraph single-agent loop with read-only telemetry tools;
 - Gemini and OpenAI model providers selected through environment settings;
@@ -74,6 +76,92 @@ The harness applies the same output, context, call, and time limits.
 Never commit the populated `.env` file. Model configuration is loaded only
 when the diagnosis endpoint is called, so the health endpoint remains usable
 without an API key.
+
+## Telemetry MCP service
+
+The default query path is `TRACEMIND_TELEMETRY_TRANSPORT=mcp`, using
+`TRACEMIND_TELEMETRY_MCP_URL=http://127.0.0.1:8012/mcp`. The independent
+[otel-telemetry-mcp service](services/otel-telemetry-mcp/README.md) owns the five
+query implementations, descriptions and parameter schemas. Its package and
+Docker image do not depend on TraceMind, LangChain or LangGraph. Any compatible
+MCP client can discover and call it. This is separate from the Demo's shopping
+MCP service, which exposes cart/product/checkout operations.
+
+```text
+Session initialization → MCP tools/list → allowlist filter → LangChain tools
+Agent tool proposal → harness authorization/budget/timeout
+                    → MCP tools/call over Streamable HTTP
+                    → server HTTP clients → telemetry backends
+                    → validated observations → run-local store → bounded preview
+```
+
+The server exposes `query_metrics`, `discover_metrics`, `search_traces`,
+`get_trace_detail` and `search_logs`. The model-facing definitions come from
+`tools/list`, not hand-written local query functions. A generic adapter binds
+application-selected dates using the server schema's `x-investigation-context`
+annotations; those fields are hidden from the model and cannot be overridden.
+TraceMind still owns allowlists, retries, evidence deduplication, compression,
+citation validation and progress. `read_evidence` remains a local agent tool.
+Metric metadata never becomes evidence.
+
+### Start or update the container
+
+First start the Demo using the existing scenario script. Its Docker network
+must exist. Then, from the TraceMind project directory:
+
+```bash
+docker compose -f deploy/compose.telemetry-mcp.yaml up -d --build
+uv run python scripts/check_mcp.py
+```
+
+This is a separate Compose project attached to the existing `opentelemetry-demo`
+network. Set `OTEL_DEMO_NETWORK` if the Demo uses a different network name.
+Only the MCP container is built/recreated. The host port binds to loopback.
+The service reads `TELEMETRY_MCP_` settings, owns its backend HTTP connections
+and receives no model keys or TraceMind `.env` file. Rebuild after editing its
+source; containerization does not prevent later changes.
+
+### Try a diagnosis
+
+An existing `.env` with `TRACEMIND_TELEMETRY_TRANSPORT=direct` overrides the new
+code default. These explicit launch commands select HTTP MCP without editing
+that file:
+
+```bash
+TRACEMIND_TELEMETRY_TRANSPORT=mcp uv run uvicorn tracemind.api.app:app --reload
+TRACEMIND_TELEMETRY_TRANSPORT=mcp uv run python scripts/run_worker.py
+```
+
+Then submit the existing demo from another terminal:
+
+```bash
+uv run python scripts/demo_investigation.py --lookback-minutes 10
+```
+
+Tool discovery happens once per investigation session, before the model loop,
+within the run deadline and the tool timeout. Discovery events record its
+outcome and duration; it consumes no model or query attempt. Parallel queries
+reuse the session. Local-only explanation and resumed finalization skip remote
+discovery. Closing the request/worker/evaluation session leaves the independently
+running server available. Discovery failures stop explicitly; no direct fallback
+is performed. Query retries still consume the original shared budgets.
+
+`TRACEMIND_TELEMETRY_MCP_RESPONSE_BYTES` caps decoded replies and discovery pages,
+not peak parser memory. The server has its own response cap. Run/report metadata
+retains `telemetry_transport=mcp`; old stored records still default to `direct`.
+The HTTP server uses JSON responses supported by Streamable HTTP; TraceMind's
+user-facing SSE progress is a separate API channel.
+
+### Deprecated compatibility paths
+
+`transport=direct`, the old local telemetry wrappers and the stdio server/client
+remain for explicit legacy callers and offline replay. They are not the default
+HTTP MCP execution path; adding a server tool does not require another local
+query implementation. The allowlist must still authorize any new capability.
+Offline scripted replay does not exercise MCP. HTTP integration uses the real
+SDK/server with scripted models and fake backends; it does not measure live-model
+accuracy. Network authentication/multi-tenant access and distributed diagnosis
+workers remain outside this local deployment.
 
 Submit a bounded investigation window to `POST /api/v1/diagnoses`:
 
@@ -638,6 +726,93 @@ remove the scenario containers and volumes with:
 ```bash
 uv run python scripts/demo_scenario.py stop
 ```
+
+### Additional live fault demos
+
+Three cases share the same running Demo and HTTP MCP service:
+
+| Case | Fault | Symptoms | Required evidence |
+| --- | --- | --- | --- |
+| `payment_failure` | `paymentFailure=100%` | Checkout fails during payment | Payment error trace |
+| `cart_failure` | `cartFailure=100%` | Clearing the cart fails; items can remain after an order | Cart error trace |
+| `shipping_slowdown` | `intlShippingSlowdown=5sec` | Non-US orders take longer; US orders are unaffected | Shipping delay log |
+
+Switch the existing deployment to the cart scenario:
+
+```bash
+uv run python scripts/demo_scenario.py switch --scenario cart_failure
+```
+
+Add an item in the shop at `http://localhost:8080`, then clear the cart.
+The fault routes `EmptyCart` to an invalid storage endpoint; it does not
+break every cart operation. Checkout ignores the cart-clearing error, so a
+successful order can leave items behind.
+
+For the latency scenario:
+
+```bash
+uv run python scripts/demo_scenario.py switch --scenario shipping_slowdown
+```
+
+Place an order with a Canadian address, then compare with a US address.
+Only non-US `/ship-order` requests receive the injected delay. The bundled
+load generator also includes a Canadian customer, but explicit requests are
+more reliable for a quick demonstration. Trace detail currently includes
+error spans and the twenty longest successful spans; use service/operation
+timing to locate the delay, then shipping logs to establish its mechanism.
+
+The MCP log adapter prefers event time and uses `observedTimestamp` only
+when event time is missing or zero (exported as `1970-01-01`). Such evidence
+records `timestamp_source` and the original timestamps. Observation time
+means when telemetry was observed, not a confirmed event occurrence time.
+Valid historical events remain historical even if collected recently.
+
+Each switch builds from the pristine Demo flags, so these three faults do
+not accumulate. It saves the previous active configuration and recreates
+only flagd. Existing business services, MCP, and telemetry data remain.
+Allow fresh traffic and telemetry export after switching; wait at least
+two minutes and use a one-minute lookback to exclude the previous fault.
+
+Run either the interactive investigation (API and worker must be running)
+or the scored evaluation. Replace the case path for the shipping scenario:
+
+```bash
+uv run python scripts/demo_investigation.py \
+  --case evals/cases/cart_failure.json --lookback-minutes 1
+
+TRACEMIND_AGENT_MAX_MODEL_CALLS=5 uv run python scripts/run_evaluation.py \
+  --case evals/cases/cart_failure.json --lookback-minutes 1
+
+uv run python scripts/demo_investigation.py \
+  --case evals/cases/shipping_slowdown.json --lookback-minutes 1
+
+TRACEMIND_AGENT_MAX_MODEL_CALLS=5 uv run python scripts/run_evaluation.py \
+  --case evals/cases/shipping_slowdown.json --lookback-minutes 1
+```
+
+Default reports are named after the case, e.g.
+`artifacts/evaluations/cart-failure.json` and `shipping-slowdown.json`.
+Use `--output` to preserve multiple runs of the same case. Ground truth and
+flag configuration are used by scenario setup and scoring, not sent to the
+diagnosis model. Scoring checks source/service citations and keywords; it
+does not validate every statement in the explanation.
+
+```bash
+# Return to the configuration before the most recent start/switch.
+uv run python scripts/demo_scenario.py restore
+
+# Explicitly select the payment scenario again.
+uv run python scripts/demo_scenario.py switch --scenario payment_failure
+
+# Generate a candidate configuration without activating it.
+uv run python scripts/demo_scenario.py prepare --scenario shipping_slowdown
+```
+
+`restore` keeps one previous configuration, not a stack. `prepare` writes
+`artifacts/otel-demo/<scenario>.flagd.json`; the active mount retains the
+legacy `payment-failure.flagd.json` filename for existing deployments.
+`status` and `stop` do not rewrite flags. `stop` still removes the Demo
+containers and volumes; use `restore` to undo a fault without deleting data.
 
 ### Terminal logging
 

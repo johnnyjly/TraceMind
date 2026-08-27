@@ -1,0 +1,33 @@
+name: otel-telemetry-tools
+
+services:
+  telemetry-mcp:
+    image: otel-telemetry-mcp:local
+    build:
+      context: ../services/otel-telemetry-mcp
+    ports:
+      - "127.0.0.1:8012:8012"
+    environment:
+      TELEMETRY_MCP_PROMETHEUS_URL: http://prometheus:9090
+      TELEMETRY_MCP_JAEGER_URL: http://jaeger:16686/jaeger/ui
+      TELEMETRY_MCP_OPENSEARCH_URL: http://opensearch:9200
+      TELEMETRY_MCP_OPENSEARCH_LOGS_INDEX: otel-logs-*
+    read_only: true
+    networks:
+      - demo
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8012/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+networks:
+  demo:
+    external: true
+    name: ${OTEL_DEMO_NETWORK:-opentelemetry-demo}

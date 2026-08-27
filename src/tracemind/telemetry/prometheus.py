@@ -1,4 +1,4 @@
-"""Prometheus metric discovery, instant queries and evidence normalization."""
+"""Deprecated local client retained for explicit direct/replay callers."""
 
 import json
 from datetime import UTC, datetime

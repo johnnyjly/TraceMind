@@ -33,6 +33,7 @@ from tracemind.api.schemas import (
 from tracemind.api.progress import stream_progress
 from tracemind.agent.llm import create_fallback_model
 from tracemind.config import Settings, get_settings
+from tracemind.mcp.client import open_telemetry_backend
 from tracemind.models import Diagnosis, Incident
 from tracemind.models.memory import (
     GuidanceRecord, GuidanceRevision,
@@ -83,7 +84,10 @@ async def get_diagnosis_service(
     """Yield a configured service and close its HTTP client after the
     request.
     """
-    async with httpx.AsyncClient(timeout=20) as http_client:
+    async with (
+        httpx.AsyncClient(timeout=20) as http_client,
+        open_telemetry_backend(settings) as telemetry_backend,
+    ):
         memory = (MemoryRepository(RunRepository(settings.agent_run_database))
                   if settings.agent_memory_enabled else None)
         yield DiagnosisService(
@@ -103,6 +107,7 @@ async def get_diagnosis_service(
             memory_lookup=memory.snapshot if memory is not None else None,
             guidance_lookup=(memory.guidance_snapshot
                              if memory is not None else None),
+            telemetry_backend=telemetry_backend,
         )
 
 

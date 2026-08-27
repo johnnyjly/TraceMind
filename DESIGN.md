@@ -6,8 +6,10 @@ The next milestone is a reliable, observable single-agent diagnosis service.
 Multi-agent orchestration follows an evaluated single-agent baseline.
 The capabilities below are planned work unless explicitly marked current.
 
-Current code provides a `create_agent` tool loop, four read-only telemetry
-tools, normalized evidence, structured output, and one payment-failure case.
+Current code provides a `create_agent` tool loop, five read-only telemetry
+tools plus run-local evidence retrieval, normalized observations, structured
+output, and one live payment-failure case. Telemetry defaults to discovered MCP
+tools over Streamable HTTP; direct/stdio bindings are deprecated compatibility.
 S1 adds per-run state, a tool registry and tool-name allowlist, model/tool call
 budgets, identical-query limits, model/tool/run timeouts, completion checks,
 and structured JSONL events. API and evaluation use the same controls; the
@@ -96,6 +98,51 @@ model performs a bounded transformation without investigation tool access.
 Budget the full input, including tool schemas, and reserve response tokens.
 Distinguish estimates from provider usage. Measure evidence retention and
 diagnostic accuracy after compression.
+
+### MCP telemetry service and dynamic tool binding
+
+The telemetry service is a standalone package in `services/otel-telemetry-mcp`
+with its own dependency lock, configuration, HTTP entrypoint and Docker image.
+It imports no TraceMind runtime modules. The service owns backend clients, typed
+arguments, full tool guidance and normalized observation/reply schemas. TraceMind
+validates received JSON into its existing Evidence model; neither package needs
+the other installed. The wire schema is the compatibility boundary.
+
+HTTP is the default application path. `HttpMcpClient` initializes one SDK
+Streamable HTTP session and fetches paginated tool definitions with bounded
+count, page bytes and discovery time. The generic tool binder filters names by
+the existing run allowlist, uses server descriptions/schemas for LangChain and
+injects fixed investigation timestamps according to server schema annotations.
+No per-query implementation is used in this path. Local `read_evidence` is
+registered alongside the remote tools and cannot be replaced by discovery.
+
+Discovery runs inside diagnosis lifecycle/deadline handling, emits metadata
+events and finishes before model dispatch. It is setup rather than a model or
+query attempt. Local-only explanation and resumed finalization skip it. Query
+admission, shared attempts, retries, no-progress detection, evidence retention,
+context shaping and completion checks remain in the existing harness/workflow.
+A dedicated task owns all SDK context entry/exit; closing it releases the HTTP
+session without terminating the server. No automatic direct fallback is used.
+
+The server uses JSON RPC responses over Streamable HTTP, maintains MCP session
+connections rather than investigation state, and reuses backend HTTP pools.
+Only typed observations become Evidence; metadata and safe error replies do
+not. Both endpoints cap decoded replies. Server model keys, run databases,
+checkpoints, long-term memory and agent execution are absent.
+
+Deployment uses a separate Compose project joined to the Demo network, with
+only localhost:8012 published. The default scope is a local machine; remote
+hosting/authentication is not implemented. Direct clients, manually registered
+telemetry wrappers and the original stdio implementation remain deprecated
+compatibility/replay paths. Historical records keep their old transport label.
+This change does not establish multi-worker checkpoint ownership guarantees.
+
+Validation covers real HTTP discovery and execution, server-owned descriptions,
+application context binding, permissions, parallel budgets, retry accounting,
+response limits, timeout/cancellation, evidence filtering, local-only operation
+and scripted API/worker/evaluation execution. Container verification checks that
+TraceMind and LangChain are absent. Live telemetry probes are separate from
+model-quality evaluation, and offline replay remains in-process.
 
 ## 2. Run state and persistence
 
@@ -302,6 +349,7 @@ mock telemetry, plus relevant live scenarios. The following are planned gates.
 | S4: persistence (implemented for local queued runs) | Checkpoints, run store, resume/cancel, scheduling recovery | Restart retains evidence and budgets; concurrent resume is controlled; cancellation stops new work |
 | S5: evaluation and operations (evaluation increment implemented) | Broader cases, replay fixtures, metrics report, trace export, shared-service controls | Report accuracy, false completion, attempts, latency, usage/cost, and recovery; verify run isolation and trace coverage |
 | S6: optional memory (first increment implemented; real-model quality pending) | Human-confirmed records, structured scoped retrieval, immutable run snapshots, provenance and expiry | Frozen memory-on/off replay; reject stale/unconfirmed/same-incident records and keep evaluation labels outside runtime |
+| T1: independent telemetry MCP | Five server-defined tools discovered over Streamable HTTP; Docker deployment; direct/stdio deprecated | Real HTTP discovery/execution, harness gates, API/worker/evaluation wiring and container isolation; live-model quality remains unmeasured |
 
 S3 implements harness-owned retries, opt-in model fallback, bounded diagnosis
 repair, and observation-based no-progress detection, with injected-failure tests.
@@ -322,7 +370,8 @@ exact provider tokenizer. See README for configuration and limitations.
 Record code/model/tool versions and expand evaluation during each increment.
 Include missing telemetry, misleading upstream symptoms, conflicting evidence,
 and operational failures. Ground-truth evaluation stays outside the runtime
-completion gate. Multi-agent, MCP, and RL follow this baseline.
+completion gate. Multi-agent and RL follow this baseline; MCP telemetry is
+implemented as described above.
 
 ## Framework references
 

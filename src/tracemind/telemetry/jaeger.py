@@ -1,4 +1,4 @@
-"""Jaeger trace search and error-span evidence normalization."""
+"""Deprecated local client retained for explicit direct/replay callers."""
 
 from datetime import UTC, datetime
 from typing import Any
