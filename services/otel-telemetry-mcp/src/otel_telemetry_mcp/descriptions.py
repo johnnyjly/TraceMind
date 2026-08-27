@@ -69,7 +69,9 @@ DESCRIPTIONS = {
     ),
     'search_logs': (
         'Find OpenSearch logs for one service, optionally '
-        'matching text. Event time is preferred; when it is absent '
+        'matching text. Results are a bounded sample; '
+        'absence of a message does not prove absence of a fault. '
+        'Event time is preferred; when it is absent '
         'or zero, use observation time, marked by '
         'timestamp_source=observedTimestamp in evidence. Observation '
         'time is not proof of the exact event occurrence time.'
@@ -116,5 +118,13 @@ PARAMETER_DESCRIPTIONS = {
         ),
     },
     'search_logs': {
+        'service': (
+            'Exact telemetry service name. Not an operation name or '
+            'a list of services.'
+        ),
+        'text': (
+            'Optional log-body search terms. Omit or use null to apply '
+            'no body-text filter. Not a trace ID filter or a regex.'
+        ),
     },
 }

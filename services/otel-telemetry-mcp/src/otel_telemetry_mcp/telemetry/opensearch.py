@@ -132,11 +132,16 @@ class OpenSearchClient:
         summary = (
             body if isinstance(body, str) else json.dumps(body, sort_keys=True)
         )
+        body_attributes = {}
+        if isinstance(body, str) and not body.strip():
+            summary = "[Empty log body]"
+            body_attributes = {"body_empty": True, "original_body": body}
         severity = source.get("severity")
         if not isinstance(severity, dict):
             severity = {}
         attributes = {
             **time_attributes,
+            **body_attributes,
             "document_id": str(hit.get("_id", "")),
             "severity_text": severity.get("text"),
             "severity_number": severity.get("number"),

@@ -1,4 +1,4 @@
-"""Verify MCP log time selection without changing event-time semantics."""
+"""Verify MCP log normalization and timestamp provenance."""
 
 import asyncio
 import json
@@ -50,6 +50,28 @@ def test_valid_event_time_is_not_overridden_by_new_observation():
         "2026-10-07T18:19:48Z"), "shipping", None)
     assert item.observed_at == datetime(2024, 9, 1, tzinfo=UTC)
     assert "timestamp_source" not in item.attributes
+
+
+@pytest.mark.parametrize("body", ["", " \t\n"])
+def test_blank_body_preserves_log_identity_and_observation_time(body):
+    document = hit(body, None, "2024-09-01T00:30:00Z")
+    document["_id"] = "blank-log"
+    document["_source"].update({
+        "traceId": "a" * 32, "spanId": "b" * 16,
+        "severity": {"text": "Info", "number": 9},
+    })
+    item = OpenSearchClient._to_evidence(document, "orders", None)
+    assert item.summary == "[Empty log body]"
+    assert item.service == "orders"
+    assert item.query == "service=orders"
+    assert item.observed_at == datetime(2024, 9, 1, 0, 30, tzinfo=UTC)
+    assert item.attributes == {
+        "timestamp_source": "observedTimestamp",
+        "original_observed_timestamp": "2024-09-01T00:30:00Z",
+        "body_empty": True, "original_body": body,
+        "document_id": "blank-log", "severity_text": "Info",
+        "severity_number": 9, "trace_id": "a" * 32, "span_id": "b" * 16,
+    }
 
 
 @pytest.mark.parametrize("event_time, observed_time", [

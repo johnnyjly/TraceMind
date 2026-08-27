@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
 import socket
 import sys
@@ -21,6 +22,9 @@ from otel_telemetry_mcp.observations import Evidence  # noqa: E402
 from otel_telemetry_mcp.server import create_app  # noqa: E402
 from otel_telemetry_mcp.telemetry.errors import (  # noqa: E402
     TelemetryClientError,
+)
+from otel_telemetry_mcp.telemetry.opensearch import (  # noqa: E402
+    OpenSearchClient,
 )
 from tracemind.agent.harness import RunHarness, RunStopped  # noqa: E402
 from tracemind.agent.recovery import ToolUnavailable  # noqa: E402
@@ -199,6 +203,53 @@ def test_local_only_never_connects_and_remote_visibility_stays_authorized():
                     "search_logs", "read_evidence"}
             finally:
                 await client.aclose()
+    asyncio.run(exercise())
+
+
+def test_http_log_query_keeps_blank_and_nonblank_records():
+    class LogBackend(Backend):
+        """Exercise log normalization before SDK response serialization."""
+
+        async def search_logs(self, service, *, start, end, text=None):
+            def handler(request):
+                body = json.loads(request.content)
+                hits = []
+                if "@timestamp" in body["sort"][0]:
+                    hits = [{"_id": str(i), "_source": {
+                        "@timestamp": end.isoformat(), "body": value,
+                        "traceId": "a" * 32,
+                    }} for i, value in enumerate(
+                        ("", " \t", "request failed"))]
+                return httpx.Response(200, json={"hits": {"hits": hits}})
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler),
+            ) as http:
+                return await OpenSearchClient("http://backend", "logs", http)\
+                    .search_logs(service, start=start, end=end, text=text)
+
+    async def exercise():
+        async with http_server(LogBackend()) as url:
+            client = HttpMcpClient(url)
+            try:
+                reply = await client.call("search_logs", {
+                    "service": "orders", "start": START.isoformat(),
+                    "end": END.isoformat(),
+                })
+                items = reply.evidence
+                assert len(items) == 3
+                assert [item.summary for item in items] == [
+                    "[Empty log body]", "[Empty log body]", "request failed"]
+                assert [item.attributes["original_body"]
+                        for item in items[:2]] == ["", " \t"]
+                assert all(item.attributes["body_empty"] for item in items[:2])
+                assert "body_empty" not in items[2].attributes
+                assert all(item.attributes["trace_id"] == "a" * 32
+                           and item.service == "orders"
+                           and item.observed_at == END for item in items)
+            finally:
+                await client.aclose()
+
     asyncio.run(exercise())
 
 
