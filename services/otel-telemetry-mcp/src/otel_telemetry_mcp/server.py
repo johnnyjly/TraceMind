@@ -71,6 +71,14 @@ def create_server(settings: Settings, backend: TelemetryBackend | None = None):
             name=name, description=DESCRIPTIONS[name],
             inputSchema=schema(name, arguments),
             outputSchema=TelemetryReply.model_json_schema(),
+            _meta={
+                "tracemind/result-contract": "telemetry.v1",
+                "tracemind/preview-limit": {
+                    "query_metrics": 50, "discover_metrics": 1,
+                    "search_traces": 20, "get_trace_detail": 100,
+                    "search_logs": 100,
+                }[name],
+            },
             annotations=ToolAnnotations(readOnlyHint=True),
         ) for name, arguments in TOOL_ARGUMENTS.items()]
 

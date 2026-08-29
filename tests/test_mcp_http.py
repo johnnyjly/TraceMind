@@ -27,6 +27,7 @@ from tracemind.agent.service import DiagnosisService
 from tracemind.agent.runtime.tools import EvidenceCollector, create_mcp_tools
 from tracemind.config import Settings
 from tracemind.mcp.client import HttpMcpClient, open_telemetry_backend
+from tracemind.mcp.results import telemetry_reply
 from tracemind.models import Incident
 from tracemind.models.run import (
     RunLimits,
@@ -245,7 +246,7 @@ def test_http_log_query_keeps_blank_and_nonblank_records():
                     "service": "orders", "start": START.isoformat(),
                     "end": END.isoformat(),
                 })
-                items = reply.evidence
+                items = telemetry_reply(reply).evidence
                 assert len(items) == 3
                 assert [item.summary for item in items] == [
                     "[Empty log body]", "[Empty log body]", "request failed"]
@@ -403,7 +404,8 @@ def test_replay_tool_definitions_match_live_discovery():
                 await client.aclose()
 
         def contract(tools):
-            return {t.name: (t.description, t.inputSchema) for t in tools}
+            return {t.name: (t.description, t.inputSchema,
+                             t.outputSchema, t.meta) for t in tools}
         assert contract(discovered) == contract(recorded_tools())
 
     asyncio.run(exercise())

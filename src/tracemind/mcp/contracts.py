@@ -1,4 +1,4 @@
-"""Client-side validation of remote reply envelopes."""
+"""Telemetry domain envelopes, separate from the generic MCP wire result."""
 
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator

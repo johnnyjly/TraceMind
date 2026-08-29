@@ -2,10 +2,10 @@
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.incident import Incident
@@ -17,10 +17,10 @@ from tracemind.models.memory import (
 )
 
 
-ToolName = Literal[
-    "query_metrics", "search_traces", "get_trace_detail", "search_logs",
-    "read_evidence", "discover_metrics"
-]
+ToolName = Annotated[str, StringConstraints(
+    min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$",
+)]
+# Default grants for the Demo, rather than an exhaustive tool catalogue.
 TOOL_NAMES: tuple[ToolName, ...] = (
     "query_metrics", "search_traces", "get_trace_detail", "search_logs",
     "read_evidence", "discover_metrics"

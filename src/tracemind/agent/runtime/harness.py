@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 from tracemind.agent.errors import DiagnosisError
 from tracemind.agent.runtime.llm import MODEL_SERVICE_ERRORS
 from tracemind.agent.storage.io import run_io
+from tracemind.agent.workflow.tool_policy import resolve_tool_policy
 from tracemind.agent.runtime.recovery import (
     Failure,
     ModelCallFailed,
@@ -65,6 +66,9 @@ class RunHarness:
         file.
         """
         self.state = state
+        state.allowed_tools = resolve_tool_policy(
+            state.allowed_tools, purpose=state.purpose,
+        )
         self._started = monotonic()
         self._persist = persist
         self._is_cancelled = is_cancelled
@@ -426,8 +430,10 @@ class RunHarness:
     async def tool_call(
         self, name: str, arguments: dict[str, object],
         call: Callable[[], Awaitable[list[dict[str, object]]]],
+        *, evidence_result: bool = True, remote: bool = True,
+        retry_safe: bool = True,
     ) -> list[dict[str, object]]:
-        """Retry read-only queries and track progress without hiding errors."""
+        """Enforce admission and retry only operations declared safe."""
         self.authorize_tool(name)
         signature = hashlib.sha256(json.dumps(
             [name, arguments], sort_keys=True, separators=(",", ":")
@@ -448,9 +454,10 @@ class RunHarness:
                 try:
                     result = await self._tool_attempt(
                         name, signature, call, arguments,
+                        evidence_result=evidence_result, remote=remote,
                     )
                     for item in result:
-                        if "id" in item:
+                        if not evidence_result or "id" in item:
                             fingerprint = hashlib.sha256(json.dumps(
                                 item, sort_keys=True, default=str
                             ).encode()).hexdigest()
@@ -466,6 +473,7 @@ class RunHarness:
                     failure = classify_failure(exc)
                     if (
                         failure.retryable
+                        and retry_safe
                         and attempt < self.state.limits.retry_attempts
                     ):
                         await self._wait_retry(name, attempt, failure)
@@ -487,6 +495,7 @@ class RunHarness:
         self, name: str, signature: str,
         call: Callable[[], Awaitable[list[dict[str, object]]]],
         arguments: dict[str, object],
+        *, evidence_result: bool, remote: bool,
     ) -> list[dict[str, object]]:
         """Reserve a shared attempt slot and record one backend execution."""
         self.authorize_tool(name)
@@ -494,19 +503,18 @@ class RunHarness:
             self.begin_finalization(StopReason.TOOL_BUDGET)
             raise InvestigationClosed()
         self.state.tool_calls[name] = self.state.tool_calls.get(name, 0) + 1
-        if name != "read_evidence":
+        if remote:
             self.state.backend_attempts += 1
         span = uuid4()
         parent = self._model_span or self.state.id
         started = monotonic()
         display = {}
-        if name in {"search_traces", "search_logs", "discover_metrics"}:
-            service = arguments.get("service")
-            if isinstance(service, str):
-                display["service"] = "".join(
-                    c for c in service if c.isprintable()
-                )[:120]
-        if name != "read_evidence":
+        service = arguments.get("service")
+        if isinstance(service, str):
+            display["service"] = "".join(
+                c for c in service if c.isprintable()
+            )[:120]
+        if remote:
             display.update({
                 "investigation_start": (
                     self.state.investigation_start.isoformat()
@@ -521,12 +529,14 @@ class RunHarness:
                 await self.checkpoint()
                 result = await call()
             self.check_active()
+            retained_ids = {str(key) for key in self.state.evidence_ids}
             self.emit("tool.completed", span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"tool": name, "result_count": len(result),
                             "evidence_ids": [
                                 str(item["id"]) for item in result
-                                if "id" in item
+                                if evidence_result and "id" in item
+                                and str(item["id"]) in retained_ids
                             ]})
             return result
         except TimeoutError:

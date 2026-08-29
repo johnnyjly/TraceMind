@@ -40,6 +40,14 @@ tenant isolation are not provided by this local Compose setup.
 
 ## Tool contract
 
+Every tool declares the domain envelope through
+`_meta["tracemind/result-contract"] = "telemetry.v1"`, alongside its standard
+MCP output schema. This lets consumers select an observation adapter without
+matching tool names. `_meta["tracemind/preview-limit"]` suggests the number of
+retained-observation previews to show; consumers enforce their own limits.
+These fields describe results and do not grant execution permissions. Other
+MCP clients may ignore them and use the standard content/output schema.
+
 | Tool | Required arguments | Optional arguments |
 |---|---|---|
 | query_metrics | expression, at | — |

@@ -1,5 +1,6 @@
 """Adapt existing synthetic observations to the production MCP tool binder."""
 from otel_telemetry_mcp.contracts import TOOL_ARGUMENTS
+from mcp.types import CallToolResult
 from otel_telemetry_mcp.telemetry.errors import (
     TelemetryClientError as ServerError,
 )
@@ -56,10 +57,13 @@ class FixtureToolClient:
         except ServerError as exc:
             raise TelemetryClientError(str(exc)) from exc.__cause__
         if name == 'discover_metrics':
-            return TelemetryReply(metadata=result)
-        return TelemetryReply(evidence=[
-            Evidence.model_validate(i.model_dump()) for i in result
-        ])
+            reply = TelemetryReply(metadata=result)
+        else:
+            reply = TelemetryReply(evidence=[
+                Evidence.model_validate(i.model_dump()) for i in result
+            ])
+        return CallToolResult(content=[], structuredContent=reply.model_dump(
+            mode='json', exclude_none=True))
 
 
 def bind_fixture_tools(prometheus, jaeger, opensearch, **kwargs):

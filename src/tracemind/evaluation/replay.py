@@ -8,7 +8,7 @@ import httpx
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from mcp.types import Tool
+from mcp.types import CallToolResult, Tool
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from tracemind.agent.memory.lookup import evaluation_memory
@@ -94,14 +94,15 @@ class ReplayTelemetry:
     async def discover_tools(self) -> list[Tool]:
         return recorded_tools()
 
-    async def call(self, name: str, arguments: dict) -> TelemetryReply:
+    async def call(self, name: str, arguments: dict) -> CallToolResult:
         arguments = {k: v for k, v in arguments.items()
                      if k not in {"start", "end", "at"}}
         if name == "search_logs":
             arguments.setdefault("text", None)
         result = await self._respond(
             "query" if name == "query_metrics" else name, arguments)
-        return TelemetryReply(evidence=result)
+        return CallToolResult(content=[], structuredContent=TelemetryReply(
+            evidence=result).model_dump(mode="json", exclude_none=True))
 
 
 def recorded_tools() -> list[Tool]:

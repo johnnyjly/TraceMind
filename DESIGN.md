@@ -137,6 +137,24 @@ injects fixed investigation timestamps according to server schema annotations.
 No per-query implementation is used in this path. Local `read_evidence` is
 registered alongside the remote tools and cannot be replaced by discovery.
 
+Tool names are validated strings; the six existing names are default grants,
+not a closed registry. The pure workflow policy intersects run/application
+grants with task restrictions and optional trusted Agent grants. It persists
+the resulting names in the existing run snapshot, with no database migration.
+The model sees only admitted tools, and the harness repeats admission checks
+for execution and retries. Future child-Agent grants must remain subsets of
+the investigation grants. Multi-agent orchestration and shared budget ownership
+are separate work.
+
+The transport returns standard MCP results without tool-name dispatch. The
+telemetry adapter is selected by the versioned result contract in tool `_meta`;
+the exact legacy TelemetryReply output schema is also accepted. Domain
+observations retain their existing validation, filtering, storage and citation
+rules. Generic text/JSON is reference material, never automatically Evidence,
+even if it contains IDs or resembles an observation. Generic results do not
+receive stored-evidence compression indexes or implicit retries. Server result
+contracts and preview hints describe handling; they cannot authorize tools.
+
 Discovery runs inside diagnosis lifecycle/deadline handling, emits metadata
 events and finishes before model dispatch. It is setup rather than a model or
 query attempt. Local-only explanation and resumed finalization skip it. Query

@@ -15,6 +15,7 @@ from tracemind.models.run import (
     ToolName,
 )
 from tracemind.models.storage import RunConflict, StoredRun
+from tracemind.agent.workflow.tool_policy import resolve_tool_policy
 
 
 def plan_follow_up(
@@ -61,10 +62,7 @@ def plan_follow_up(
         learning_policy=memory_policy,
         investigation_start=start, investigation_end=end,
         limits=limits.model_copy(deep=True),
-        allowed_tools=(tuple(t for t in allowed_tools
-                             if t == "read_evidence")
-                       if purpose is RunPurpose.EXPLAIN
-                       else allowed_tools),
+        allowed_tools=resolve_tool_policy(allowed_tools, purpose=purpose),
         status=RunStatus.QUEUED,
     )
     return state, evidence

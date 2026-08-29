@@ -7,6 +7,7 @@ from mcp.types import CallToolResult, TextContent
 import pytest
 
 from tracemind.mcp.client import HttpMcpClient
+from tracemind.mcp.results import telemetry_reply
 from tracemind.telemetry.errors import RemoteTelemetryError
 
 
@@ -15,8 +16,8 @@ from tracemind.telemetry.errors import RemoteTelemetryError
     ({
         'evidence': [],
         'metadata': {}}, False, 'query_metrics', 'malformed_reply'),
-    ({'metadata': {}}, False, 'query_metrics', 'malformed_reply'),
-    ({'evidence': []}, False, 'discover_metrics', 'malformed_reply'),
+    ({'evidence': 'not a list'}, False, 'query_metrics', 'malformed_reply'),
+    ({'metadata': []}, False, 'discover_metrics', 'malformed_reply'),
     ({'evidence': []}, True, 'query_metrics', 'malformed_reply'),
     ({'error': {'category': 'invalid_request', 'status_code': 400}}, True,
      'query_metrics', 'invalid_request'),
@@ -39,8 +40,11 @@ def test_invalid_reply_cannot_become_observations(
     async def connect():
         return Session()
     monkeypatch.setattr(client, '_connect', connect)
+
+    async def exercise():
+        return telemetry_reply(await client.call(tool, {}))
     with pytest.raises(RemoteTelemetryError) as caught:
-        asyncio.run(client.call(tool, {}))
+        asyncio.run(exercise())
     assert caught.value.category == category
 
 

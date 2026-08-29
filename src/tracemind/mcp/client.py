@@ -11,11 +11,10 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
-from mcp.types import Tool
+from mcp.types import CallToolResult, Tool
 from pydantic import ValidationError
 
 from tracemind.config import Settings
-from tracemind.mcp.contracts import TelemetryReply
 from tracemind.telemetry.errors import RemoteTelemetryError
 
 
@@ -29,7 +28,7 @@ class ToolClient(Protocol):
 
     async def discover_tools(self) -> list[Tool]: ...
 
-    async def call(self, name: str, arguments: dict) -> TelemetryReply: ...
+    async def call(self, name: str, arguments: dict) -> CallToolResult: ...
 
 
 class HttpMcpClient:
@@ -65,8 +64,8 @@ class HttpMcpClient:
             raise RemoteTelemetryError("transport_closed") from self._error
         return session
 
-    async def call(self, name: str, arguments: dict) -> TelemetryReply:
-        """Validate typed replies; reconnect and retries are not implicit."""
+    async def call(self, name: str, arguments: dict) -> CallToolResult:
+        """Return bounded MCP content; domain adaptation belongs to binding."""
         session = await self._connect()
         try:
             result = await session.call_tool(name, arguments)
@@ -86,17 +85,7 @@ class HttpMcpClient:
             raise RemoteTelemetryError("malformed_reply") from exc
         if len(result.model_dump_json().encode()) > self.max_bytes:
             raise RemoteTelemetryError("response_limit")
-        try:
-            reply = TelemetryReply.model_validate(result.structuredContent)
-        except ValidationError as exc:
-            raise RemoteTelemetryError("malformed_reply") from exc
-        if reply.error is not None:
-            raise RemoteTelemetryError(**reply.error.model_dump())
-        if result.isError:
-            raise RemoteTelemetryError("malformed_reply")
-        if (name == "discover_metrics") != (reply.metadata is not None):
-            raise RemoteTelemetryError("malformed_reply")
-        return reply
+        return result
 
     async def aclose(self) -> None:
         """Close the transport owner, including interrupted initialization."""

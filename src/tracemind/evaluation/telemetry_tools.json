@@ -25,6 +25,179 @@
       ],
       "title": "MetricQuery",
       "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Evidence": {
+          "description": "Observation with its source, time, query provenance, and backend\ndetails.",
+          "properties": {
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/EvidenceSource"
+            },
+            "summary": {
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "title": "Observed At",
+              "type": "string"
+            },
+            "service": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Service"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Query"
+            },
+            "attributes": {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "title": "Attributes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "source",
+            "summary",
+            "observed_at"
+          ],
+          "title": "Evidence",
+          "type": "object"
+        },
+        "EvidenceSource": {
+          "description": "Telemetry source category of a normalized observation.",
+          "enum": [
+            "metric",
+            "trace",
+            "log"
+          ],
+          "title": "EvidenceSource",
+          "type": "string"
+        },
+        "JsonValue": {},
+        "RemoteFailure": {
+          "additionalProperties": false,
+          "description": "Transfer safe retry classification, excluding backend error text.",
+          "properties": {
+            "category": {
+              "title": "Category",
+              "type": "string"
+            },
+            "retryable": {
+              "default": false,
+              "title": "Retryable",
+              "type": "boolean"
+            },
+            "status_code": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status Code"
+            },
+            "retry_after": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retry After"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "title": "RemoteFailure",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Return exactly one observation list, metadata object or safe failure.",
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TelemetryReply",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "_meta": {
+      "tracemind/result-contract": "telemetry.v1",
+      "tracemind/preview-limit": 50
     }
   },
   {
@@ -89,6 +262,179 @@
       ],
       "title": "MetricDiscovery",
       "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Evidence": {
+          "description": "Observation with its source, time, query provenance, and backend\ndetails.",
+          "properties": {
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/EvidenceSource"
+            },
+            "summary": {
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "title": "Observed At",
+              "type": "string"
+            },
+            "service": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Service"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Query"
+            },
+            "attributes": {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "title": "Attributes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "source",
+            "summary",
+            "observed_at"
+          ],
+          "title": "Evidence",
+          "type": "object"
+        },
+        "EvidenceSource": {
+          "description": "Telemetry source category of a normalized observation.",
+          "enum": [
+            "metric",
+            "trace",
+            "log"
+          ],
+          "title": "EvidenceSource",
+          "type": "string"
+        },
+        "JsonValue": {},
+        "RemoteFailure": {
+          "additionalProperties": false,
+          "description": "Transfer safe retry classification, excluding backend error text.",
+          "properties": {
+            "category": {
+              "title": "Category",
+              "type": "string"
+            },
+            "retryable": {
+              "default": false,
+              "title": "Retryable",
+              "type": "boolean"
+            },
+            "status_code": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status Code"
+            },
+            "retry_after": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retry After"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "title": "RemoteFailure",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Return exactly one observation list, metadata object or safe failure.",
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TelemetryReply",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "_meta": {
+      "tracemind/result-contract": "telemetry.v1",
+      "tracemind/preview-limit": 1
     }
   },
   {
@@ -122,6 +468,179 @@
       ],
       "title": "TraceSearch",
       "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Evidence": {
+          "description": "Observation with its source, time, query provenance, and backend\ndetails.",
+          "properties": {
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/EvidenceSource"
+            },
+            "summary": {
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "title": "Observed At",
+              "type": "string"
+            },
+            "service": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Service"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Query"
+            },
+            "attributes": {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "title": "Attributes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "source",
+            "summary",
+            "observed_at"
+          ],
+          "title": "Evidence",
+          "type": "object"
+        },
+        "EvidenceSource": {
+          "description": "Telemetry source category of a normalized observation.",
+          "enum": [
+            "metric",
+            "trace",
+            "log"
+          ],
+          "title": "EvidenceSource",
+          "type": "string"
+        },
+        "JsonValue": {},
+        "RemoteFailure": {
+          "additionalProperties": false,
+          "description": "Transfer safe retry classification, excluding backend error text.",
+          "properties": {
+            "category": {
+              "title": "Category",
+              "type": "string"
+            },
+            "retryable": {
+              "default": false,
+              "title": "Retryable",
+              "type": "boolean"
+            },
+            "status_code": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status Code"
+            },
+            "retry_after": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retry After"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "title": "RemoteFailure",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Return exactly one observation list, metadata object or safe failure.",
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TelemetryReply",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "_meta": {
+      "tracemind/result-contract": "telemetry.v1",
+      "tracemind/preview-limit": 20
     }
   },
   {
@@ -143,6 +662,179 @@
       ],
       "title": "TraceDetail",
       "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Evidence": {
+          "description": "Observation with its source, time, query provenance, and backend\ndetails.",
+          "properties": {
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/EvidenceSource"
+            },
+            "summary": {
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "title": "Observed At",
+              "type": "string"
+            },
+            "service": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Service"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Query"
+            },
+            "attributes": {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "title": "Attributes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "source",
+            "summary",
+            "observed_at"
+          ],
+          "title": "Evidence",
+          "type": "object"
+        },
+        "EvidenceSource": {
+          "description": "Telemetry source category of a normalized observation.",
+          "enum": [
+            "metric",
+            "trace",
+            "log"
+          ],
+          "title": "EvidenceSource",
+          "type": "string"
+        },
+        "JsonValue": {},
+        "RemoteFailure": {
+          "additionalProperties": false,
+          "description": "Transfer safe retry classification, excluding backend error text.",
+          "properties": {
+            "category": {
+              "title": "Category",
+              "type": "string"
+            },
+            "retryable": {
+              "default": false,
+              "title": "Retryable",
+              "type": "boolean"
+            },
+            "status_code": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status Code"
+            },
+            "retry_after": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retry After"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "title": "RemoteFailure",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Return exactly one observation list, metadata object or safe failure.",
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TelemetryReply",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "_meta": {
+      "tracemind/result-contract": "telemetry.v1",
+      "tracemind/preview-limit": 100
     }
   },
   {
@@ -190,6 +882,179 @@
       ],
       "title": "LogSearch",
       "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Evidence": {
+          "description": "Observation with its source, time, query provenance, and backend\ndetails.",
+          "properties": {
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/EvidenceSource"
+            },
+            "summary": {
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "title": "Observed At",
+              "type": "string"
+            },
+            "service": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Service"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Query"
+            },
+            "attributes": {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "title": "Attributes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "source",
+            "summary",
+            "observed_at"
+          ],
+          "title": "Evidence",
+          "type": "object"
+        },
+        "EvidenceSource": {
+          "description": "Telemetry source category of a normalized observation.",
+          "enum": [
+            "metric",
+            "trace",
+            "log"
+          ],
+          "title": "EvidenceSource",
+          "type": "string"
+        },
+        "JsonValue": {},
+        "RemoteFailure": {
+          "additionalProperties": false,
+          "description": "Transfer safe retry classification, excluding backend error text.",
+          "properties": {
+            "category": {
+              "title": "Category",
+              "type": "string"
+            },
+            "retryable": {
+              "default": false,
+              "title": "Retryable",
+              "type": "boolean"
+            },
+            "status_code": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status Code"
+            },
+            "retry_after": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retry After"
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "title": "RemoteFailure",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Return exactly one observation list, metadata object or safe failure.",
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TelemetryReply",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "_meta": {
+      "tracemind/result-contract": "telemetry.v1",
+      "tracemind/preview-limit": 100
     }
   }
 ]

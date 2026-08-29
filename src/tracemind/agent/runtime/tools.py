@@ -1,8 +1,7 @@
-"""Read-only telemetry tool bindings and run-local evidence collection."""
+"""Authorized MCP/local tool bindings and run-local evidence collection."""
 
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 from time import monotonic
@@ -15,31 +14,19 @@ from pydantic import Field
 from tracemind.agent.workflow.context import json_text
 from tracemind.agent.runtime.harness import RunHarness
 from tracemind.mcp.client import ToolClient
+from tracemind.mcp.contracts import TelemetryReply
+from tracemind.mcp.results import (
+    reference_content, telemetry_reply, uses_telemetry_contract,
+)
 from tracemind.models import Evidence, EvidenceSource
 from tracemind.models.run import StopReason, ToolName
 from tracemind.telemetry.errors import RemoteTelemetryError
 
 
-@dataclass(frozen=True)
-class ToolSpec:
-    """Describe a tool preview limit and its capability label."""
-
-    name: ToolName
-    max_results: int
-    capability: str = "telemetry.read"
-
-
-TOOL_REGISTRY = {
-    spec.name: spec
-    for spec in (
-        ToolSpec("query_metrics", 50),
-        ToolSpec("discover_metrics", 1, capability="telemetry.metadata.read"),
-        ToolSpec("search_traces", 20),
-        ToolSpec("get_trace_detail", 100),
-        ToolSpec("search_logs", 100),
-        ToolSpec("read_evidence", 20, capability="evidence.read"),
-    )
-}
+LOCAL_TOOL_NAMES = frozenset({"read_evidence"})
+RESERVED_TOOL_NAMES = LOCAL_TOOL_NAMES | {"DiagnosisDraft"}
+EVIDENCE_PAGE_SIZE = 20
+MAX_EVIDENCE_PREVIEWS = 100
 
 
 class EvidenceCapacityError(Exception):
@@ -129,7 +116,7 @@ class EvidenceCollector:
             ids = [key for key, item in self._evidence.items()
                    if (service is None or item.service == service)
                    and (source is None or item.source == source)]
-            end = offset + TOOL_REGISTRY["read_evidence"].max_results
+            end = offset + EVIDENCE_PAGE_SIZE
             result = [self.preview(key) for key in ids[offset:end]]
             result.append({
                 "total_evidence": len(ids),
@@ -186,15 +173,21 @@ def _query_executor(
     async def execute(
         name: ToolName,
         arguments: dict[str, object],
-        call: Callable[[], Awaitable[Sequence[Evidence]]],
+        call: Callable[[], Awaitable[TelemetryReply]],
+        *, max_results: int,
     ) -> tuple[list[dict], dict]:
         """Execute a query and return previews with a compact index."""
-        spec = TOOL_REGISTRY[name]
+        evidence_result = False
 
         async def collect() -> list[dict]:
             """Store observations, select previews, and trace retention."""
-            observations = await call()
+            nonlocal evidence_result
+            reply = await call()
             harness.check_active()
+            if reply.metadata is not None:
+                return [reply.metadata]
+            evidence_result = True
+            observations = reply.evidence
             retained = [item for item in observations if (
                 item.observed_at.utcoffset() is not None
                 and start <= item.observed_at <= end
@@ -217,7 +210,7 @@ def _query_executor(
                 harness.stop(StopReason.CONTEXT_LIMIT)
             finally:
                 harness.state.evidence_ids = [e.id for e in collector.evidence]
-            result = previews[:spec.max_results]
+            result = previews[:max_results]
             omitted = len(previews) - len(result)
             if omitted:
                 result.append({
@@ -253,7 +246,7 @@ def _query_executor(
             return result
 
         result = await harness.tool_call(name, arguments, collect)
-        return result, context_index(result)
+        return result, (context_index(result) if evidence_result else {})
 
     return execute
 
@@ -287,7 +280,7 @@ def create_local_tools(
         result = await harness.tool_call(
             "read_evidence",
             {"evidence_id": evidence_id, "offset": offset,
-             "service": service, "source": source}, read
+             "service": service, "source": source}, read, remote=False,
         )
         artifact = context_index(result)
         artifact["detail_page"] = evidence_id is not None
@@ -308,7 +301,7 @@ async def create_mcp_tools(
     expand the local allowlist or replace a local tool.
     """
     local = create_local_tools(collector, harness)
-    allowed = set(harness.state.allowed_tools) - {t.name for t in local}
+    allowed = set(harness.state.allowed_tools) - LOCAL_TOOL_NAMES
     if not allowed or harness.finalization_reason is not None:
         return local
     started = monotonic()
@@ -337,7 +330,13 @@ def bind_mcp_tools(
 ) -> list[BaseTool]:
     """Bind discovered or recorded definitions using identical run policy."""
     local = create_local_tools(collector, harness)
-    allowed = set(harness.state.allowed_tools) - {t.name for t in local}
+    allowed = set(harness.state.allowed_tools) - LOCAL_TOOL_NAMES
+    names = [t.name for t in definitions]
+    if (len(names) != len(set(names))
+            or RESERVED_TOOL_NAMES.intersection(names)):
+        harness.emit("mcp.discovery.failed", data={
+            "category": "tool_contract_mismatch"})
+        harness.stop(StopReason.TOOL_ERROR)
     selected = {t.name: t for t in definitions if t.name in allowed}
     if not allowed.issubset(selected):
         harness.emit("mcp.discovery.failed", data={
@@ -371,6 +370,20 @@ def bind_mcp_tools(
                 "omitted from your input schema; do not provide them."
             )
         name = definition.name
+        telemetry = uses_telemetry_contract(definition)
+        if not telemetry:
+            description += (
+                "\n\nResults are reference material, not retained incident "
+                "observations. IDs in these results are not diagnosis "
+                "evidence IDs."
+            )
+        max_results = (definition.meta or {}).get(
+            "tracemind/preview-limit", MAX_EVIDENCE_PREVIEWS,
+        )
+        if type(max_results) is not int or not (
+            1 <= max_results <= MAX_EVIDENCE_PREVIEWS
+        ):
+            raise RemoteTelemetryError("tool_contract_mismatch")
 
         async def invoke(**arguments):
             """Execute an admitted RPC and apply run-local result handling."""
@@ -381,20 +394,23 @@ def bind_mcp_tools(
                         "invalid_request", status_code=400)
                 return await client.call(name, {**arguments, **injected})
 
-            if TOOL_REGISTRY[name].capability == "telemetry.metadata.read":
-                async def metadata():
-                    """Keep server metadata outside the evidence store."""
-                    reply = await remote()
-                    return [reply.metadata]
-                result = await harness.tool_call(name, arguments, metadata)
-                return result, context_index(result)
+            if telemetry:
+                async def observations():
+                    """Validate an explicitly declared telemetry envelope."""
+                    return telemetry_reply(await remote())
 
-            async def observations():
-                """Return validated observations for the shared collector."""
-                reply = await remote()
-                return reply.evidence
+                return await execute(name, arguments, observations,
+                                     max_results=max_results)
 
-            return await execute(name, arguments, observations)
+            async def reference():
+                """Keep generic text/JSON outside incident evidence storage."""
+                return reference_content(await remote())
+
+            result = await harness.tool_call(
+                name, arguments, reference, evidence_result=False,
+                retry_safe=False,
+            )
+            return result, {}
 
         return StructuredTool.from_function(
             coroutine=invoke, name=name, description=description,

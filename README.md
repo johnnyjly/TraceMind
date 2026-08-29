@@ -231,6 +231,45 @@ retains `telemetry_transport=mcp`; old stored records still default to `direct`.
 The HTTP server uses JSON responses supported by Streamable HTTP; TraceMind's
 user-facing SSE progress is a separate API channel.
 
+### Tool grants and extensible MCP results
+
+`TRACEMIND_AGENT_ALLOWED_TOOLS` is an explicit grant list, not an enumeration
+of supported tools. Names must contain 1–128 ASCII letters, digits, dots,
+underscores or hyphens. To use another text/JSON tool, expose it on the
+configured MCP endpoint and add its name to this list; no client-side registry
+entry is needed. A granted remote tool missing from discovery fails setup
+explicitly. Duplicate names and collisions with local tools or the internal
+`DiagnosisDraft` output tool are rejected.
+
+The workflow resolves application grants, task restrictions and optional
+trusted Agent grants by intersection. Explanation runs keep only
+`read_evidence`. The concrete grants are stored in `RunState.allowed_tools`,
+used to filter model-visible tools, and checked again by the harness on each
+attempt. Neither model output nor server annotations grant access. Future
+Agent roles can narrow these grants using the same policy function; role
+orchestration and shared budgets across Agents are not implemented yet.
+
+The HTTP client returns standard MCP `CallToolResult` objects. The binder
+selects domain handling from an explicitly declared result contract:
+
+- The telemetry service declares `_meta["tracemind/result-contract"]` as
+  `"telemetry.v1"`. Its typed observations still pass time-window filtering,
+  deduplication, retention limits and citation validation. Metadata stays
+  outside incident evidence. Existing servers declaring the exact legacy
+  `TelemetryReply` output schema remain compatible without the marker.
+- Other tools return text or structured JSON as reference material. Structured
+  content takes precedence over duplicate text. Reference IDs are not evidence
+  IDs and cannot establish a grounded diagnosis on their own. No evidence
+  retrieval index is generated for these results.
+
+The telemetry server also declares bounded preview sizes through
+`_meta["tracemind/preview-limit"]`; TraceMind enforces a maximum of 100. Missing
+preview hints default to 100. Existing local evidence pages remain at 20.
+Generic tools have no implicit retries because their side effects are unknown;
+telemetry queries retain the existing retry policy. Errors are classified
+without exposing remote error bodies. Multimedia/resource results, additional
+MCP endpoints and automatic permission delegation are outside this increment.
+
 ### Runtime boundaries and offline replay
 
 The old direct clients, manually registered telemetry tools and stdio
