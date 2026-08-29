@@ -1,20 +1,24 @@
 """Restart, lease, cancellation, and HTTP contracts for persistent runs."""
 
 import asyncio
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import sqlite3
 
-import pytest
 from httpx import ASGITransport, AsyncClient
+import pytest
 
-from tracemind.agent.persistence import RunConflict, RunRepository
+from tracemind.agent.storage.run_repository import RunRepository
 from tracemind.api.app import (
-    app, get_agent_runner, get_request_settings, get_run_repository,
+    app,
+    get_agent_runner,
+    get_request_settings,
+    get_run_repository,
 )
 from tracemind.config import Settings
 from tracemind.models import Evidence, EvidenceSource, Incident
 from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
+from tracemind.models.storage import RunConflict
 
 
 START = datetime(2024, 9, 1, tzinfo=UTC)

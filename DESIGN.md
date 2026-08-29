@@ -9,7 +9,7 @@ The capabilities below are planned work unless explicitly marked current.
 Current code provides a `create_agent` tool loop, five read-only telemetry
 tools plus run-local evidence retrieval, normalized observations, structured
 output, and one live payment-failure case. Telemetry defaults to discovered MCP
-tools over Streamable HTTP; direct/stdio bindings are deprecated compatibility.
+tools over Streamable HTTP; direct/stdio execution paths have been removed.
 S1 adds per-run state, a tool registry and tool-name allowlist, model/tool call
 budgets, identical-query limits, model/tool/run timeouts, completion checks,
 and structured JSONL events. API and evaluation use the same controls; the
@@ -154,8 +154,9 @@ checkpoints, long-term memory and agent execution are absent.
 Deployment uses a separate Compose project joined to the Demo network, with
 only localhost:8012 published. The default scope is a local machine; remote
 hosting/authentication is not implemented. Direct clients, manually registered
-telemetry wrappers and the original stdio implementation remain deprecated
-compatibility/replay paths. Historical records keep their old transport label.
+telemetry wrappers and the original stdio implementation have been removed.
+Offline replay binds recorded MCP definitions to synthetic replies through the
+same tool binder. Historical records keep their old transport label.
 This change does not establish multi-worker checkpoint ownership guarantees.
 
 Validation covers real HTTP discovery and execution, server-owned descriptions,
@@ -370,7 +371,7 @@ mock telemetry, plus relevant live scenarios. The following are planned gates.
 | S4: persistence (implemented for local queued runs) | Checkpoints, run store, resume/cancel, scheduling recovery | Restart retains evidence and budgets; concurrent resume is controlled; cancellation stops new work |
 | S5: evaluation and operations (evaluation increment implemented) | Broader cases, replay fixtures, metrics report, trace export, shared-service controls | Report accuracy, false completion, attempts, latency, usage/cost, and recovery; verify run isolation and trace coverage |
 | S6: optional memory (first increment implemented; real-model quality pending) | Human-confirmed records, structured scoped retrieval, immutable run snapshots, provenance and expiry | Frozen memory-on/off replay; reject stale/unconfirmed/same-incident records and keep evaluation labels outside runtime |
-| T1: independent telemetry MCP | Five server-defined tools discovered over Streamable HTTP; Docker deployment; direct/stdio deprecated | Real HTTP discovery/execution, harness gates, API/worker/evaluation wiring and container isolation; live-model quality remains unmeasured |
+| T1: independent telemetry MCP | Five server-defined tools discovered over Streamable HTTP; Docker deployment; direct/stdio removed | Real HTTP discovery/execution, harness gates, API/worker/evaluation wiring and container isolation; live-model quality remains unmeasured |
 
 S3 implements harness-owned retries, opt-in model fallback, bounded diagnosis
 repair, and observation-based no-progress detection, with injected-failure tests.
@@ -403,3 +404,25 @@ implemented as described above.
   authorization, evidence checks, and unified budgets remain application work.
 - [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
   distinguishes thread checkpoints from cross-thread stores.
+
+### Storage and service boundaries
+
+`models/result.py` and `models/storage.py` own result/snapshot contracts without
+importing the execution service. `agent/storage/database.py` owns schema initialization
+and transactions, `persistence.py` owns run lifecycle storage, and
+`memory_repository.py` owns memory/feedback transactions. Pure follow-up
+selection and permission policy lives in `followup.py`; memory provenance and
+feedback planning live in `memory_policy.py`. Source-run reads,
+lease checks and feedback receipts stay in one SQLite transaction.
+
+`runner.py` adapts the LangChain graph; `preparation.py` builds historical and
+user context; `validation.py` validates citations. `service.py` coordinates
+these steps and owns terminal cleanup. `factory.py` assembles API, worker and
+live evaluation dependencies, with explicit evaluation memory overrides.
+
+Storage I/O runs off the event loop. The harness reserves attempt counters
+without yielding, commits a copied snapshot under a per-run async lock, then
+executes external work. Results and rejected/skipped tool transitions are
+committed before returning to the graph. An interrupted storage await drains
+the underlying thread operation before propagating cancellation. API stores
+are initialized once per app/database path in the request thread pool.

@@ -9,21 +9,25 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 from langchain.agents.structured_output import (
-    MultipleStructuredOutputsError, StructuredOutputError,
+    MultipleStructuredOutputsError,
+    StructuredOutputError,
 )
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
-    AIMessage, HumanMessage, SystemMessage, ToolMessage,
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from tracemind.agent.context import json_text, select_context
+from tracemind.agent.workflow.context import json_text, select_context
 from tracemind.agent.errors import DiagnosisError, DiagnosisValidationError
-from tracemind.agent.harness import InvestigationClosed, RunHarness
-from tracemind.agent.recovery import ModelCallFailed, ToolUnavailable
+from tracemind.agent.runtime.harness import InvestigationClosed, RunHarness
+from tracemind.agent.runtime.recovery import ModelCallFailed, ToolUnavailable
 from tracemind.models.run import StopReason
 
 
@@ -409,55 +413,60 @@ class HarnessMiddleware(AgentMiddleware):
         agent for bounded repair.
         """
         try:
-            # Also intercept hallucinated/hidden tool names before dispatch.
-            self.harness.authorize_tool(request.tool_call["name"])
-            result = await handler(request)
-        except InvestigationClosed:
-            reason = self.harness.finalization_reason
-            self.harness.emit(
-                "tool.skipped", parent_span_id=self.harness.state.id,
-                data={"tool": request.tool_call["name"],
-                      "reason": reason.value},
-            )
-            return ToolMessage(
-                content=json.dumps({"error": {
-                    "category": "investigation_closed",
-                    "reason": reason.value,
-                    "message": (
-                        "This tool was not executed. Investigation is closed; "
-                        "submit a final diagnosis using existing evidence."
-                    ),
-                }}),
-                tool_call_id=request.tool_call["id"],
-                name=request.tool_call["name"], status="error",
-            )
-        except ToolUnavailable as exc:
-            self.harness.emit(
-                "tool.unavailable", parent_span_id=self.harness.state.id,
-                data={"tool": request.tool_call["name"],
-                      "category": exc.failure.category,
-                      "status_code": exc.failure.status_code},
-            )
-            return ToolMessage(
-                content=json.dumps({"error": {
-                    "category": exc.failure.category,
-                    "status_code": exc.failure.status_code,
-                    "message": (
-                        "Query failed; correct arguments or use another "
-                        "source. "
-                        "No evidence was returned by this call."
-                    ),
-                }}),
-                tool_call_id=request.tool_call["id"],
-                name=request.tool_call["name"], status="error",
-            )
-        if isinstance(result, ToolMessage) and result.status == "error":
-            self.harness.emit(
-                "tool.rejected",
-                parent_span_id=self.harness.state.id,
-                data={
-                    "tool": request.tool_call["name"],
-                    "reason": "invalid_arguments",
-                },
-            )
-        return result
+            try:
+                # Also intercept hallucinated/hidden tool
+                # names before dispatch.
+                self.harness.authorize_tool(request.tool_call["name"])
+                result = await handler(request)
+            except InvestigationClosed:
+                reason = self.harness.finalization_reason
+                self.harness.emit(
+                    "tool.skipped", parent_span_id=self.harness.state.id,
+                    data={"tool": request.tool_call["name"],
+                          "reason": reason.value},
+                )
+                return ToolMessage(
+                    content=json.dumps({"error": {
+                        "category": "investigation_closed",
+                        "reason": reason.value,
+                        "message": (
+                            "This tool was not executed. "
+                            "Investigation is closed; "
+                            "submit a final diagnosis using existing evidence."
+                        ),
+                    }}),
+                    tool_call_id=request.tool_call["id"],
+                    name=request.tool_call["name"], status="error",
+                )
+            except ToolUnavailable as exc:
+                self.harness.emit(
+                    "tool.unavailable", parent_span_id=self.harness.state.id,
+                    data={"tool": request.tool_call["name"],
+                          "category": exc.failure.category,
+                          "status_code": exc.failure.status_code},
+                )
+                return ToolMessage(
+                    content=json.dumps({"error": {
+                        "category": exc.failure.category,
+                        "status_code": exc.failure.status_code,
+                        "message": (
+                            "Query failed; correct arguments or use another "
+                            "source. "
+                            "No evidence was returned by this call."
+                        ),
+                    }}),
+                    tool_call_id=request.tool_call["id"],
+                    name=request.tool_call["name"], status="error",
+                )
+            if isinstance(result, ToolMessage) and result.status == "error":
+                self.harness.emit(
+                    "tool.rejected",
+                    parent_span_id=self.harness.state.id,
+                    data={
+                        "tool": request.tool_call["name"],
+                        "reason": "invalid_arguments",
+                    },
+                )
+            return result
+        finally:
+            await self.harness.checkpoint(check_cancel=False)

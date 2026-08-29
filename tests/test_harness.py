@@ -1,29 +1,28 @@
 import asyncio
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 import inspect
 import json
 import os
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 import httpx
 from langchain_core.exceptions import ModelAPIError
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import Field
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from openai import APIConnectionError
+from pydantic import Field
+import pytest
+from tool_fixtures import FixtureToolClient, bind_fixture_tools
 
-from tracemind.agent import (
-    DiagnosisError,
-    DiagnosisService,
-    LangChainAgentRunner,
-)
-from tracemind.agent.harness import RunHarness, RunStopped
-from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
+from tracemind.agent.errors import DiagnosisError
+from tracemind.agent.runtime.harness import RunHarness, RunStopped
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
+from tracemind.agent.runtime.tools import EvidenceCollector
 from tracemind.models import (
     DiagnosisStatus,
     Evidence,
@@ -31,11 +30,11 @@ from tracemind.models import (
     Incident,
 )
 from tracemind.models.run import (
-    TOOL_NAMES,
     RunLimits,
     RunState,
     RunStatus,
     StopReason,
+    TOOL_NAMES,
 )
 from tracemind.telemetry.errors import TelemetryClientError
 
@@ -144,8 +143,10 @@ class Telemetry:
 
 def make_service(model, telemetry, tmp_path, **kwargs):
     return DiagnosisService(
-        telemetry, telemetry, telemetry, LangChainAgentRunner(model),
-        event_directory=tmp_path, **kwargs,
+        LangChainAgentRunner(model),
+        tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
+        event_directory=tmp_path,
+        **kwargs,
     )
 
 
@@ -253,7 +254,7 @@ def test_executor_rechecks_policy_even_when_tool_was_previously_visible():
         )
         harness = RunHarness(state)
         telemetry = Telemetry()
-        tools = create_telemetry_tools(
+        tools = bind_fixture_tools(
             telemetry, telemetry, telemetry, start=START, end=END,
             collector=EvidenceCollector(), harness=harness,
         )
@@ -461,7 +462,7 @@ def test_old_only_tool_result_is_metadata_not_citable_evidence(tmp_path):
 
 
 @pytest.mark.parametrize("trace_id", ["a" * 16, "a" * 32])
-def test_invalid_trace_id_is_repaired_before_dispatch(tmp_path, trace_id):
+def test_invalid_trace_id_is_repaired_before_backend_query(tmp_path, trace_id):
     invalid = "5b0b3a1e-0000-0000-0000-000000000000"
 
     class Traces(Telemetry):
@@ -475,7 +476,7 @@ def test_invalid_trace_id_is_repaired_before_dispatch(tmp_path, trace_id):
             return tool_call("get_trace_detail", {"trace_id": invalid})
         if calls == 2:
             assert messages[-1].status == "error"
-            assert "trace_id" in messages[-1].content
+            assert "invalid_request" in messages[-1].content
             return tool_call("get_trace_detail", {"trace_id": trace_id})
         return diagnosis(messages)
 
@@ -484,8 +485,10 @@ def test_invalid_trace_id_is_repaired_before_dispatch(tmp_path, trace_id):
                                    telemetry, tmp_path))
     assert run.state.stop_reason is StopReason.COMPLETED
     assert telemetry.calls == [trace_id]
-    assert run.tool_calls == {"get_trace_detail": 1}
-    assert any(e.kind == "tool.rejected" for e in run.state.events)
+    assert run.tool_calls == {"get_trace_detail": 2}
+    assert any(e.kind == "tool.unavailable" and
+               e.data["category"] == "invalid_request"
+               for e in run.state.events)
 
 
 def test_backend_errors_preserve_safe_trace_without_raw_data(tmp_path):
@@ -563,7 +566,9 @@ def test_invalid_tool_arguments_are_traced_and_bounded(tmp_path):
     assert run.state.stop_reason is StopReason.MODEL_BUDGET
     assert telemetry.calls == []
     assert sum(
-        event.kind == "tool.rejected" for event in run.state.events
+        event.kind == "tool.unavailable" and
+        event.data["category"] == "invalid_request"
+        for event in run.state.events
     ) == 2
 
 

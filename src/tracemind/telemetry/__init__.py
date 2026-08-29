@@ -1,13 +1,4 @@
-"""Backend clients that normalize metrics, traces, and logs as evidence."""
+"""Remote telemetry failure types.
 
-from tracemind.telemetry.errors import TelemetryClientError
-from tracemind.telemetry.jaeger import JaegerClient
-from tracemind.telemetry.opensearch import OpenSearchClient
-from tracemind.telemetry.prometheus import PrometheusClient
-
-__all__ = [
-    "JaegerClient",
-    "OpenSearchClient",
-    "PrometheusClient",
-    "TelemetryClientError",
-]
+Query implementation lives in the MCP service.
+"""

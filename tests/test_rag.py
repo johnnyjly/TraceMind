@@ -162,7 +162,7 @@ def test_model_requires_injection_and_forwards_keyword_intent():
     "google", "openai", "deepseek", "unsupported-provider",
 ])
 def test_cli_chooses_provider_lazily_and_reuses_client(monkeypatch, provider):
-    from tracemind.agent import llm
+    from tracemind.agent.runtime import llm
     from tracemind import config
 
     original_settings = config.Settings

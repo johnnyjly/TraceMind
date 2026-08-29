@@ -1,51 +1,61 @@
 """FastAPI routes and request-scoped diagnosis dependencies."""
 
 import asyncio
-import hashlib
-import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+import hashlib
+import json
+from threading import Lock
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-import httpx
 from fastapi import (
-    Depends, FastAPI, Header, HTTPException, Query, Request, Response, status,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Header,
+    Query,
+    Request,
+    Response,
+    status,
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from tracemind.agent import (
-    DiagnosisError,
-    DiagnosisService,
-    LangChainAgentRunner,
-    ModelConfigurationError,
-    create_chat_model,
+from tracemind.agent.errors import DiagnosisError, ModelConfigurationError
+from tracemind.agent.factory import build_runner, build_service
+from tracemind.agent.storage.memory_repository import (
+    MemoryNotFound,
+    MemoryRepository,
 )
-from tracemind.agent.persistence import (
-    MemoryNotFound, MemoryRepository, RunConflict, RunNotFound, RunRepository,
-    StoredRun,
-)
-from tracemind.api.schemas import (
-    DiagnosisRequest, FollowUpRequest, InvestigationCreated,
-    InvestigationResponse, InvestigationTurn, RunStatusResponse,
-)
+from tracemind.agent.storage.run_repository import RunRepository
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
 from tracemind.api.progress import stream_progress
-from tracemind.agent.llm import create_fallback_model
+from tracemind.api.schemas import (
+    DiagnosisRequest,
+    FollowUpRequest,
+    InvestigationCreated,
+    InvestigationResponse,
+    InvestigationTurn,
+    RunStatusResponse,
+)
 from tracemind.config import Settings, get_settings
 from tracemind.mcp.client import open_telemetry_backend
 from tracemind.models import Diagnosis, Incident
 from tracemind.models.memory import (
-    GuidanceRecord, GuidanceRevision,
-    MemoryCreate, MemoryPolicy, MemoryRecord, MemoryRevision, MemoryScope,
-    MemorySnapshot, ScopeName,
+    GuidanceRecord,
+    GuidanceRevision,
+    MemoryCreate,
+    MemoryPolicy,
+    MemoryRecord,
+    MemoryRevision,
+    MemoryScope,
+    MemorySnapshot,
+    ScopeName,
 )
 from tracemind.models.run import RunPurpose, RunState, RunStatus, StopReason
-from tracemind.telemetry import (
-    JaegerClient,
-    OpenSearchClient,
-    PrometheusClient,
-)
+from tracemind.models.storage import RunConflict, RunNotFound, StoredRun
 
 
 class HealthResponse(BaseModel):
@@ -59,17 +69,14 @@ async def get_request_settings() -> Settings:
     return get_settings()
 
 
-async def get_agent_runner(
+def get_agent_runner(
     settings: Annotated[Settings, Depends(get_request_settings)],
 ) -> LangChainAgentRunner:
     """Build a model runner; report missing provider configuration as HTTP
     503.
     """
     try:
-        return LangChainAgentRunner(
-            create_chat_model(settings),
-            fallback_model=create_fallback_model(settings),
-        )
+        return build_runner(settings)
     except ModelConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -78,44 +85,42 @@ async def get_agent_runner(
 
 
 async def get_diagnosis_service(
+    request: Request,
     settings: Annotated[Settings, Depends(get_request_settings)],
     runner: Annotated[LangChainAgentRunner, Depends(get_agent_runner)],
 ) -> AsyncIterator[DiagnosisService]:
     """Yield a configured service and close its HTTP client after the
     request.
     """
-    async with (
-        httpx.AsyncClient(timeout=20) as http_client,
-        open_telemetry_backend(settings) as telemetry_backend,
-    ):
-        memory = (MemoryRepository(RunRepository(settings.agent_run_database))
-                  if settings.agent_memory_enabled else None)
-        yield DiagnosisService(
-            PrometheusClient(str(settings.prometheus_url), http_client),
-            JaegerClient(str(settings.jaeger_url), http_client),
-            OpenSearchClient(
-                str(settings.opensearch_url),
-                settings.opensearch_logs_index,
-                http_client,
-            ),
-            runner,
-            recursion_limit=settings.agent_recursion_limit,
-            limits=settings.run_limits,
-            allowed_tools=settings.agent_allowed_tools,
-            event_directory=settings.agent_trace_directory,
+    from tracemind.agent.storage.io import run_io
+    async with open_telemetry_backend(settings) as tool_client:
+        memory = (
+            MemoryRepository(
+                (await run_io(get_run_repository, settings, request)).database
+            )
+            if settings.agent_memory_enabled else None
+        )
+        yield build_service(
+            settings, runner, tool_client,
             memory_policy=settings.memory_policy,
             memory_lookup=memory.snapshot if memory is not None else None,
-            guidance_lookup=(memory.guidance_snapshot
-                             if memory is not None else None),
-            telemetry_backend=telemetry_backend,
+            guidance_lookup=(
+                memory.guidance_snapshot if memory is not None else None
+            ),
         )
 
 
-async def get_run_repository(
+def get_run_repository(
     settings: Annotated[Settings, Depends(get_request_settings)],
+    request: Request,
 ) -> RunRepository:
-    """Open the configured SQLite run store for lifecycle requests."""
-    return RunRepository(settings.agent_run_database)
+    """Initialize each app-owned store once, in the request thread pool."""
+    with request.app.state.repository_lock:
+        stores = request.app.state.repositories
+        path = settings.agent_run_database
+        if path not in stores:
+            stores[path] = RunRepository(path)
+        return stores[path]
 
 
 def run_status(record: StoredRun) -> RunStatusResponse:
@@ -157,8 +162,11 @@ def create_app() -> FastAPI:
         version="0.1.0",
     )
 
+    application.state.repositories = {}
+    application.state.repository_lock = Lock()
+
     @application.get("/health", response_model=HealthResponse, tags=["system"])
-    async def health() -> HealthResponse:
+    def health() -> HealthResponse:
         """Return process liveness without checking model or backend
         availability.
         """
@@ -217,12 +225,11 @@ def create_app() -> FastAPI:
         "/api/v1/runs", status_code=status.HTTP_202_ACCEPTED,
         response_model=RunStatusResponse, tags=["runs"],
     )
-    async def create_run(
+    def create_run(
         request: DiagnosisRequest,
         response: Response,
         settings: Annotated[Settings, Depends(get_request_settings)],
         repository: Annotated[RunRepository, Depends(get_run_repository)],
-        _runner: Annotated[LangChainAgentRunner, Depends(get_agent_runner)],
         idempotency_key: Annotated[
             str | None, Header(alias="Idempotency-Key", max_length=128)
         ] = None,
@@ -253,7 +260,7 @@ def create_app() -> FastAPI:
         "/api/v1/runs/{run_id}", response_model=RunStatusResponse,
         tags=["runs"],
     )
-    async def get_run(
+    def get_run(
         run_id: UUID,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> RunStatusResponse:
@@ -266,7 +273,7 @@ def create_app() -> FastAPI:
             ) from exc
 
     @application.get("/api/v1/runs/{run_id}/result", tags=["runs"])
-    async def get_run_result(
+    def get_run_result(
         run_id: UUID,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> dict:
@@ -287,7 +294,7 @@ def create_app() -> FastAPI:
         "/api/v1/runs/{run_id}/cancel", status_code=202,
         response_model=RunStatusResponse, tags=["runs"],
     )
-    async def cancel_run(
+    def cancel_run(
         run_id: UUID,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> RunStatusResponse:
@@ -303,7 +310,7 @@ def create_app() -> FastAPI:
         "/api/v1/runs/{run_id}/resume", status_code=202,
         response_model=RunStatusResponse, tags=["runs"],
     )
-    async def resume_run(
+    def resume_run(
         run_id: UUID,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> RunStatusResponse:
@@ -321,11 +328,10 @@ def create_app() -> FastAPI:
         "/api/v1/investigations", status_code=202,
         response_model=InvestigationCreated, tags=["investigations"],
     )
-    async def create_investigation(
+    def create_investigation(
         request: DiagnosisRequest, response: Response,
         settings: Annotated[Settings, Depends(get_request_settings)],
         repository: Annotated[RunRepository, Depends(get_run_repository)],
-        _runner: Annotated[LangChainAgentRunner, Depends(get_agent_runner)],
         idempotency_key: Annotated[
             str | None, Header(alias="Idempotency-Key", max_length=128)
         ] = None,
@@ -359,7 +365,7 @@ def create_app() -> FastAPI:
         "/api/v1/investigations/{investigation_id}",
         response_model=InvestigationResponse, tags=["investigations"],
     )
-    async def get_investigation(
+    def get_investigation(
         investigation_id: UUID,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
         offset: Annotated[int, Query(ge=0)] = 0,
@@ -391,11 +397,10 @@ def create_app() -> FastAPI:
         "/api/v1/investigations/{investigation_id}/messages", status_code=202,
         response_model=RunStatusResponse, tags=["investigations"],
     )
-    async def follow_up(
+    def follow_up(
         investigation_id: UUID, request: FollowUpRequest, response: Response,
         settings: Annotated[Settings, Depends(get_request_settings)],
         repository: Annotated[RunRepository, Depends(get_run_repository)],
-        _runner: Annotated[LangChainAgentRunner, Depends(get_agent_runner)],
         idempotency_key: Annotated[
             str | None, Header(alias="Idempotency-Key", max_length=128)
         ] = None,
@@ -457,13 +462,13 @@ def create_app() -> FastAPI:
 
     @application.post("/api/v1/memories", status_code=201,
                       response_model=MemoryRecord, tags=["memory"])
-    async def confirm_memory(
+    def confirm_memory(
         request: MemoryCreate,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> MemoryRecord:
         """Attest a resolution manually; no diagnostic tool writes memories."""
         try:
-            return MemoryRepository(repository).confirm(request)
+            return MemoryRepository(repository.database).confirm(request)
         except RunNotFound as exc:
             raise HTTPException(404, "source run not found") from exc
         except RunConflict as exc:
@@ -471,17 +476,19 @@ def create_app() -> FastAPI:
 
     @application.get("/api/v1/memories", response_model=list[MemoryRecord],
                      tags=["memory"])
-    async def list_memories(
+    def list_memories(
         repository: Annotated[RunRepository, Depends(get_run_repository)],
         offset: Annotated[int, Query(ge=0)] = 0,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> list[MemoryRecord]:
         """Page confirmations, including expired and revoked entries."""
-        return MemoryRepository(repository).list(offset=offset, limit=limit)
+        return MemoryRepository(repository.database).list(
+            offset=offset,
+            limit=limit)
 
     @application.get("/api/v1/memories/snapshot",
                      response_model=MemorySnapshot, tags=["memory"])
-    async def export_memory_snapshot(
+    def export_memory_snapshot(
         environment: Annotated[ScopeName, Query()],
         deployment_version: Annotated[ScopeName, Query()],
         service: Annotated[list[ScopeName], Query(
@@ -493,32 +500,32 @@ def create_app() -> FastAPI:
         policy = MemoryPolicy(scope=MemoryScope(
             environment=environment, deployment_version=deployment_version,
         ), max_records=limit)
-        return MemoryRepository(repository).snapshot(
+        return MemoryRepository(repository.database).snapshot(
             policy, Incident(title="Memory export", description="Snapshot",
                              affected_services=service), datetime.now(UTC),
         )
 
     @application.get("/api/v1/memories/{memory_id}",
                      response_model=MemoryRecord, tags=["memory"])
-    async def get_memory(
+    def get_memory(
         memory_id: UUID,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> MemoryRecord:
         """Inspect confirmation and provenance without agent retrieval."""
         try:
-            return MemoryRepository(repository).get(memory_id)
+            return MemoryRepository(repository.database).get(memory_id)
         except MemoryNotFound as exc:
             raise HTTPException(404, "memory not found") from exc
 
     @application.put("/api/v1/memories/{memory_id}",
                      response_model=MemoryRecord, tags=["memory"])
-    async def revise_memory(
+    def revise_memory(
         memory_id: UUID, request: MemoryRevision,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> MemoryRecord:
         """Reconfirm a correction with the revision the reviewer inspected."""
         try:
-            return MemoryRepository(repository).confirm(
+            return MemoryRepository(repository.database).confirm(
                 request, memory_id=memory_id,
                 expected_revision=request.expected_revision,
             )
@@ -529,14 +536,14 @@ def create_app() -> FastAPI:
 
     @application.post("/api/v1/memories/{memory_id}/revoke",
                       response_model=MemoryRecord, tags=["memory"])
-    async def revoke_memory(
+    def revoke_memory(
         memory_id: UUID,
         expected_revision: Annotated[int, Query(ge=1)],
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> MemoryRecord:
         """Remove a disputed resolution from future retrieval."""
         try:
-            return MemoryRepository(repository).revoke(
+            return MemoryRepository(repository.database).revoke(
                 memory_id, expected_revision=expected_revision,
             )
         except MemoryNotFound as exc:
@@ -546,14 +553,14 @@ def create_app() -> FastAPI:
 
     @application.delete("/api/v1/memories/{memory_id}", status_code=204,
                         tags=["memory"])
-    async def delete_memory(
+    def delete_memory(
         memory_id: UUID,
         expected_revision: Annotated[int, Query(ge=1)],
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> Response:
         """Delete current content; prior run snapshots remain auditable."""
         try:
-            MemoryRepository(repository).delete(
+            MemoryRepository(repository.database).delete(
                 memory_id, expected_revision=expected_revision,
             )
         except RunConflict as exc:
@@ -562,24 +569,24 @@ def create_app() -> FastAPI:
 
     @application.get("/api/v1/guidance", response_model=list[GuidanceRecord],
                      tags=["memory"])
-    async def list_guidance(
+    def list_guidance(
         repository: Annotated[RunRepository, Depends(get_run_repository)],
         offset: Annotated[int, Query(ge=0)] = 0,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> list[GuidanceRecord]:
         """Review the local user's inferred preferences and skills."""
-        return MemoryRepository(repository).list_guidance(
+        return MemoryRepository(repository.database).list_guidance(
             offset=offset, limit=limit)
 
     @application.put("/api/v1/guidance/{guidance_id}",
                      response_model=GuidanceRecord, tags=["memory"])
-    async def revise_guidance(
+    def revise_guidance(
         guidance_id: UUID, request: GuidanceRevision,
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> GuidanceRecord:
         """Correct an inferred instruction with optimistic concurrency."""
         try:
-            return MemoryRepository(repository).revise_guidance(
+            return MemoryRepository(repository.database).revise_guidance(
                 guidance_id, request)
         except MemoryNotFound as exc:
             raise HTTPException(404, "guidance not found") from exc
@@ -588,13 +595,13 @@ def create_app() -> FastAPI:
 
     @application.delete("/api/v1/guidance/{guidance_id}", status_code=204,
                         tags=["memory"])
-    async def delete_guidance(
+    def delete_guidance(
         guidance_id: UUID, expected_revision: Annotated[int, Query(ge=1)],
         repository: Annotated[RunRepository, Depends(get_run_repository)],
     ) -> Response:
         """Remove an inferred instruction from future retrieval."""
         try:
-            MemoryRepository(repository).delete_guidance(
+            MemoryRepository(repository.database).delete_guidance(
                 guidance_id, expected_revision=expected_revision)
         except RunConflict as exc:
             raise HTTPException(409, str(exc)) from exc

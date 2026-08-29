@@ -5,21 +5,29 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from tool_fixtures import FixtureToolClient
 
-from tracemind.agent import DiagnosisRun, DiagnosisService
 from tracemind.agent.errors import ModelConfigurationError
+from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
 from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.evaluation.replay import (
-    ReplayFixture, ReplayTelemetry, run_replay_evaluation,
+    ReplayFixture,
+    ReplayTelemetry,
+    run_replay_evaluation,
 )
 from tracemind.evaluation.runner import (
-    run_live_evaluation, run_service_evaluation,
+    run_live_evaluation,
+    run_service_evaluation,
 )
 from tracemind.evaluation.summary import (
-    TokenPricing, build_batch_report, summarize_reports, trace_issues,
+    TokenPricing,
+    build_batch_report,
+    summarize_reports,
+    trace_issues,
 )
 from tracemind.models import Diagnosis, DiagnosisStatus
+from tracemind.models.result import DiagnosisRun
 from tracemind.models.run import RunStatus
 
 
@@ -141,8 +149,11 @@ def test_cancelled_evaluation_retains_terminal_trace(tmp_path: Path):
             await asyncio.Future()
 
     telemetry = ReplayTelemetry([])
-    service = DiagnosisService(telemetry, telemetry, telemetry,
-                               WaitingRunner(), event_directory=tmp_path)
+    service = DiagnosisService(
+        WaitingRunner(),
+        tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
+        event_directory=tmp_path,
+    )
 
     async def execute():
         task = asyncio.create_task(run_service_evaluation(
@@ -168,7 +179,7 @@ def test_configuration_failure_is_reported(tmp_path: Path, monkeypatch):
     def unavailable(_settings):
         raise ModelConfigurationError("synthetic missing key")
 
-    monkeypatch.setattr("tracemind.evaluation.runner.create_chat_model",
+    monkeypatch.setattr("tracemind.agent.factory.create_chat_model",
                         unavailable)
     report = asyncio.run(run_live_evaluation(
         fixture.case, settings(tmp_path),
@@ -189,6 +200,7 @@ def test_batch_groups_measurement_modes(tmp_path: Path):
     live.run_state.id = uuid4()
     batch = build_batch_report([scripted, live])
     assert set(batch.groups) == {
-        "scripted_replay/scripted:scripted-replay", "live/test:real-model",
+        "scripted_replay/scripted:scripted-replay/telemetry:replay",
+        "live/test:real-model/telemetry:replay",
     }
     assert batch.summary.runs == 2

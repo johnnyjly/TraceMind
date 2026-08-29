@@ -1,1 +1,1 @@
-"""Discovered HTTP MCP tools and deprecated local stdio compatibility."""
+"""Discovered tools over Streamable HTTP MCP."""

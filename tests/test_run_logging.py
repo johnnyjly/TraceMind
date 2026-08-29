@@ -5,7 +5,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 
-from tracemind.agent.harness import RunHarness
+from tracemind.agent.runtime.harness import RunHarness
 from tracemind.models import Incident
 from tracemind.models.run import RunLimits, RunState
 
@@ -24,13 +24,13 @@ def make_harness() -> RunHarness:
 
 def test_harness_logs_structured_metadata_only_when_debug_enabled(caplog):
     """Terminal filtering must not affect run state events."""
-    caplog.set_level(logging.INFO, logger="tracemind.agent.harness")
+    caplog.set_level(logging.INFO, logger="tracemind.agent.runtime.harness")
     harness = make_harness()
     harness.emit("tool.started", data={"arguments_sha256": "digest"})
     assert len(harness.state.events) == 2
     assert not caplog.records
 
-    caplog.set_level(logging.DEBUG, logger="tracemind.agent.harness")
+    caplog.set_level(logging.DEBUG, logger="tracemind.agent.runtime.harness")
     harness.emit("tool.completed", data={"result_count": 1})
     assert len(caplog.records) == 1
     record = caplog.records[0]
@@ -47,7 +47,7 @@ def test_cli_selects_terminal_event_detail_without_third_party_debug():
 import logging
 import runpy
 from datetime import UTC, datetime, timedelta
-from tracemind.agent.harness import RunHarness
+from tracemind.agent.runtime.harness import RunHarness
 from tracemind.models import Incident
 from tracemind.models.run import RunLimits, RunState
 configure = runpy.run_path('scripts/run_evaluation.py')['configure_logging']
@@ -71,4 +71,4 @@ logging.getLogger('httpx').debug('third_party_payload')
     assert "run.started" not in result.stderr
     assert "third_party_payload" not in result.stderr
     assert "INFO tracemind.evaluation.cli [run=- parent=-]" in result.stderr
-    assert "DEBUG tracemind.agent.harness [run=" in result.stderr
+    assert "DEBUG tracemind.agent.runtime.harness [run=" in result.stderr

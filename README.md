@@ -201,9 +201,10 @@ source; containerization does not prevent later changes.
 
 ### Try a diagnosis
 
-An existing `.env` with `TRACEMIND_TELEMETRY_TRANSPORT=direct` overrides the new
-code default. These explicit launch commands select HTTP MCP without editing
-that file:
+HTTP MCP is the only live telemetry path. Remove an old
+`TRACEMIND_TELEMETRY_TRANSPORT=direct` setting or change it to `mcp`; `direct`
+is now rejected during configuration validation. Backend URLs belong to the
+independent service’s `TELEMETRY_MCP_` configuration. Start the API and worker:
 
 ```bash
 TRACEMIND_TELEMETRY_TRANSPORT=mcp uv run uvicorn tracemind.api.app:app --reload
@@ -230,15 +231,35 @@ retains `telemetry_transport=mcp`; old stored records still default to `direct`.
 The HTTP server uses JSON responses supported by Streamable HTTP; TraceMind's
 user-facing SSE progress is a separate API channel.
 
-### Deprecated compatibility paths
+### Runtime boundaries and offline replay
 
-`transport=direct`, the old local telemetry wrappers and the stdio server/client
-remain for explicit legacy callers and offline replay. They are not the default
-HTTP MCP execution path; adding a server tool does not require another local
-query implementation. The allowlist must still authorize any new capability.
-Offline scripted replay does not exercise MCP. HTTP integration uses the real
-SDK/server with scripted models and fake backends; it does not measure live-model
-accuracy. Network authentication/multi-tenant access and distributed diagnosis
+The old direct clients, manually registered telemetry tools and stdio
+server/client have been removed. Production diagnosis uses tools discovered
+from the independent HTTP MCP service. Offline replay uses recorded tool
+schemas and the same binder, with `telemetry_transport=replay`; it does not
+contact a server or measure live-model accuracy. A contract test compares the
+recorded definitions with live HTTP discovery. Old stored `direct` labels
+remain readable, without re-enabling their execution path.
+
+API, worker and live evaluation share service assembly. Queue endpoints do not
+construct model clients or require model credentials; the worker validates
+provider configuration when it executes the run. Synchronous diagnosis still
+validates its own model configuration before execution.
+
+Each API app initializes a run store once per database path, in the request
+thread pool. SQLite transactions and worker storage callbacks execute outside
+the event loop. Harness admission reserves budget in memory before yielding,
+then awaits a serialized durable snapshot before calling a provider/tool.
+Tool completion/rejection is committed before the graph advances. Cancellation
+waits for an in-flight storage operation before terminal cleanup, so a late
+progress write cannot overtake finalization. Lock waits can still delay the
+request or run that needs the database, but do not block unrelated async work.
+Run and memory repositories share explicit transactions; feedback lease checks,
+revision checks and receipts remain atomic in the same database. There is no
+schema migration in this refactor.
+
+HTTP integration uses the real SDK/server with scripted models and fake
+backends. Network authentication/multi-tenant access and distributed diagnosis
 workers remain outside this local deployment.
 
 Submit a bounded investigation window to `POST /api/v1/diagnoses`:

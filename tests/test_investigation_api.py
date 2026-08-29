@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from httpx import ASGITransport, AsyncClient
 
-from tracemind.agent.persistence import RunRepository
+from tracemind.agent.storage.run_repository import RunRepository
 from tracemind.api.app import (
     app, get_agent_runner, get_request_settings, get_run_repository,
 )

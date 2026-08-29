@@ -1,25 +1,37 @@
 """Check human confirmation, snapshot durability and held-out evaluation."""
 
 import asyncio
-import json
-import sqlite3
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 
-import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
+import pytest
 from test_harness import (
-    END, START, ScriptedModel, Telemetry, diagnosis, tool_call,
+    END,
+    START,
+    ScriptedModel,
+    Telemetry,
+    diagnosis,
+    tool_call,
 )
+from tool_fixtures import FixtureToolClient
 
-from tracemind.agent.context import memory_context
-from tracemind.agent.memory import evaluation_memory, frozen_memory_lookup
-from tracemind.agent.persistence import (
-    MemoryNotFound, MemoryRepository, RunConflict, RunRepository,
+from tracemind.agent.workflow.context import memory_context
+from tracemind.agent.memory.lookup import (
+    evaluation_memory,
+    frozen_memory_lookup,
 )
-from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
+from tracemind.agent.storage.memory_repository import (
+    MemoryNotFound,
+    MemoryRepository,
+)
+from tracemind.agent.storage.run_repository import RunRepository
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
 from tracemind.agent.worker import RunWorker
 from tracemind.api.app import app, get_run_repository
 from tracemind.api.progress import readable_event
@@ -27,15 +39,28 @@ from tracemind.config import Settings
 from tracemind.evaluation.replay import ReplayFixture, run_replay_evaluation
 from tracemind.evaluation.summary import build_batch_report, trace_issues
 from tracemind.models import (
-    Diagnosis, DiagnosisStatus, Evidence, EvidenceSource, Incident,
+    Diagnosis,
+    DiagnosisStatus,
+    Evidence,
+    EvidenceSource,
+    Incident,
 )
 from tracemind.models.memory import (
-    MemoryCreate, MemoryPolicy, MemoryRecord, MemoryRevision, MemoryScope,
+    MemoryCreate,
+    MemoryPolicy,
+    MemoryRecord,
+    MemoryRevision,
+    MemoryScope,
     MemorySnapshot,
 )
 from tracemind.models.run import (
-    RunEvent, RunLimits, RunPurpose, RunState, RunStatus,
+    RunEvent,
+    RunLimits,
+    RunPurpose,
+    RunState,
+    RunStatus,
 )
+from tracemind.models.storage import RunConflict
 
 
 SCOPE = MemoryScope(environment="test", deployment_version="v1")
@@ -112,7 +137,7 @@ def corpus(records=None):
 def test_manual_confirmation_scope_lifecycle_and_revision(tmp_path):
     runs = RunRepository(tmp_path / "runs.sqlite3")
     source = completed_source(runs)
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     assert library.list() == []  # Completion alone never promotes a memory.
     record = library.confirm(confirmation(source))
     assert record.source_incident_id == source.incident.id
@@ -120,7 +145,10 @@ def test_manual_confirmation_scope_lifecycle_and_revision(tmp_path):
     now = datetime.now(UTC)
     snapshot = library.snapshot(POLICY, TARGET, now)
     assert snapshot.records == [record]
-    assert MemoryRepository(RunRepository(runs.path)).get(record.id) == record
+    assert (
+        MemoryRepository((RunRepository(runs.path)).database).get(record.id)
+        == record
+    )
     for incident in (source.incident,
                      TARGET.model_copy(update={"affected_services": ["cart"]}),
                      TARGET.model_copy(update={"affected_services": []})):
@@ -131,7 +159,7 @@ def test_manual_confirmation_scope_lifecycle_and_revision(tmp_path):
                                     now).records
     assert not library.snapshot(POLICY, TARGET, record.expires_at).records
     # A source run with saved deployment scope cannot be re-labelled.
-    with runs._connect() as connection:
+    with runs.database.transaction() as connection:
         source.memory_policy = POLICY
         connection.execute("UPDATE runs SET state_json=? WHERE id=?", (
             source.model_dump_json(), str(source.id),
@@ -161,7 +189,7 @@ def test_manual_confirmation_scope_lifecycle_and_revision(tmp_path):
 def test_confirmation_rejects_unreviewed_or_invalid_provenance(tmp_path):
     runs = RunRepository(tmp_path / "runs.sqlite3")
     source = completed_source(runs, cited=False)
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     with pytest.raises(RunConflict, match="completed diagnosis"):
         library.confirm(confirmation(source))
     source = completed_source(runs)
@@ -175,7 +203,7 @@ def test_confirmation_rejects_unreviewed_or_invalid_provenance(tmp_path):
         confirmation(source, confirmed_by=" ")
     with pytest.raises(ValidationError):
         confirmation(source, services=["checkout", "checkout"])
-    with runs._connect() as connection:
+    with runs.database.transaction() as connection:
         state = source.model_copy(deep=True)
         state.diagnosis.evidence_ids = [uuid4()]
         connection.execute("UPDATE runs SET state_json=?,result_json=? "
@@ -201,7 +229,7 @@ def test_v2_migration_preserves_existing_run(tmp_path):
         connection.execute("PRAGMA user_version=2")
     reopened = RunRepository(runs.path)
     assert reopened.get(source.id) == original
-    assert MemoryRepository(reopened).list() == []
+    assert MemoryRepository(reopened.database).list() == []
     with sqlite3.connect(runs.path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
     assert RunRepository(runs.path).get(source.id) == original
@@ -243,7 +271,7 @@ def test_frozen_filter_and_prompt_bounds():
 def test_worker_freezes_before_model_and_reuses_snapshot(tmp_path):
     runs = RunRepository(tmp_path / "runs.sqlite3")
     source = completed_source(runs)
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     record = library.confirm(confirmation(source))
     state = RunState(incident=TARGET, investigation_start=START,
                      limits=RunLimits(), allowed_tools=("query_metrics",),
@@ -269,9 +297,12 @@ def test_worker_freezes_before_model_and_reuses_snapshot(tmp_path):
     # The worker's current settings are off; captured run policy remains on.
     worker = RunWorker(settings, repository=runs,
                        service_factory=lambda saver, client: DiagnosisService(
-                           Telemetry(), Telemetry(), Telemetry(),
                            LangChainAgentRunner(model, checkpointer=saver),
-                           memory_lookup=library.snapshot))
+                           tool_client=FixtureToolClient(
+                               Telemetry(), Telemetry(), Telemetry()
+                           ),
+                           memory_lookup=library.snapshot,
+                       ))
     assert asyncio.run(worker.run_once())
     finished = runs.get(state.id)
     assert finished.result.diagnosis.status is DiagnosisStatus.COMPLETE
@@ -289,9 +320,9 @@ def test_worker_freezes_before_model_and_reuses_snapshot(tmp_path):
     resumed = saved[0]
     assert resumed.memory_snapshot.records == [record]
     service = DiagnosisService(
-        Telemetry(), Telemetry(), Telemetry(),
         LangChainAgentRunner(ScriptedModel(respond=lambda m, c: (
-            tool_call() if c == 1 else diagnosis(m)))),
+                    tool_call() if c == 1 else diagnosis(m)))),
+        tool_client=FixtureToolClient(Telemetry(), Telemetry(), Telemetry()),
         memory_lookup=forbidden_lookup,
     )
     run = asyncio.run(service.run_persisted(
@@ -307,9 +338,9 @@ def test_disabled_and_explanation_do_not_query_memory(tmp_path):
         raise AssertionError("memory should be disabled")
 
     service = DiagnosisService(
-        Telemetry(), Telemetry(), Telemetry(),
         LangChainAgentRunner(ScriptedModel(respond=lambda m, c: (
-            tool_call() if c == 1 else diagnosis(m)))),
+                    tool_call() if c == 1 else diagnosis(m)))),
+        tool_client=FixtureToolClient(Telemetry(), Telemetry(), Telemetry()),
         memory_lookup=forbidden_lookup,
     )
     run = asyncio.run(service.diagnose_with_evidence(
@@ -342,8 +373,10 @@ def test_memory_only_citation_cannot_complete():
         "confidence": .99, "evidence_ids": [str(record.id)],
     }))
     service = DiagnosisService(
-        Telemetry(), Telemetry(), Telemetry(), LangChainAgentRunner(model),
-        memory_policy=POLICY, memory_lookup=frozen_memory_lookup(snapshot),
+        LangChainAgentRunner(model),
+        tool_client=FixtureToolClient(Telemetry(), Telemetry(), Telemetry()),
+        memory_policy=POLICY,
+        memory_lookup=frozen_memory_lookup(snapshot),
     )
     run = asyncio.run(service.diagnose_with_evidence(
         TARGET, start=START, end=END))

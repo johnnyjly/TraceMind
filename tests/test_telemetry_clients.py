@@ -1,17 +1,14 @@
 import asyncio
-import json
 from datetime import UTC, datetime
+import json
 
 import httpx
+from otel_telemetry_mcp.observations import EvidenceSource
+from otel_telemetry_mcp.telemetry.errors import TelemetryClientError
+from otel_telemetry_mcp.telemetry.jaeger import JaegerClient
+from otel_telemetry_mcp.telemetry.opensearch import OpenSearchClient
+from otel_telemetry_mcp.telemetry.prometheus import PrometheusClient
 import pytest
-
-from tracemind.models import EvidenceSource
-from tracemind.telemetry import (
-    JaegerClient,
-    OpenSearchClient,
-    PrometheusClient,
-    TelemetryClientError,
-)
 
 
 def test_prometheus_query_returns_metric_evidence() -> None:
@@ -351,7 +348,9 @@ def test_jaeger_trace_detail_returns_error_span_evidence() -> None:
 
     evidence = asyncio.run(get_detail())
 
-    assert len(evidence) == 1
+    assert len(evidence) == 2
+    assert evidence[1].attributes["is_error"] is False
+    assert evidence[1].attributes["duration_ms"] == 300.0
     assert evidence[0].source is EvidenceSource.TRACE
     assert evidence[0].service == "payment"
     assert evidence[0].summary == "Error span in payment: Charge"
@@ -366,6 +365,8 @@ def test_opensearch_query_returns_log_evidence() -> None:
         assert filters[0] == {
             "term": {"resource.service.name.keyword": "payment"}
         }
+        if "observedTimestamp" in request_body["sort"][0]:
+            return httpx.Response(200, json={"hits": {"hits": []}})
         return httpx.Response(
             200,
             json={

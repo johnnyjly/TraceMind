@@ -1,30 +1,51 @@
 """Injected failures exercise retry admission, backoff, and safe taxonomy."""
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+import json
 from uuid import uuid4
 
 import httpx
-import pytest
 from langchain.agents.middleware import ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.exceptions import ModelAPIError
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai.chat_models.base import BaseChatOpenAI
-
+import pytest
 from test_harness import (
-    END, INCIDENT, START, ScriptedModel, Telemetry, diagnosis,
-    make_service, run_service, tool_call,
+    END,
+    INCIDENT,
+    START,
+    ScriptedModel,
+    Telemetry,
+    diagnosis,
+    make_service,
+    run_service,
+    tool_call,
 )
+from tool_fixtures import FixtureToolClient
 
-from tracemind.agent import DiagnosisService, LangChainAgentRunner
-from tracemind.agent.harness import InvestigationClosed, RunHarness, RunStopped
-from tracemind.agent.llm import create_chat_model, create_fallback_model
-from tracemind.agent.recovery import classify_failure, retry_after_seconds
+from tracemind.agent.runtime.harness import (
+    InvestigationClosed,
+    RunHarness,
+    RunStopped,
+)
+from tracemind.agent.runtime.llm import (
+    create_chat_model,
+    create_fallback_model,
+)
+from tracemind.agent.runtime.recovery import (
+    classify_failure,
+    retry_after_seconds,
+)
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
 from tracemind.models import (
-    DiagnosisStatus, Evidence, EvidenceSource, Incident,
+    DiagnosisStatus,
+    Evidence,
+    EvidenceSource,
+    Incident,
 )
 from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
 from tracemind.telemetry.errors import TelemetryClientError
@@ -98,7 +119,7 @@ def test_model_retries_account_attempts_and_respect_hint(monkeypatch):
             },
         )])
 
-    monkeypatch.setattr("tracemind.agent.harness.asyncio.sleep", sleep)
+    monkeypatch.setattr("tracemind.agent.runtime.harness.asyncio.sleep", sleep)
     asyncio.run(run.model_call(call, model_name="test"))
     assert calls == run.state.model_calls == 3
     assert delays == [2, 2]
@@ -262,9 +283,10 @@ def test_fallback_keeps_evidence_history_and_stays_selected(tmp_path):
     fallback = ScriptedModel(respond=fallback_response)
     telemetry = Telemetry()
     service = DiagnosisService(
-        telemetry, telemetry, telemetry,
         LangChainAgentRunner(primary, fallback_model=fallback),
-        limits=RunLimits(retry_backoff_seconds=0), event_directory=tmp_path,
+        tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
+        limits=RunLimits(retry_backoff_seconds=0),
+        event_directory=tmp_path,
     )
     run = run_service(service)
     assert run.state.status is RunStatus.SUCCEEDED
@@ -292,9 +314,10 @@ def test_fallback_selection_is_run_local(tmp_path):
     ))
     telemetry = Telemetry()
     service = DiagnosisService(
-        telemetry, telemetry, telemetry,
         LangChainAgentRunner(primary, fallback_model=fallback),
-        limits=RunLimits(retry_backoff_seconds=0), event_directory=tmp_path,
+        tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
+        limits=RunLimits(retry_backoff_seconds=0),
+        event_directory=tmp_path,
     )
     first = run_service(service)
     second = run_service(service)
@@ -731,7 +754,7 @@ def test_repair_messages_reach_deepseek_with_valid_pairs(
             transport=httpx.MockTransport(respond)
         ) as http:
             monkeypatch.setattr(
-                "tracemind.agent.llm.BaseChatOpenAI",
+                "tracemind.agent.runtime.llm.BaseChatOpenAI",
                 lambda **kwargs: BaseChatOpenAI(
                     http_async_client=http, **kwargs
                 ),

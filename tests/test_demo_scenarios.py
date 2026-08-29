@@ -1,21 +1,24 @@
 """Fault isolation, restoration and CLI behavior for real Demo scenarios."""
 
+from datetime import UTC, datetime
 import importlib.util
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from tracemind.agent import DiagnosisRun
 from tracemind.evaluation.demo import (
-    SCENARIO_NAMES, activate_flag_config, compose_command,
-    prepare_flag_config, restore_flag_config,
+    SCENARIO_NAMES,
+    activate_flag_config,
+    compose_command,
+    prepare_flag_config,
+    restore_flag_config,
 )
 from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.evaluation.models import EvaluationCase
 from tracemind.models import Diagnosis, Evidence
+from tracemind.models.result import DiagnosisRun
 
 
 ROOT = Path(__file__).resolve().parents[1]

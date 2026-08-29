@@ -15,7 +15,11 @@ from test_harness import (
 )
 from test_recovery import assert_tool_pairs
 
-from tracemind.agent.harness import InvestigationClosed, RunHarness, RunStopped
+from tracemind.agent.runtime.harness import (
+    InvestigationClosed,
+    RunHarness,
+    RunStopped,
+)
 from tracemind.api.progress import readable_event
 from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
 

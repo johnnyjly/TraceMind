@@ -54,7 +54,7 @@ def configure_logging(*, verbose: bool) -> None:
     ))
     logging.basicConfig(level=logging.WARNING, handlers=[handler])
     logging.getLogger("tracemind").setLevel(logging.INFO)
-    logging.getLogger("tracemind.agent.harness").setLevel(
+    logging.getLogger("tracemind.agent.runtime.harness").setLevel(
         logging.DEBUG if verbose else logging.INFO
     )
 

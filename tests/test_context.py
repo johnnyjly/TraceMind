@@ -1,28 +1,32 @@
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
+import json
 from uuid import uuid4
 
-import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain.agents.structured_output import AutoStrategy
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+import pytest
+from tool_fixtures import bind_fixture_tools
 
-from tracemind.agent.context import estimate_input, json_text, select_context
-from tracemind.agent.harness import RunHarness
-from tracemind.agent.middleware import HarnessMiddleware
-from tracemind.agent.service import DiagnosisDraft
-from tracemind.agent.tools import (
+from tracemind.agent.workflow.context import (
+    estimate_input,
+    json_text,
+    select_context,
+)
+from tracemind.agent.runtime.harness import RunHarness
+from tracemind.agent.runtime.middleware import HarnessMiddleware
+from tracemind.agent.runtime.tools import (
     EvidenceCapacityError,
     EvidenceCollector,
     context_index,
-    create_telemetry_tools,
 )
 from tracemind.models import Evidence, EvidenceSource, Incident
-from tracemind.models.run import TOOL_NAMES, RunLimits, RunState
+from tracemind.models.result import DiagnosisDraft
+from tracemind.models.run import RunLimits, RunState, TOOL_NAMES
 
 
 NOW = datetime(2024, 9, 1, tzinfo=UTC)
@@ -279,7 +283,7 @@ def test_read_evidence_cannot_cross_run_and_schema_rejects_negative_offset():
         investigation_start=NOW, investigation_end=NOW + timedelta(hours=1),
         limits=RunLimits(), allowed_tools=TOOL_NAMES,
     )
-    tools = create_telemetry_tools(
+    tools = bind_fixture_tools(
         None, None, None, start=NOW, end=NOW, collector=second,
         harness=RunHarness(state),
     )
@@ -306,7 +310,7 @@ def test_catalogue_filters_page_matching_records_and_preserve_direct_reads():
         investigation_start=NOW, investigation_end=NOW + timedelta(hours=1),
         limits=RunLimits(), allowed_tools=("read_evidence",),
     )
-    reader = create_telemetry_tools(
+    reader = bind_fixture_tools(
         None, None, None, start=NOW, end=NOW, collector=collector,
         harness=RunHarness(state),
     )[0]

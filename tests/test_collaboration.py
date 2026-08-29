@@ -1,27 +1,28 @@
 """Verify optional human collaboration through persistent real agent runs."""
 
 import asyncio
-import json
-import sqlite3
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 
-import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
+import pytest
 from test_harness import ScriptedModel, tool_call
+from tool_fixtures import FixtureToolClient
 
-from tracemind.agent.persistence import RunConflict, RunRepository
-from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
+from tracemind.agent.storage.run_repository import RunRepository
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
 from tracemind.agent.worker import RunWorker
 from tracemind.config import Settings
 from tracemind.models import Evidence, EvidenceSource, Incident
-from tracemind.models.run import (
-    RunLimits, RunPurpose, RunState, RunStatus,
-)
+from tracemind.models.run import RunLimits, RunPurpose, RunState, RunStatus
+from tracemind.models.storage import RunConflict
 
 
 START = datetime(2024, 9, 1, tzinfo=UTC)
@@ -107,8 +108,8 @@ def make_worker(tmp_path, repository, telemetry, model):
     return RunWorker(
         settings, repository=repository,
         service_factory=lambda saver, _client: DiagnosisService(
-            telemetry, telemetry, telemetry,
             LangChainAgentRunner(model, checkpointer=saver),
+            tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
             event_directory=settings.agent_trace_directory,
         ),
     )
@@ -275,7 +276,7 @@ def test_inherited_evidence_respects_new_capacity(tmp_path):
 
 
 def test_collaboration_context_bounds_history_without_losing_request():
-    from tracemind.agent.context import collaboration_context
+    from tracemind.agent.workflow.context import collaboration_context
     state = RunState(
         incident=Incident(title="fault", description="investigate"),
         investigation_start=START, investigation_end=END,

@@ -1,18 +1,23 @@
-"""Single-agent diagnosis execution and public service interfaces."""
+"""Public agent interfaces, loaded only when requested by a caller."""
 
-from tracemind.agent.errors import DiagnosisError, ModelConfigurationError
-from tracemind.agent.llm import create_chat_model
-from tracemind.agent.service import (
-    DiagnosisRun,
-    DiagnosisService,
-    LangChainAgentRunner,
-)
+from importlib import import_module
 
-__all__ = [
-    "DiagnosisError",
-    "DiagnosisRun",
-    "DiagnosisService",
-    "LangChainAgentRunner",
-    "ModelConfigurationError",
-    "create_chat_model",
-]
+
+_EXPORTS = {
+    "DiagnosisError": "tracemind.agent.errors",
+    "DiagnosisRun": "tracemind.models.result",
+    "DiagnosisService": "tracemind.agent.service",
+    "LangChainAgentRunner": "tracemind.agent.runtime.runner",
+    "ModelConfigurationError": "tracemind.agent.errors",
+    "create_chat_model": "tracemind.agent.runtime.llm",
+}
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    # Preserve the public facade without importing model SDKs for storage use.
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    value = getattr(import_module(_EXPORTS[name]), name)
+    globals()[name] = value
+    return value

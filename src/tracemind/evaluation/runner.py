@@ -5,28 +5,21 @@ from collections.abc import Sequence
 from datetime import datetime
 from time import perf_counter
 
-import httpx
 from langchain_core.callbacks import BaseCallbackHandler
 
-from tracemind.agent import (
+from tracemind.agent.errors import (
+    DiagnosisCancelled,
     DiagnosisError,
-    DiagnosisService,
-    LangChainAgentRunner,
-    create_chat_model,
+    ModelConfigurationError,
 )
-from tracemind.agent.errors import DiagnosisCancelled, ModelConfigurationError
+from tracemind.agent.factory import build_runner, build_service
+from tracemind.agent.memory.lookup import evaluation_memory
+from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
-from tracemind.mcp.client import open_telemetry_backend
-from tracemind.agent.llm import create_fallback_model
-from tracemind.agent.memory import evaluation_memory
-from tracemind.models.memory import MemorySnapshot
 from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.evaluation.models import EvaluationCase, EvaluationReport
-from tracemind.telemetry import (
-    JaegerClient,
-    OpenSearchClient,
-    PrometheusClient,
-)
+from tracemind.mcp.client import open_telemetry_backend
+from tracemind.models.memory import MemorySnapshot
 
 
 async def run_service_evaluation(
@@ -114,8 +107,7 @@ async def run_live_evaluation(
     )
     corpus_id = memory_snapshot.fingerprint if memory_snapshot else None
     try:
-        model = create_chat_model(settings)
-        fallback = create_fallback_model(settings)
+        runner = build_runner(settings, callbacks=callbacks)
     except ModelConfigurationError as exc:
         return EvaluationReport(
             case_id=case.id, model_provider=settings.llm_provider,
@@ -128,28 +120,10 @@ async def run_live_evaluation(
         )
     limits = settings.run_limits
     limits.tool_calls = min(limits.tool_calls, case.max_tool_calls)
-    async with (
-        httpx.AsyncClient(timeout=20) as http_client,
-        open_telemetry_backend(settings) as telemetry_backend,
-    ):
-        service = DiagnosisService(
-            PrometheusClient(str(settings.prometheus_url), http_client),
-            JaegerClient(str(settings.jaeger_url), http_client),
-            OpenSearchClient(
-                str(settings.opensearch_url),
-                settings.opensearch_logs_index,
-                http_client,
-            ),
-            LangChainAgentRunner(
-                model, callbacks=callbacks,
-                fallback_model=fallback,
-            ),
-            recursion_limit=settings.agent_recursion_limit,
-            limits=limits,
-            allowed_tools=settings.agent_allowed_tools,
-            event_directory=settings.agent_trace_directory,
+    async with open_telemetry_backend(settings) as tool_client:
+        service = build_service(
+            settings, runner, tool_client, limits=limits,
             memory_policy=policy, memory_lookup=lookup,
-            telemetry_backend=telemetry_backend,
         )
         return await run_service_evaluation(
             case, service, start=start, end=end,

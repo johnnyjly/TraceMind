@@ -1,34 +1,44 @@
 """Exercise automatic feedback learning through the real persistent loop."""
 
 import asyncio
-import json
-import sqlite3
 from datetime import UTC, datetime
+import json
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 
-import pytest
 from httpx import ASGITransport, AsyncClient
 from langchain.agents.middleware.types import ModelResponse
+import pytest
 from test_harness import ScriptedModel, Telemetry, normal_response, tool_call
 from test_memory import (
-    END, POLICY, START, TARGET, completed_source, confirmation,
+    END,
+    POLICY,
+    START,
+    TARGET,
+    completed_source,
+    confirmation,
 )
+from tool_fixtures import FixtureToolClient
 
-from tracemind.agent.context import guidance_context
-from tracemind.agent.middleware import HarnessMiddleware
-from tracemind.agent.persistence import MemoryRepository, RunConflict
-from tracemind.agent.persistence import RunRepository
-from tracemind.agent.service import DiagnosisService, LangChainAgentRunner
+from tracemind.agent.workflow.context import guidance_context
+from tracemind.agent.storage.memory_repository import MemoryRepository
+from tracemind.agent.runtime.middleware import HarnessMiddleware
+from tracemind.agent.storage.run_repository import RunRepository
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
 from tracemind.agent.worker import RunWorker
 from tracemind.api.app import app, get_run_repository
 from tracemind.api.progress import readable_event
 from tracemind.config import Settings
 from tracemind.models import DiagnosisStatus
 from tracemind.models.memory import (
-    FeedbackUpdate, GuidanceRevision, MemorySnapshot,
+    FeedbackUpdate,
+    GuidanceRevision,
+    MemorySnapshot,
 )
 from tracemind.models.run import RunLimits, RunPurpose, RunState, RunStatus
+from tracemind.models.storage import RunConflict
 
 
 def proposal(message, **changes):
@@ -54,7 +64,7 @@ def follow_up(runs, source, message, *, policy=POLICY):
 
 def worker(tmp_path, runs, model):
     """Keep the real graph/checkpoints and substitute only model/telemetry."""
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     settings = Settings(
         _env_file=None, agent_run_database=runs.path,
         agent_checkpoint_database=tmp_path / "checkpoints.db",
@@ -63,8 +73,10 @@ def worker(tmp_path, runs, model):
     return RunWorker(
         settings, repository=runs,
         service_factory=lambda saver, client: DiagnosisService(
-            Telemetry(), Telemetry(), Telemetry(),
             LangChainAgentRunner(model, checkpointer=saver),
+            tool_client=FixtureToolClient(
+                Telemetry(), Telemetry(), Telemetry()
+            ),
             memory_lookup=library.snapshot,
             guidance_lookup=library.guidance_snapshot,
             event_directory=settings.agent_trace_directory,
@@ -109,7 +121,7 @@ def test_automatic_preference_skill_and_current_request_priority(tmp_path):
     )]
     original, model = execute_feedback(tmp_path, runs, source,
                                        message, updates)
-    library = MemoryRepository(RunRepository(runs.path))
+    library = MemoryRepository((RunRepository(runs.path)).database)
     records = library.list_guidance()
     assert {r.kind for r in records} == {"preference", "skill"}
     assert all(r.source_run_id == original.state.id for r in records)
@@ -149,7 +161,7 @@ def test_temporary_feedback_does_not_replace_a_long_term_habit(tmp_path):
     source = completed_source(runs, investigation=True)
     _, _model = execute_feedback(
         tmp_path, runs, source, "以后先结论后证据", [proposal("以后先结论后证据")])
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     before = library.list_guidance()
     temporary, _ = execute_feedback(
         tmp_path, runs, source, "这次简短输出",
@@ -187,7 +199,7 @@ def test_confirm_correct_and_revoke_diagnosis_from_feedback(tmp_path):
         message, kind="diagnosis", key=None,
         content="错误配置导致支付失败，关闭该配置后恢复。",
     )])
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     record = library.list()[0]
     assert record.source_run_id == source.id
     assert record.feedback_run_id == learned.state.id
@@ -219,7 +231,7 @@ def test_confirm_correct_and_revoke_diagnosis_from_feedback(tmp_path):
 
 def test_write_receipt_survives_crash_and_fences_old_worker(tmp_path):
     runs = RunRepository(tmp_path / "runs.db")
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     source = completed_source(runs, investigation=True)
     follow_up(runs, source, "以后先给结论")
     claim = runs.claim_next()
@@ -247,7 +259,7 @@ def test_fabricated_quote_and_stale_revision_are_reported(tmp_path):
     source = completed_source(runs, investigation=True)
     rejected, _ = execute_feedback(
         tmp_path, runs, source, "这次简短输出", [proposal("以后永远简短")])
-    assert MemoryRepository(runs).list_guidance() == []
+    assert MemoryRepository(runs.database).list_guidance() == []
     event = next(e for e in rejected.state.events
                  if e.kind == "memory.feedback_saved")
     assert event.data["rejected"] == ["quote_not_in_current_feedback"]
@@ -255,7 +267,7 @@ def test_fabricated_quote_and_stale_revision_are_reported(tmp_path):
                      [proposal("以后先给结论")])
     follow_up(runs, source, "以后先列证据")
     claim = runs.claim_next()
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     state = claim.run.state
     state.guidance_snapshot = library.guidance_snapshot()
     state.feedback_updates = [proposal("以后先列证据")]
@@ -277,14 +289,14 @@ def test_memory_off_never_learns_unsolicited_model_updates(tmp_path):
     source = completed_source(runs, investigation=True)
     stored, _ = execute_feedback(tmp_path, runs, source, "以后先给结论",
                                  [proposal("以后先给结论")], policy=None)
-    assert not MemoryRepository(runs).list_guidance()
+    assert not MemoryRepository(runs.database).list_guidance()
     assert not any(e.kind == "memory.feedback_saved"
                    for e in stored.state.events)
 
 
 def test_worker_restart_reuses_guidance_and_original_write_receipt(tmp_path):
     runs = RunRepository(tmp_path / "runs.db")
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     source = completed_source(runs, investigation=True)
     follow_up(runs, source, "以后先给结论")
     claim = runs.claim_next()
@@ -309,8 +321,10 @@ def test_worker_restart_reuses_guidance_and_original_write_receipt(tmp_path):
     resumed_worker = RunWorker(
         settings, repository=runs,
         service_factory=lambda saver, client: DiagnosisService(
-            Telemetry(), Telemetry(), Telemetry(),
             LangChainAgentRunner(model, checkpointer=saver),
+            tool_client=FixtureToolClient(
+                Telemetry(), Telemetry(), Telemetry()
+            ),
             guidance_lookup=forbidden_lookup,
         ),
     )
@@ -330,7 +344,7 @@ def test_inconclusive_source_can_receive_a_human_correction(tmp_path):
     runs = RunRepository(tmp_path / "runs.db")
     source = completed_source(runs, investigation=True)
     # Human confirmation may correct an inconclusive draft with observations.
-    with runs._connect() as connection:
+    with runs.database.transaction() as connection:
         stored = runs.get(source.id)
         stored.state.status = RunStatus.INCONCLUSIVE
         stored.state.diagnosis.status = stored.result.diagnosis.status = (
@@ -344,7 +358,10 @@ def test_inconclusive_source_can_receive_a_human_correction(tmp_path):
     learned, _ = execute_feedback(tmp_path, runs, source, message, [proposal(
         message, kind="diagnosis", key=None, content="配置错误，修复后恢复。",
     )])
-    assert MemoryRepository(runs).list()[0].feedback_run_id == learned.state.id
+    assert (
+        MemoryRepository(runs.database).list()[0].feedback_run_id
+        == learned.state.id
+    )
 
 
 def test_rejected_diagnosis_preview_does_not_log_feedback_quotes():
@@ -373,7 +390,7 @@ def test_guidance_management_and_bounded_context(tmp_path):
     source = completed_source(runs, investigation=True)
     learned, _ = execute_feedback(tmp_path, runs, source, "以后先给结论",
                                   [proposal("以后先给结论")])
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     record = library.list_guidance()[0]
 
     async def requests():
@@ -412,7 +429,7 @@ def test_v3_migration_keeps_confirmations_and_old_runs(tmp_path):
     runs = RunRepository(tmp_path / "runs.db")
     source = completed_source(runs)
     original = runs.get(source.id)
-    library = MemoryRepository(runs)
+    library = MemoryRepository(runs.database)
     memory = library.confirm(confirmation(source))
     with sqlite3.connect(runs.path) as connection:
         connection.execute("DROP TABLE agent_guidance")
@@ -420,5 +437,5 @@ def test_v3_migration_keeps_confirmations_and_old_runs(tmp_path):
         connection.execute("PRAGMA user_version=3")
     reopened = RunRepository(runs.path)
     assert reopened.get(source.id) == original
-    assert MemoryRepository(reopened).get(memory.id) == memory
-    assert MemoryRepository(reopened).list_guidance() == []
+    assert MemoryRepository(reopened.database).get(memory.id) == memory
+    assert MemoryRepository(reopened.database).list_guidance() == []

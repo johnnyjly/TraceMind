@@ -7,8 +7,8 @@ from typing import Literal
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from tracemind.models.run import TOOL_NAMES, RunLimits, ToolName
 from tracemind.models.memory import MemoryPolicy, MemoryScope
+from tracemind.models.run import RunLimits, TOOL_NAMES, ToolName
 
 
 class Settings(BaseSettings):
@@ -21,11 +21,7 @@ class Settings(BaseSettings):
     )
 
     environment: str = "development"
-    prometheus_url: AnyHttpUrl = "http://localhost:9090"
-    jaeger_url: AnyHttpUrl = "http://localhost:16686/jaeger/ui"
-    opensearch_url: AnyHttpUrl = "http://localhost:9200"
-    opensearch_logs_index: str = "otel-logs-*"
-    telemetry_transport: Literal["direct", "mcp"] = "mcp"
+    telemetry_transport: Literal["mcp"] = "mcp"
     telemetry_mcp_url: AnyHttpUrl = "http://127.0.0.1:8012/mcp"
     telemetry_mcp_response_bytes: int = Field(default=16_777_216, ge=1024)
     llm_provider: Literal["google", "openai", "deepseek"] = "google"

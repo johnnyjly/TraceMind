@@ -1,13 +1,14 @@
 import asyncio
 from datetime import UTC, datetime
 
-import pytest
 from httpx import ASGITransport, AsyncClient
+import pytest
 
-from tracemind.agent import DiagnosisError, DiagnosisRun
+from tracemind.agent.errors import DiagnosisError
 from tracemind.api.app import app, get_diagnosis_service, get_request_settings
 from tracemind.config import Settings
 from tracemind.models import Diagnosis, DiagnosisStatus, Incident
+from tracemind.models.result import DiagnosisRun
 from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
 
 

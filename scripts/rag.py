@@ -23,7 +23,7 @@ def create_completion(settings: RagSettings) -> Completion:
         """Create the selected client once, only when a model is needed."""
         nonlocal model
         if model is None:
-            from tracemind.agent.llm import create_chat_model
+            from tracemind.agent.runtime.llm import create_chat_model
             from tracemind.config import Settings
 
             provider_settings = Settings(

@@ -7,10 +7,13 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from tracemind.models.incident import Incident
 from tracemind.models.diagnosis import Diagnosis
+from tracemind.models.incident import Incident
 from tracemind.models.memory import (
-    FeedbackUpdate, GuidanceSnapshot, MemoryPolicy, MemorySnapshot,
+    FeedbackUpdate,
+    GuidanceSnapshot,
+    MemoryPolicy,
+    MemorySnapshot,
 )
 
 
@@ -142,7 +145,7 @@ class RunState(BaseModel):
     limits: RunLimits
     allowed_tools: tuple[ToolName, ...]
     prompt_version: str = "single-agent-v4"
-    telemetry_transport: Literal["direct", "mcp"] = "direct"
+    telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

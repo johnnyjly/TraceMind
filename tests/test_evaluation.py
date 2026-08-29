@@ -1,11 +1,10 @@
+from datetime import UTC, datetime
 import json
 import os
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from tracemind.agent import DiagnosisRun
 from tracemind.evaluation.demo import (
     compose_command,
     docker_environment,
@@ -19,6 +18,7 @@ from tracemind.models import (
     Evidence,
     EvidenceSource,
 )
+from tracemind.models.result import DiagnosisRun
 
 
 CASE_PATH = Path("evals/cases/payment_failure.json")

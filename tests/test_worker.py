@@ -1,31 +1,33 @@
 """Exercise the real LangGraph loop through the persistent local worker."""
 
 import asyncio
-import json
-import sqlite3
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 
-import pytest
+from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain.agents import create_agent
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import Field
+import pytest
+from tool_fixtures import FixtureToolClient, bind_fixture_tools
 
-from tracemind.agent.persistence import RunRepository
 from tracemind.agent.errors import DiagnosisCancelled
-from tracemind.agent.harness import RunHarness
-from tracemind.agent.middleware import HarnessMiddleware
-from tracemind.agent.service import (
-    SYSTEM_PROMPT, DiagnosisDraft, DiagnosisService, LangChainAgentRunner,
-)
-from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
+from tracemind.agent.runtime.harness import RunHarness
+from tracemind.agent.storage.io import run_io
+from tracemind.agent.runtime.middleware import HarnessMiddleware
+from tracemind.agent.storage.run_repository import RunRepository
+from tracemind.agent.runtime.runner import LangChainAgentRunner, SYSTEM_PROMPT
+from tracemind.agent.service import DiagnosisService
+from tracemind.agent.runtime.tools import EvidenceCollector
 from tracemind.agent.worker import RunWorker
 from tracemind.config import Settings
 from tracemind.models import Evidence, EvidenceSource, Incident
+from tracemind.models.result import DiagnosisDraft
 from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
 
 
@@ -119,8 +121,8 @@ def test_worker_persists_graph_and_terminal_result(tmp_path: Path) -> None:
 
     def service_factory(saver, _http_client):
         return DiagnosisService(
-            telemetry, telemetry, telemetry,
             LangChainAgentRunner(model, checkpointer=saver),
+            tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
             event_directory=settings.agent_trace_directory,
         )
 
@@ -183,11 +185,12 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
         harness = RunHarness(
             claim.run.state,
             event_directory=settings.agent_trace_directory,
-            persist=lambda current: repository.save_progress(
+            persist=lambda current: run_io(
+                repository.save_progress,
                 state.id, claim.owner, current, collector.evidence
             ),
         )
-        tools = create_telemetry_tools(
+        tools = bind_fixture_tools(
             telemetry, telemetry, telemetry, start=START,
             end=START + timedelta(hours=1), collector=collector,
             harness=harness,
@@ -207,6 +210,7 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
             )
         if finalizing:
             harness.begin_finalization(StopReason.NO_PROGRESS)
+        await harness.checkpoint(check_cancel=False)
         harness._close_trace()
 
     asyncio.run(first_step())
@@ -223,8 +227,8 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
 
     def service_factory(saver, _http_client):
         return DiagnosisService(
-            telemetry, telemetry, telemetry,
             LangChainAgentRunner(resumed_model, checkpointer=saver),
+            tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
             event_directory=settings.agent_trace_directory,
         )
 
@@ -350,8 +354,10 @@ def test_worker_shutdown_finalizes_claim_and_preserves_queued_work(
         worker = RunWorker(settings, repository=repository,
                            service_factory=lambda saver, _client:
                            DiagnosisService(
-                               telemetry, telemetry, telemetry,
                                LangChainAgentRunner(model, checkpointer=saver),
+                               tool_client=FixtureToolClient(
+                                   telemetry, telemetry, telemetry
+                               ),
                                event_directory=settings.agent_trace_directory,
                            ))
         task = asyncio.create_task(
@@ -426,8 +432,10 @@ def test_api_cancellation_keeps_worker_running_for_next_run(tmp_path):
         worker = RunWorker(settings, repository=repository,
                            service_factory=lambda saver, _client:
                            DiagnosisService(
-                               telemetry, telemetry, telemetry,
                                LangChainAgentRunner(model, checkpointer=saver),
+                               tool_client=FixtureToolClient(
+                                   telemetry, telemetry, telemetry
+                               ),
                                event_directory=settings.agent_trace_directory,
                            ))
         task = asyncio.create_task(worker.run_forever())

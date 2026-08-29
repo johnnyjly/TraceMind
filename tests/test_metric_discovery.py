@@ -5,18 +5,25 @@ import json
 from uuid import uuid4
 
 import httpx
-import pytest
 from langchain_core.messages import ToolMessage
-
+from otel_telemetry_mcp.telemetry.prometheus import PrometheusClient
+import pytest
 from test_harness import (
-    END, INCIDENT, START, ScriptedModel, Telemetry, make_service, tool_call,
+    END,
+    INCIDENT,
+    START,
+    ScriptedModel,
+    Telemetry,
+    make_service,
+    tool_call,
 )
+from tool_fixtures import bind_fixture_tools
 
-from tracemind.agent.harness import RunHarness
-from tracemind.agent.tools import EvidenceCollector, create_telemetry_tools
+from tracemind.agent.runtime.harness import RunHarness
+from tracemind.agent.runtime.recovery import ToolUnavailable
+from tracemind.agent.runtime.tools import EvidenceCollector
 from tracemind.api.progress import readable_event
 from tracemind.models.run import RunLimits, RunState, RunStatus, StopReason
-from tracemind.telemetry import PrometheusClient
 
 
 def metadata_response(request):
@@ -48,7 +55,7 @@ def test_discovery_and_empty_query_do_not_create_evidence_or_progress():
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(metadata_response),
         ) as http:
-            tools = {t.name: t for t in create_telemetry_tools(
+            tools = {t.name: t for t in bind_fixture_tools(
                 PrometheusClient("http://prometheus", http), None, None,
                 start=START, end=END, collector=collector, harness=harness,
             )}
@@ -58,8 +65,9 @@ def test_discovery_and_empty_query_do_not_create_evidence_or_progress():
             empty = await tools["query_metrics"].ainvoke({
                 "expression": 'rpc_calls_total{job="payment"}',
             })
-            with pytest.raises(ValueError):
+            with pytest.raises(ToolUnavailable) as rejected:
                 await tools["discover_metrics"].ainvoke({"limit": 51})
+            assert rejected.value.failure.category == "invalid_request"
         harness.check_progress()
         assert discovery[0]["metrics"][0]["metric"] == "rpc_calls_total"
         assert empty[0]["kind"] == "empty_metric_query"
@@ -69,8 +77,10 @@ def test_discovery_and_empty_query_do_not_create_evidence_or_progress():
         assert state.evidence_ids == []
         assert state.progress_count == 0
         assert state.stalled_rounds == 1
-        assert state.tool_calls == {"discover_metrics": 1, "query_metrics": 1}
-        assert state.backend_attempts == 2
+        # Remote validation follows admission; rejected RPCs consume
+        # an attempt.
+        assert state.tool_calls == {"discover_metrics": 2, "query_metrics": 1}
+        assert state.backend_attempts == 3
         completed = [e for e in state.events if e.kind == "tool.completed"]
         assert all(e.data["evidence_ids"] == [] for e in completed)
         assert completed[-1].data["result_count"] == 0
@@ -199,7 +209,7 @@ def test_explicit_existing_allowlist_does_not_gain_discovery_permission():
         limits=RunLimits(), allowed_tools=("query_metrics", "read_evidence"),
     )
     telemetry = Telemetry()
-    tools = create_telemetry_tools(
+    tools = bind_fixture_tools(
         telemetry, telemetry, telemetry, start=START, end=END,
         collector=EvidenceCollector(), harness=RunHarness(state),
     )

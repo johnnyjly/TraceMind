@@ -1,8 +1,8 @@
 """Deterministic diagnosis checks against held-out case expectations."""
 
-from tracemind.agent import DiagnosisRun
-from tracemind.models import DiagnosisStatus
 from tracemind.evaluation.models import EvaluationCase, EvaluationResult
+from tracemind.models import DiagnosisStatus
+from tracemind.models.result import DiagnosisRun
 
 
 def evaluate_diagnosis(

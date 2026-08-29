@@ -8,14 +8,17 @@ import httpx
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from mcp.types import Tool
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
-from tracemind.agent import DiagnosisService, LangChainAgentRunner
-from tracemind.agent.memory import evaluation_memory
+from tracemind.agent.memory.lookup import evaluation_memory
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
 from tracemind.evaluation.models import EvaluationCase, EvaluationReport
 from tracemind.evaluation.runner import run_service_evaluation
 from tracemind.evaluation.summary import trace_issues
+from tracemind.mcp.contracts import TelemetryReply
 from tracemind.models import Evidence
 from tracemind.models.memory import MemorySnapshot
 from tracemind.models.run import StopReason
@@ -63,6 +66,8 @@ class ReplayFixture(BaseModel):
 class ReplayTelemetry:
     """Consume exact backend requests and reject unrecorded calls."""
 
+    transport = "replay"
+
     def __init__(self, responses: list[ReplayResponse]) -> None:
         """Copy the transcript so concurrent runs consume independent lists."""
         self.responses = list(responses)
@@ -86,24 +91,23 @@ class ReplayTelemetry:
                 return response.evidence
         raise AssertionError(f"unrecorded replay request: {method}")
 
-    async def query(self, expression: str, *, at=None) -> list[Evidence]:
-        """Replay a PromQL request in the fixture's fixed window."""
-        return await self._respond("query", {"expression": expression})
+    async def discover_tools(self) -> list[Tool]:
+        return recorded_tools()
 
-    async def search_traces(self, service: str, **_window) -> list[Evidence]:
-        """Replay trace discovery for a service."""
-        return await self._respond("search_traces", {"service": service})
+    async def call(self, name: str, arguments: dict) -> TelemetryReply:
+        arguments = {k: v for k, v in arguments.items()
+                     if k not in {"start", "end", "at"}}
+        if name == "search_logs":
+            arguments.setdefault("text", None)
+        result = await self._respond(
+            "query" if name == "query_metrics" else name, arguments)
+        return TelemetryReply(evidence=result)
 
-    async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
-        """Replay a trace inspection."""
-        return await self._respond("get_trace_detail", {"trace_id": trace_id})
 
-    async def search_logs(self, service: str, *, text=None,
-                          **_window) -> list[Evidence]:
-        """Replay a log request including its optional text filter."""
-        return await self._respond("search_logs", {
-            "service": service, "text": text,
-        })
+def recorded_tools() -> list[Tool]:
+    """Load versioned wire definitions for reproducible offline replays."""
+    path = Path(__file__).with_name("telemetry_tools.json")
+    return [Tool.model_validate(item) for item in json.loads(path.read_text())]
 
 
 class ScriptedReplayModel(BaseChatModel):
@@ -171,12 +175,14 @@ async def run_replay_evaluation(
     limits = settings.run_limits
     limits.tool_calls = min(limits.tool_calls, fixture.case.max_tool_calls)
     service = DiagnosisService(
-        telemetry, telemetry, telemetry,
         LangChainAgentRunner(selected_model),
-        limits=limits, allowed_tools=settings.agent_allowed_tools,
+        tool_client=telemetry,
+        limits=limits,
+        allowed_tools=settings.agent_allowed_tools,
         recursion_limit=settings.agent_recursion_limit,
         event_directory=settings.agent_trace_directory,
-        memory_policy=policy, memory_lookup=lookup,
+        memory_policy=policy,
+        memory_lookup=lookup,
     )
     report = await run_service_evaluation(
         fixture.case, service, start=fixture.start, end=fixture.end,

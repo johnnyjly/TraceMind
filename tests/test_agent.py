@@ -1,19 +1,22 @@
 import asyncio
-import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
+import json
 from uuid import uuid4
 
-import pytest
 import httpx
 from langchain_core.tools import BaseTool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import BaseChatOpenAI
+import pytest
+from tool_fixtures import FixtureToolClient
 
-from tracemind.agent import DiagnosisError, DiagnosisService, create_chat_model
-from tracemind.agent.harness import RunHarness
-from tracemind.agent.service import DiagnosisDraft, LangChainAgentRunner
+from tracemind.agent.errors import DiagnosisError
+from tracemind.agent.runtime.harness import RunHarness
+from tracemind.agent.runtime.llm import create_chat_model
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
 from tracemind.models import (
     DiagnosisStatus,
@@ -21,6 +24,7 @@ from tracemind.models import (
     EvidenceSource,
     Incident,
 )
+from tracemind.models.result import DiagnosisDraft
 from tracemind.models.run import RunLimits, RunState
 
 
@@ -86,10 +90,10 @@ class HallucinatingRunner:
 def test_service_returns_diagnosis_with_tool_evidence() -> None:
     incident = Incident(title="checkout errors", description="HTTP 500 spike")
     service = DiagnosisService(
-        StubPrometheus(),
-        UnusedJaeger(),
-        UnusedOpenSearch(),
         EvidenceUsingRunner(),
+        tool_client=FixtureToolClient(
+            StubPrometheus(), UnusedJaeger(), UnusedOpenSearch()
+        ),
         recursion_limit=8,
     )
 
@@ -108,10 +112,10 @@ def test_service_returns_diagnosis_with_tool_evidence() -> None:
 
 def test_service_rejects_evidence_id_not_returned_by_tool() -> None:
     service = DiagnosisService(
-        StubPrometheus(),
-        UnusedJaeger(),
-        UnusedOpenSearch(),
         HallucinatingRunner(),
+        tool_client=FixtureToolClient(
+            StubPrometheus(), UnusedJaeger(), UnusedOpenSearch()
+        ),
     )
 
     with pytest.raises(DiagnosisError, match="no telemetry tool returned"):
@@ -201,7 +205,7 @@ def test_deepseek_agent_sends_compatible_structured_tool_request(monkeypatch):
             transport=httpx.MockTransport(respond)
         ) as http:
             monkeypatch.setattr(
-                "tracemind.agent.llm.BaseChatOpenAI",
+                "tracemind.agent.runtime.llm.BaseChatOpenAI",
                 lambda **kwargs: BaseChatOpenAI(
                     http_async_client=http, **kwargs
                 ),

@@ -1,22 +1,26 @@
 """Per-run execution budgets, lifecycle controls, and metadata events."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 import hashlib
 import json
 import logging
 import os
-import random
-from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from pathlib import Path
+import random
 from time import monotonic
 from typing import Any, NoReturn, TypeVar
 from uuid import UUID, uuid4
 
 from tracemind.agent.errors import DiagnosisError
-from tracemind.agent.llm import MODEL_SERVICE_ERRORS
-from tracemind.agent.recovery import (
-    Failure, ModelCallFailed, ToolUnavailable, classify_failure,
+from tracemind.agent.runtime.llm import MODEL_SERVICE_ERRORS
+from tracemind.agent.storage.io import run_io
+from tracemind.agent.runtime.recovery import (
+    Failure,
+    ModelCallFailed,
+    ToolUnavailable,
+    classify_failure,
 )
 from tracemind.models.run import RunEvent, RunState, RunStatus, StopReason
 from tracemind.telemetry.errors import TelemetryClientError
@@ -52,7 +56,7 @@ class RunHarness:
 
     def __init__(
         self, state: RunState, *, event_directory: Path | None = None,
-        persist: Callable[[RunState], None] | None = None,
+        persist: Callable[[RunState], Awaitable[None]] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
         resume: bool = False,
         graph_resume: bool | None = None,
@@ -64,6 +68,7 @@ class RunHarness:
         self._started = monotonic()
         self._persist = persist
         self._is_cancelled = is_cancelled
+        self._persistence_lock = asyncio.Lock()
         self.resuming = resume
         self.graph_resuming = resume if graph_resume is None else graph_resume
         self._stop: StopReason | None = None
@@ -128,10 +133,20 @@ class RunHarness:
                         data={"call_kind": event.kind},
                     )
 
-    def save(self) -> None:
-        """Persist the mutable execution ledger when a store is configured."""
-        if self._persist is not None:
-            self._persist(self.state)
+    async def checkpoint(self, *, check_cancel: bool = True) -> None:
+        """Commit reservations/results before external work or graph return.
+
+        Snapshot under one lock so concurrent tools cannot persist older state
+        after newer state. Admission counters are reserved before awaiting.
+        """
+        async with self._persistence_lock:
+            if check_cancel and self._is_cancelled is not None:
+                if await run_io(self._is_cancelled):
+                    self.stop(StopReason.CANCELLED)
+            if self._persist is not None:
+                await self._persist(self.state.model_copy(deep=True))
+        if check_cancel:
+            self.check_active()
 
     @property
     def remaining_seconds(self) -> float:
@@ -163,7 +178,6 @@ class RunHarness:
             duration_ms=duration_ms, data=data or {},
         )
         self.state.events.append(event)
-        self.save()
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "%s", event.model_dump_json(),
@@ -211,8 +225,6 @@ class RunHarness:
         """Raise RunStopped if stopped, finalized, or past the run deadline."""
         if self._stop is not None:
             raise RunStopped(self._stop)
-        if self._is_cancelled is not None and self._is_cancelled():
-            self.stop(StopReason.CANCELLED)
         if self.state.status is not RunStatus.RUNNING:
             raise RunStopped(
                 self.state.stop_reason or StopReason.INTERNAL_ERROR
@@ -288,6 +300,7 @@ class RunHarness:
                   data={"target": target, "retry": attempt + 1,
                         "delay_seconds": delay, "category": failure.category,
                         "status_code": failure.status_code})
+        await self.checkpoint()
         await asyncio.sleep(delay)
         self.check_active()
 
@@ -307,7 +320,6 @@ class RunHarness:
                 self.begin_finalization(StopReason.NO_PROGRESS)
         self._last_progress = self._progress
         self.state.last_progress = self._last_progress
-        self.save()
 
     def repair_diagnosis(
         self, *, validation: dict | None = None,
@@ -357,6 +369,7 @@ class RunHarness:
             async with asyncio.timeout(
                 self.state.limits.model_timeout_seconds
             ):
+                await self.checkpoint()
                 response = await call()
             # ModelResponse contains the provider AIMessage,
             # including usage if supplied.
@@ -408,7 +421,7 @@ class RunHarness:
                 self.state.usage.reported_model_calls += 1
             else:
                 self.state.usage.unreported_model_calls += 1
-            self.save()
+            await self.checkpoint(check_cancel=False)
 
     async def tool_call(
         self, name: str, arguments: dict[str, object],
@@ -427,7 +440,6 @@ class RunHarness:
             raise InvestigationClosed()
         self._signatures[signature] = self._signatures.get(signature, 0) + 1
         self.state.tool_signatures = dict(self._signatures)
-        self.save()
         task = asyncio.current_task()
         assert task is not None
         self._active.add(task)
@@ -449,7 +461,6 @@ class RunHarness:
                         self._result_fingerprints
                     )
                     self.state.progress_count = self._progress
-                    self.save()
                     return result
                 except (TimeoutError, TelemetryClientError) as exc:
                     failure = classify_failure(exc)
@@ -467,7 +478,10 @@ class RunHarness:
                     self.stop(StopReason.TOOL_ERROR)
             raise AssertionError("retry loop must return or raise")
         finally:
-            self._active.discard(task)
+            try:
+                await self.checkpoint(check_cancel=False)
+            finally:
+                self._active.discard(task)
 
     async def _tool_attempt(
         self, name: str, signature: str,
@@ -504,6 +518,7 @@ class RunHarness:
                         **display})
         try:
             async with asyncio.timeout(self.state.limits.tool_timeout_seconds):
+                await self.checkpoint()
                 result = await call()
             self.check_active()
             self.emit("tool.completed", span_id=span, parent_span_id=parent,

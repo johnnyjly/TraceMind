@@ -1,10 +1,10 @@
 """Read-only telemetry tool bindings and run-local evidence collection."""
 
-import hashlib
 from collections.abc import Awaitable, Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
-from copy import deepcopy
+import hashlib
 from time import monotonic
 from typing import Annotated
 
@@ -12,20 +12,12 @@ from langchain_core.tools import BaseTool, StructuredTool, tool
 from mcp.types import Tool
 from pydantic import Field
 
-from tracemind.agent.context import json_text
-from tracemind.agent.harness import RunHarness
+from tracemind.agent.workflow.context import json_text
+from tracemind.agent.runtime.harness import RunHarness
+from tracemind.mcp.client import ToolClient
 from tracemind.models import Evidence, EvidenceSource
 from tracemind.models.run import StopReason, ToolName
-from tracemind.mcp.client import HttpMcpClient
 from tracemind.telemetry.errors import RemoteTelemetryError
-from tracemind.telemetry import (
-    JaegerClient,
-    OpenSearchClient,
-    PrometheusClient,
-)
-from tracemind.telemetry.backend import (
-    DirectTelemetryBackend, TelemetryBackend,
-)
 
 
 @dataclass(frozen=True)
@@ -299,7 +291,7 @@ def create_local_tools(
 
 
 async def create_mcp_tools(
-    client: HttpMcpClient, *, start: datetime, end: datetime,
+    client: ToolClient, *, start: datetime, end: datetime,
     collector: EvidenceCollector, harness: RunHarness,
 ) -> list[BaseTool]:
     """Bind server-discovered schemas to the existing execution policy.
@@ -316,12 +308,29 @@ async def create_mcp_tools(
     harness.check_active()
     harness.emit("mcp.discovery.started")
     try:
+        await harness.checkpoint()
         definitions = await client.discover_tools()
     except RemoteTelemetryError as exc:
         harness.emit("mcp.discovery.failed", data={
             "error_type": type(exc).__name__},
             duration_ms=(monotonic() - started) * 1000)
         harness.stop(StopReason.TOOL_ERROR)
+    tools = bind_mcp_tools(client, definitions, start=start, end=end,
+                           collector=collector, harness=harness)
+    harness.emit("mcp.discovery.completed", data={
+        "tool_names": [t.name for t in tools]},
+        duration_ms=(monotonic() - started) * 1000)
+    harness.check_active()
+    return tools
+
+
+def bind_mcp_tools(
+    client: ToolClient, definitions: list[Tool], *, start: datetime,
+    end: datetime, collector: EvidenceCollector, harness: RunHarness,
+) -> list[BaseTool]:
+    """Bind discovered or recorded definitions using identical run policy."""
+    local = create_local_tools(collector, harness)
+    allowed = set(harness.state.allowed_tools) - {t.name for t in local}
     selected = {t.name: t for t in definitions if t.name in allowed}
     if not allowed.issubset(selected):
         harness.emit("mcp.discovery.failed", data={
@@ -395,185 +404,4 @@ async def create_mcp_tools(
     except RemoteTelemetryError as exc:
         harness.emit("mcp.discovery.failed", data={"category": exc.category})
         harness.stop(StopReason.TOOL_ERROR)
-    harness.emit("mcp.discovery.completed", data={
-        "tool_names": [t.name for t in tools]},
-        duration_ms=(monotonic() - started) * 1000)
-    harness.check_active()
     return [*tools, *local]
-
-
-def create_telemetry_tools(
-    prometheus: PrometheusClient,
-    jaeger: JaegerClient,
-    opensearch: OpenSearchClient,
-    *,
-    start: datetime,
-    end: datetime,
-    collector: EvidenceCollector,
-    harness: RunHarness,
-    backend: TelemetryBackend | None = None,
-) -> list[BaseTool]:
-    """Deprecated direct/stdio bindings retained for compatibility tests.
-
-    Bind read-only telemetry tools to a fixed investigation window.
-
-    Filter visibility by the harness allowlist. Execution rechecks
-    authorization and reserves budgets. Store observations before selecting
-    bounded previews, retaining omitted details for paginated retrieval.
-    Exclude observations outside the inclusive window before storing them;
-    final citation validation still checks retained and legacy evidence.
-    """
-    backend = backend or DirectTelemetryBackend(prometheus, jaeger, opensearch)
-
-    execute = _query_executor(start, end, collector, harness)
-
-    @tool(response_format="content_and_artifact")
-    async def query_metrics(
-        expression: Annotated[str, Field(description=(
-            "PromQL expression returning an instant vector, using confirmed "
-            "metric names and label values. Not a bare range vector or "
-            "scalar. "
-            "Query time is fixed to the investigation end by the application."
-        ))],
-    ) -> tuple[list[dict], dict]:
-        """Query an instant vector at the investigation end time.
-
-        Use when sample values are needed to check a hypothesis. Reuse known
-        names and labels; discover_metrics is optional if they are confirmed.
-        Skip this tool when existing evidence already answers the question.
-        Returns normalized observations with evidence IDs, or empty-query
-        guidance without evidence IDs. An empty result does not establish
-        health: check names, labels and sample availability before retrying.
-
-        Conditional example: ONLY if discovery returned request_count_total
-        and the label job="orders", query_metrics with expression
-        'request_count_total{job="orders"}' can inspect those samples.
-        If names or labels are unknown, discover them instead of guessing.
-        """
-        result, artifact = await execute(
-            "query_metrics", {"expression": expression},
-            lambda: backend.query_metrics(expression, at=end),
-        )
-        if not result:
-            result = [{
-                "kind": "empty_metric_query", "query_time": end.isoformat(),
-                "guidance": (
-                    "No matching samples for this expression at query_time. "
-                    "This is not evidence of health or absence of a fault. "
-                    "Check metric names, actual label values, and instant "
-                    "sample availability. Use discover_metrics if authorized "
-                    "instead of repeatedly guessing query variants."
-                ),
-            }]
-            artifact = context_index(result)
-        return result, artifact
-
-    @tool(response_format="content_and_artifact")
-    async def discover_metrics(
-        service: Annotated[str | None, Field(
-            max_length=120, description=(
-                "Exact service value matched against service_name, service "
-                "or job labels, not a substring or regex. Omit or use null "
-                "for a bounded global catalogue when these labels are unknown."
-            ),
-        )] = None,
-        metric: Annotated[str | None, Field(
-            max_length=240, description=(
-                "One exact metric name returned by discovery, not PromQL or "
-                "a regex. Set it to inspect that metric's label examples; "
-                "omit or use null to discover distinct metric names first."
-            ),
-        )] = None,
-        limit: Annotated[int, Field(
-            ge=1, le=50, description=(
-                "Maximum distinct names and maximum series inspected per "
-                "metadata request (1-50, default 20), not an evidence count "
-                "or time range. Results may be incomplete even at this limit."
-            ),
-        )] = 20,
-    ) -> tuple[list[dict], dict]:
-        """Discover metric names and label examples before writing PromQL.
-
-        Use when relevant names or labels are unknown, including after an
-        empty query with suspected mismatched names/labels. Reuse previously
-        discovered metadata instead of rediscovering it for every query.
-        Skip discovery when names/labels are known or evidence is sufficient.
-        The application fixes the investigation window; do not supply dates.
-
-        Returns metrics containing metric, label_keys and example_labels.
-        Empty example_labels means no examples were included, not that the
-        metric has no labels; pass its exact returned name as metric to inspect
-        it. possibly_truncated, omitted_metrics and labels_truncated mark
-        incomplete coverage. Empty discovery may mean service labels differ;
-        bounded global discovery can reveal them. Absence never proves health.
-        Metadata has no evidence IDs or sample values and cannot be cited.
-
-        Examples: If the incident names orders and metric names are unknown,
-        discover_metrics(service="orders") finds candidates to query.
-        If retained evidence already supports a user's explanation request,
-        answer directly without discovery or another metric query.
-        """
-        async def discover() -> list[dict]:
-            """Return metadata without storing observations or evidence IDs."""
-            return [await backend.discover_metrics(
-                service=service, metric=metric,
-                start=start, end=end, limit=limit,
-            )]
-
-        result = await harness.tool_call(
-            "discover_metrics", {"service": service, "metric": metric,
-                                 "limit": limit}, discover,
-        )
-        return result, context_index(result)
-
-    @tool(response_format="content_and_artifact")
-    async def search_traces(service: str) -> tuple[list[dict], dict]:
-        """Find recent Jaeger traces for one service in the incident window."""
-        return await execute(
-            "search_traces", {"service": service},
-            lambda: backend.search_traces(service, start=start, end=end),
-        )
-
-    @tool(response_format="content_and_artifact")
-    async def get_trace_detail(
-        trace_id: Annotated[str, Field(
-            pattern=r"^(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32})$",
-            description=(
-                "Copy the exact attributes.trace_id from returned trace or "
-                "log evidence: a 16 or 32 character hexadecimal Jaeger ID. "
-                "Not an evidence UUID or span_id. Never invent or pad an ID."
-            ),
-        )],
-    ) -> tuple[list[dict], dict]:
-        """Inspect a known trace and return error spans within the window.
-
-        Use its returned attributes.trace_id, not the evidence's id. If no
-        trace ID is available, search_traces or search_logs first. Do not
-        reconstruct a trace ID from an abbreviated value.
-        """
-        return await execute(
-            "get_trace_detail", {"trace_id": trace_id},
-            lambda: backend.get_trace_detail(trace_id),
-        )
-
-    @tool(response_format="content_and_artifact")
-    async def search_logs(
-        service: str,
-        text: str | None = None,
-    ) -> tuple[list[dict], dict]:
-        """Find OpenSearch logs for one service, optionally matching text."""
-        return await execute(
-            "search_logs", {"service": service, "text": text},
-            lambda: backend.search_logs(
-                service, start=start, end=end, text=text
-            ),
-        )
-
-    return [
-        item for item in (
-            query_metrics, discover_metrics, search_traces,
-            get_trace_detail, search_logs,
-            *create_local_tools(collector, harness),
-        )
-        if item.name in harness.state.allowed_tools
-    ]

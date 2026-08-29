@@ -10,39 +10,35 @@ import sys
 from uuid import UUID
 
 import httpx
+from otel_telemetry_mcp.config import Settings as ServerSettings
+from otel_telemetry_mcp.descriptions import DESCRIPTIONS
+from otel_telemetry_mcp.observations import Evidence
+from otel_telemetry_mcp.server import create_app
+from otel_telemetry_mcp.telemetry.errors import TelemetryClientError
+from otel_telemetry_mcp.telemetry.opensearch import OpenSearchClient
 import pytest
+from test_worker import ScriptedModel
 import uvicorn
+
+from tracemind.agent.runtime.harness import RunHarness, RunStopped
+from tracemind.agent.runtime.recovery import ToolUnavailable
+from tracemind.agent.runtime.runner import LangChainAgentRunner
+from tracemind.agent.service import DiagnosisService
+from tracemind.agent.runtime.tools import EvidenceCollector, create_mcp_tools
+from tracemind.config import Settings
+from tracemind.mcp.client import HttpMcpClient, open_telemetry_backend
+from tracemind.models import Incident
+from tracemind.models.run import (
+    RunLimits,
+    RunState,
+    RunStatus,
+    StopReason,
+    TOOL_NAMES,
+)
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]
                        / "services/otel-telemetry-mcp/src"))
-
-from otel_telemetry_mcp.config import Settings as ServerSettings  # noqa: E402
-from otel_telemetry_mcp.descriptions import DESCRIPTIONS  # noqa: E402
-from otel_telemetry_mcp.observations import Evidence  # noqa: E402
-from otel_telemetry_mcp.server import create_app  # noqa: E402
-from otel_telemetry_mcp.telemetry.errors import (  # noqa: E402
-    TelemetryClientError,
-)
-from otel_telemetry_mcp.telemetry.opensearch import (  # noqa: E402
-    OpenSearchClient,
-)
-from tracemind.agent.harness import RunHarness, RunStopped  # noqa: E402
-from tracemind.agent.recovery import ToolUnavailable  # noqa: E402
-from tracemind.agent.service import (  # noqa: E402
-    DiagnosisService, LangChainAgentRunner,
-)
-from tracemind.agent.tools import (  # noqa: E402
-    EvidenceCollector, create_mcp_tools,
-)
-from tracemind.config import Settings  # noqa: E402
-from tracemind.mcp.client import (  # noqa: E402
-    HttpMcpClient, open_telemetry_backend,
-)
-from tracemind.models import Incident  # noqa: E402
-from tracemind.models.run import (  # noqa: E402
-    RunLimits, RunState, RunStatus, StopReason, TOOL_NAMES,
-)
-from test_worker import ScriptedModel  # noqa: E402
 
 
 START = datetime(2024, 9, 1, tzinfo=UTC)
@@ -351,8 +347,8 @@ def test_http_service_reaches_validated_diagnosis():
             settings = Settings(_env_file=None, telemetry_mcp_url=url)
             async with open_telemetry_backend(settings) as client:
                 service = DiagnosisService(
-                    None, None, None, LangChainAgentRunner(ScriptedModel()),
-                    telemetry_backend=client,
+                    LangChainAgentRunner(ScriptedModel()),
+                    tool_client=client,
                 )
                 run = await service.diagnose_with_evidence(
                     INCIDENT, start=START, end=END)
@@ -379,4 +375,119 @@ def test_unavailable_discovery_stops_before_model_and_keeps_partial_state():
                        for e in h.state.events)
         finally:
             await client.aclose()
+    asyncio.run(exercise())
+
+
+def test_replay_tool_definitions_match_live_discovery():
+    from tracemind.evaluation.replay import recorded_tools
+
+    async def exercise():
+        async with http_server() as url:
+            client = HttpMcpClient(url)
+            try:
+                discovered = await client.discover_tools()
+            finally:
+                await client.aclose()
+
+        def contract(tools):
+            return {t.name: (t.description, t.inputSchema) for t in tools}
+        assert contract(discovered) == contract(recorded_tools())
+
+    asyncio.run(exercise())
+
+
+def test_invalid_trace_rpc_counts_attempt_without_backend_query():
+    from tracemind.agent.runtime.recovery import ToolUnavailable
+
+    async def exercise():
+        backend = Backend()
+        async with http_server(backend) as url:
+            client = HttpMcpClient(url)
+            run = harness()
+            try:
+                tools = {t.name: t for t in await create_mcp_tools(
+                    client, start=START, end=END,
+                    collector=EvidenceCollector(), harness=run)}
+                with pytest.raises(ToolUnavailable) as rejected:
+                    await tools['get_trace_detail'].ainvoke(
+                        {'trace_id': 'invalid'}
+                    )
+                assert rejected.value.failure.category == 'invalid_request'
+                assert run.state.tool_calls == {'get_trace_detail': 1}
+                assert backend.calls == []
+            finally:
+                await client.aclose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('entrypoint', ['api', 'worker', 'evaluation'])
+def test_entrypoints_use_shared_http_service_assembly(
+    tmp_path,
+    monkeypatch,
+    entrypoint,
+):
+    from tracemind.agent.worker import RunWorker
+    from tracemind.api.app import (
+        create_app as create_api,
+        get_request_settings,
+    )
+    from tracemind.evaluation.models import EvaluationCase
+    from tracemind.evaluation.runner import run_live_evaluation
+    from tracemind.agent.storage.run_repository import RunRepository
+
+    monkeypatch.setattr('tracemind.agent.factory.create_chat_model',
+                        lambda settings: ScriptedModel())
+
+    async def exercise():
+        backend = Backend()
+        async with http_server(backend) as url:
+            settings = Settings(
+                _env_file=None, telemetry_mcp_url=url,
+                agent_run_database=tmp_path / 'runs.db',
+                agent_checkpoint_database=tmp_path / 'checkpoints.db',
+                agent_trace_directory=tmp_path / 'traces',
+            )
+            if entrypoint == 'api':
+                application = create_api()
+                application.dependency_overrides[get_request_settings] = (
+                    lambda: settings
+                )
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=application),
+                    base_url='http://test',
+                ) as http:
+                    response = await http.post('/api/v1/diagnoses', json={
+                        'incident': INCIDENT.model_dump(mode='json'),
+                        'investigation_start': START.isoformat(),
+                        'investigation_end': END.isoformat(),
+                    })
+                assert response.status_code == 200
+                assert response.json()['evidence_ids'] == [str(UUID(int=1))]
+            elif entrypoint == 'worker':
+                repository = RunRepository(settings.agent_run_database)
+                state = harness().state.model_copy(
+                    update={'status': RunStatus.QUEUED}
+                )
+                repository.create(state, request_hash='http-worker')
+                assert await RunWorker(
+                    settings,
+                    repository=repository).run_once()
+                stored = repository.get(state.id)
+                assert stored.state.status is RunStatus.SUCCEEDED
+                assert stored.state.telemetry_transport == 'mcp'
+                assert stored.result.diagnosis.evidence_ids == [UUID(int=1)]
+            else:
+                case = EvaluationCase.model_validate_json(
+                    Path('evals/cases/payment_failure.json').read_text())
+                report = await run_live_evaluation(
+                    case,
+                    settings,
+                    start=START,
+                    end=END)
+                assert report.error_type is None
+                assert report.run_state.status is RunStatus.SUCCEEDED
+                assert report.telemetry_transport == 'mcp'
+            assert any(call[0] == 'query_metrics' for call in backend.calls)
+
     asyncio.run(exercise())

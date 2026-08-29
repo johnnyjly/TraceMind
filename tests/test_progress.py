@@ -1,23 +1,24 @@
 """Verify durable SSE replay, privacy, disconnect and terminal boundaries."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from httpx import ASGITransport, AsyncClient
+from tool_fixtures import FixtureToolClient
 
-from tracemind.agent.persistence import RunRepository
-from tracemind.agent.service import DiagnosisDraft, DiagnosisService
+from tracemind.agent.storage.io import run_io
+from tracemind.agent.storage.run_repository import RunRepository
+from tracemind.agent.service import DiagnosisService
 from tracemind.agent.worker import RunWorker
 from tracemind.api.app import app, get_run_repository
 from tracemind.api.progress import readable_event, stream_progress
 from tracemind.config import Settings
 from tracemind.models import Evidence, EvidenceSource, Incident
-from tracemind.models.run import (
-    RunEvent, RunLimits, RunState, RunStatus,
-)
+from tracemind.models.result import DiagnosisDraft
+from tracemind.models.run import RunEvent, RunLimits, RunState, RunStatus
 
 
 START = datetime(2024, 9, 1, tzinfo=UTC)
@@ -123,7 +124,9 @@ def test_progress_arrives_during_execution_and_disconnect_keeps_run(tmp_path):
     worker = RunWorker(
         settings, repository=repository,
         service_factory=lambda _saver, _client: DiagnosisService(
-            telemetry, telemetry, telemetry, Runner(), event_directory=None,
+            Runner(),
+            tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
+            event_directory=None,
         ),
     )
 
@@ -216,7 +219,7 @@ def test_worker_setup_failure_is_visible_and_closes_stream(tmp_path):
 
 
 def test_cancel_racing_final_commit_preserves_completed_result(tmp_path):
-    from tracemind.agent.harness import RunHarness
+    from tracemind.agent.runtime.harness import RunHarness
     from tracemind.models import Diagnosis
     from tracemind.models.run import StopReason
     repository = RunRepository(tmp_path / "runs.sqlite3")
@@ -226,7 +229,8 @@ def test_cancel_racing_final_commit_preserves_completed_result(tmp_path):
                     summary="payment failed")
     harness = RunHarness(
         claim.run.state,
-        persist=lambda current: repository.save_progress(
+        persist=lambda current: run_io(
+            repository.save_progress,
             state.id, claim.owner, current, [item],
         ),
     )
@@ -235,6 +239,7 @@ def test_cancel_racing_final_commit_preserves_completed_result(tmp_path):
         root_cause="Payment failed", confidence=.8, evidence_ids=[item.id],
     )
     harness.finish(RunStatus.SUCCEEDED, StopReason.COMPLETED)
+    asyncio.run(harness.checkpoint(check_cancel=False))
     finalized = repository.cancel(state.id)
     assert finalized.state.status is RunStatus.SUCCEEDED
     assert finalized.result.diagnosis.evidence_ids == [item.id]

@@ -1,16 +1,17 @@
 """Project durable run events into readable, reconnectable SSE progress."""
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
+import json
 from time import monotonic
 from uuid import UUID
 
 from fastapi import Request
 
-from tracemind.agent.persistence import RunRepository, TERMINAL
+from tracemind.agent.storage.run_repository import RunRepository
 from tracemind.api.schemas import ProgressEvent
 from tracemind.models.run import RunEvent
+from tracemind.models.storage import TERMINAL
 
 
 TOOLS = {
