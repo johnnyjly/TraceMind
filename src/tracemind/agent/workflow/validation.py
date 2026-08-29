@@ -28,7 +28,7 @@ def validate_draft(
     ))
     if unknown:
         raise DiagnosisValidationError(
-            "agent cited evidence that no telemetry tool returned",
+            "agent cited evidence unavailable in this run",
             code="unknown_evidence", evidence_ids=unknown,
         )
     duplicates = [i for i, count in Counter(draft.evidence_ids).items()
@@ -44,7 +44,7 @@ def validate_draft(
         )
     if draft.status is DiagnosisStatus.COMPLETE and not draft.evidence_ids:
         raise DiagnosisValidationError(
-            "a complete diagnosis must cite telemetry evidence",
+            "a complete diagnosis must cite available evidence",
             code="missing_evidence",
         )
     outside = []

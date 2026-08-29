@@ -50,7 +50,7 @@ def plan_follow_up(
         incident=parent.state.incident,
         investigation_id=investigation_id,
         parent_run_id=parent.state.id, purpose=purpose,
-        prompt_version="single-agent-followup-v2",
+        prompt_version="single-agent-followup-v3",
         user_message=message,
         previous_messages=[s.user_message for s in history
                            if s.user_message],

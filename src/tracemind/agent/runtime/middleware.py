@@ -292,8 +292,9 @@ class HarnessMiddleware(AgentMiddleware):
         """Keep message pairing and send bounded schema/citation feedback."""
         feedback = (
             "Diagnosis rejected by schema or evidence validation. Return one "
-            "valid DiagnosisDraft. Cite only unique evidence IDs actually "
-            "returned by tools within the investigation window, include a "
+            "valid DiagnosisDraft. Cite only unique evidence IDs available "
+            "in this run within the investigation window, including retained "
+            "observations. Include a "
             "nonblank explanation, and use inconclusive if unsupported."
         )
         if validation is not None:

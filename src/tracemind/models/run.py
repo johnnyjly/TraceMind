@@ -144,7 +144,7 @@ class RunState(BaseModel):
     investigation_end: datetime
     limits: RunLimits
     allowed_tools: tuple[ToolName, ...]
-    prompt_version: str = "single-agent-v4"
+    prompt_version: str = "single-agent-v5"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None

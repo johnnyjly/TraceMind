@@ -118,7 +118,9 @@ def test_service_rejects_evidence_id_not_returned_by_tool() -> None:
         ),
     )
 
-    with pytest.raises(DiagnosisError, match="no telemetry tool returned"):
+    with pytest.raises(
+        DiagnosisError, match="evidence unavailable in this run",
+    ):
         asyncio.run(
             service.diagnose(
                 Incident(title="failure", description="unknown"),

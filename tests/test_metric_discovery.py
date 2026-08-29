@@ -70,9 +70,9 @@ def test_discovery_and_empty_query_do_not_create_evidence_or_progress():
             assert rejected.value.failure.category == "invalid_request"
         harness.check_progress()
         assert discovery[0]["metrics"][0]["metric"] == "rpc_calls_total"
-        assert empty[0]["kind"] == "empty_metric_query"
-        assert empty[0]["query_time"] == END.isoformat()
-        assert "not evidence of health" in empty[0]["guidance"]
+        assert empty == []
+        assert "does not establish health" in (
+            tools["query_metrics"].description)
         assert collector.evidence == []
         assert state.evidence_ids == []
         assert state.progress_count == 0
@@ -104,9 +104,9 @@ def test_real_loop_can_discover_query_and_return_grounded_uncertainty(
             return tool_call("query_metrics", {
                 "expression": 'rpc_calls_total{job="payment"}',
             })
-        empty = json.loads(next(m.content for m in reversed(messages)
-                                if isinstance(m, ToolMessage)))
-        assert empty[0]["kind"] == "empty_metric_query"
+        empty = next(m.content for m in reversed(messages)
+                     if isinstance(m, ToolMessage))
+        assert empty == []
         return tool_call("DiagnosisDraft", {
             "status": "inconclusive", "confidence": 0,
             "root_cause": "No matching metric samples; cause remains unknown",
@@ -214,3 +214,44 @@ def test_explicit_existing_allowlist_does_not_gain_discovery_permission():
         collector=EvidenceCollector(), harness=RunHarness(state),
     )
     assert {t.name for t in tools} == {"query_metrics", "read_evidence"}
+
+
+@pytest.mark.parametrize('can_read', [True, False])
+def test_omitted_evidence_guidance_respects_local_tool_permission(can_read):
+    from tracemind.models import Evidence, EvidenceSource
+
+    records = [Evidence(
+        source=EvidenceSource.METRIC, observed_at=END,
+        summary=f'Observation {i}',
+    ) for i in range(51)]
+
+    class ManyObservations:
+        async def query(self, expression, *, at):
+            return records
+
+    async def exercise():
+        allowed = ('query_metrics', 'read_evidence') if can_read else (
+            'query_metrics',)
+        state = RunState(
+            incident=INCIDENT, investigation_start=START,
+            investigation_end=END, limits=RunLimits(), allowed_tools=allowed,
+        )
+        collector = EvidenceCollector()
+        tools = {t.name: t for t in bind_fixture_tools(
+            ManyObservations(), None, None, start=START, end=END,
+            collector=collector, harness=RunHarness(state),
+        )}
+        result = await tools['query_metrics'].ainvoke({'expression': 'up'})
+        assert len(collector.evidence) == 51
+        assert result[-1]['omitted_count'] == 1
+        guidance = result[-1]['retrieval']
+        if can_read:
+            assert 'read_evidence' in guidance
+            page = await tools['read_evidence'].ainvoke({'offset': 50})
+            assert page[0]['id'] == str(records[-1].id)
+        else:
+            assert 'read_evidence' not in tools
+            assert 'read_evidence' not in guidance
+            assert 'unavailable' in guidance
+
+    asyncio.run(exercise())

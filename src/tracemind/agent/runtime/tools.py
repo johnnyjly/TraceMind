@@ -222,7 +222,14 @@ def _query_executor(
             if omitted:
                 result.append({
                     "omitted_count": omitted,
-                    "retrieval": "read_evidence without evidence_id lists all",
+                    "retrieval": (
+                        "Use read_evidence to page stored evidence, filtering "
+                        "by service/source when useful."
+                        if "read_evidence" in harness.state.allowed_tools
+                        else "Detail retrieval is unavailable under current "
+                        "tool policy; omitted observations cannot be "
+                        "inspected."
+                    ),
                 })
             if excluded:
                 result.append({
@@ -355,6 +362,14 @@ def bind_mcp_tools(
                               if key not in injected]
         if not definition.description:
             raise RemoteTelemetryError("tool_contract_mismatch")
+        description = definition.description
+        if injected:
+            description += (
+                "\n\nFor this investigation, TraceMind supplies "
+                + ", ".join(injected)
+                + " from the fixed investigation window. These fields are "
+                "omitted from your input schema; do not provide them."
+            )
         name = definition.name
 
         async def invoke(**arguments):
@@ -379,23 +394,10 @@ def bind_mcp_tools(
                 reply = await remote()
                 return reply.evidence
 
-            result, artifact = await execute(name, arguments, observations)
-            if not result and name == "query_metrics":
-                result = [{
-                    "kind": "empty_metric_query",
-                    "query_time": end.isoformat(),
-                    "guidance": (
-                        "No matching samples. This is not evidence of health. "
-                        "Check names, labels and sample availability; "
-                        "discover metrics if unknown instead of guessing "
-                        "variants."
-                    ),
-                }]
-                artifact = context_index(result)
-            return result, artifact
+            return await execute(name, arguments, observations)
 
         return StructuredTool.from_function(
-            coroutine=invoke, name=name, description=definition.description,
+            coroutine=invoke, name=name, description=description,
             args_schema=schema, response_format="content_and_artifact",
         )
 

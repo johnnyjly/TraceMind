@@ -110,8 +110,9 @@ class PrometheusClient:
             "omitted_metrics": 0,
             "guidance": (
                 "Metadata is not evidence and may describe series without "
-                "samples in this window. Use actual metric names and label "
-                "examples to construct a focused query_metrics expression. "
+                "samples in this window. If query_metrics is available and "
+                "sample values are needed, use actual metric names and label "
+                "examples to construct a focused expression. "
                 "If a listed metric has no label examples, pass its exact "
                 "name as metric to discover_metrics to inspect its labels. "
                 "This catalogue is bounded, not exhaustive. If no service "

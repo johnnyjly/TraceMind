@@ -143,7 +143,20 @@ def test_discovered_definitions_five_calls_and_local_evidence(monkeypatch):
                 tools = {t.name: t for t in await create_mcp_tools(
                     client, start=START, end=END, collector=store, harness=h)}
                 assert set(tools) == set(TOOL_NAMES)
-                assert tools["query_metrics"].description == description
+                bound_description = tools["query_metrics"].description
+                assert bound_description.startswith(description)
+                assert "TraceMind supplies at" in bound_description
+                assert "do not provide them" in bound_description
+                assert "TraceMind supplies start, end" in (
+                    tools["search_logs"].description)
+                assert tools["get_trace_detail"].description == (
+                    DESCRIPTIONS["get_trace_detail"])
+                remote = {t.name: t for t in await client.discover_tools()}
+                assert remote["query_metrics"].description == description
+                assert remote["query_metrics"].inputSchema["required"] == [
+                    "expression", "at"]
+                assert remote["discover_metrics"].inputSchema["required"] == [
+                    "start", "end"]
                 schema = tools["query_metrics"].args_schema
                 assert set(schema["properties"]) == {"expression"}
                 assert schema["required"] == ["expression"]
