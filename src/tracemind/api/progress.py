@@ -15,26 +15,26 @@ from tracemind.models.storage import TERMINAL
 
 
 TOOLS = {
-    "query_metrics": "监控指标", "search_traces": "分布式链路",
-    "get_trace_detail": "链路详情", "search_logs": "服务日志",
-    "read_evidence": "已保存的证据",
-    "discover_metrics": "指标名称和标签",
+    "query_metrics": "monitoring metrics", "search_traces": "distributed traces",
+    "get_trace_detail": "trace details", "search_logs": "service logs",
+    "read_evidence": "saved evidence",
+    "discover_metrics": "metric names and labels",
 }
 MESSAGES = {
-    "run.queued": ("queued", "调查已接收，等待执行"),
-    "run.started": ("started", "开始调查"),
-    "run.resumed": ("resuming", "正在恢复中断的调查"),
-    "model.started": ("analyzing", "正在分析已有信息"),
-    "model.failed": ("error", "模型调用失败"),
-    "model.cancelled": ("cancelling", "模型调用已中止"),
-    "recovery.retry_scheduled": ("retrying", "调用暂时失败，正在重试"),
-    "model.switched": ("retrying", "正在切换备用模型"),
-    "recovery.ambiguous_call": ("resuming", "中断时的调用结果尚未确认"),
-    "diagnosis.repair_requested": ("analyzing", "正在修正诊断输出"),
-    "policy.finalizing": ("finalizing", "工具调查已停止，正在根据已有证据整理结论"),
-    "memory.selected": ("historical_context", "历史经验检索完成，正在核对本次证据"),
-    "guidance.selected": ("historical_context", "已读取用户偏好和调查 Skill"),
-    "memory.feedback_saved": ("memory_updated", "反馈记忆处理完成"),
+    "run.queued": ("queued", "Investigation received, awaiting execution"),
+    "run.started": ("started", "Starting investigation"),
+    "run.resumed": ("resuming", "Resuming interrupted investigation"),
+    "model.started": ("analyzing", "Analyzing available information"),
+    "model.failed": ("error", "Model call failed"),
+    "model.cancelled": ("cancelling", "Model call cancelled"),
+    "recovery.retry_scheduled": ("retrying", "Call temporarily failed, retrying"),
+    "model.switched": ("retrying", "Switching to fallback model"),
+    "recovery.ambiguous_call": ("resuming", "The outcome of the interrupted call is unconfirmed"),
+    "diagnosis.repair_requested": ("analyzing", "Correcting diagnosis output"),
+    "policy.finalizing": ("finalizing", "Tool investigation stopped, preparing conclusions from available evidence"),
+    "memory.selected": ("historical_context", "Historical experience retrieved, checking current evidence"),
+    "guidance.selected": ("historical_context", "User preferences and investigation skill loaded"),
+    "memory.feedback_saved": ("memory_updated", "Feedback memory processing completed"),
 }
 
 
@@ -47,35 +47,35 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         "applied", "skipped", "rejected_count",
     } and isinstance(value, (str, int, float, bool))}
     if event.kind.startswith("tool."):
-        tool = TOOLS.get(data.get("tool"), "工具")
+        tool = TOOLS.get(data.get("tool"), "tool")
         service = data.get("service")
         target = f" {service}" if service else ""
         phase = "querying"
         if event.kind == "tool.started":
-            message = f"正在读取{target}的{tool}" if target else f"正在读取{tool}"
+            message = f"Reading {tool} for{target}" if target else f"Reading {tool}"
         elif event.kind == "tool.completed":
             phase = "query_completed"
             count = data.get("result_count", 0)
             # result_count counts returned preview records, not new evidence.
-            message = f"{tool}读取完成，返回 {count} 条记录"
+            message = f"Finished reading {tool}, returned {count} records"
         elif event.kind == "tool.failed":
-            phase, message = "error", f"{tool}读取失败"
+            phase, message = "error", f"Failed to read {tool}"
         elif event.kind == "tool.cancelled":
-            phase, message = "cancelling", f"{tool}读取已中止"
+            phase, message = "cancelling", f"Reading {tool} cancelled"
         elif event.kind == "tool.skipped":
-            phase, message = "finalizing", f"{tool}未执行，调查已进入收尾阶段"
+            phase, message = "finalizing", f"Skipped {tool}, investigation is finalizing"
         else:
             return None
     elif event.kind == "observations.stored":
         phase = "evidence_received"
-        message = f"已保存 {data.get('added', 0)} 条新增证据"
+        message = f"Saved {data.get('added', 0)} new evidence records"
     elif event.kind == "run.finished":
         phase = "finished"
         message = {
-            "succeeded": "诊断已完成",
-            "inconclusive": "调查结束，尚未确认根因",
-            "cancelled": "调查已取消", "failed": "调查失败",
-        }.get(data.get("status"), "调查已结束")
+            "succeeded": "Diagnosis completed",
+            "inconclusive": "Investigation finished without a confirmed root cause",
+            "cancelled": "Investigation cancelled", "failed": "Investigation failed",
+        }.get(data.get("status"), "Investigation finished")
     elif event.kind in MESSAGES:
         phase, message = MESSAGES[event.kind]
     else:

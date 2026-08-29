@@ -84,7 +84,7 @@ def test_progress_omits_raw_payloads_and_internal_events():
                      })
     progress = readable_event(event)
     assert "payment" in progress.message
-    assert "服务日志" in progress.message
+    assert "service logs" in progress.message
     assert progress.data == {"tool": "search_logs", "service": "payment"}
     assert "private" not in progress.model_dump_json()
     event.kind = "context.admitted"
@@ -213,7 +213,7 @@ def test_worker_setup_failure_is_visible_and_closes_stream(tmp_path):
     snapshot = repository.event_snapshot(state.id)
     assert snapshot.status is RunStatus.FAILED
     event = readable_event(snapshot.events[-1])
-    assert event.message == "调查失败"
+    assert event.message == "Investigation failed"
     assert event.data["reason"] == "model_error"
     assert "private provider" not in event.model_dump_json()
 
