@@ -77,10 +77,11 @@ Never commit the populated `.env` file. Model configuration is loaded only
 when the diagnosis endpoint is called, so the health endpoint remains usable
 without an API key.
 
-## RAG infrastructure (optional)
+## RAG ingestion and retrieval (optional)
 
-The first RAG increment provides an isolated retrieval runtime. It is not
-registered as an Agent tool and does not change the single-agent baseline.
+The optional RAG package provides explicit offline ingestion and an isolated
+retrieval runtime. It is not registered as an Agent tool and does not change
+the single-agent baseline.
 No documents are automatically imported from `knowledge/`.
 
 ```text
@@ -124,7 +125,8 @@ The default `bootstrap` workspace contains zero knowledge chunks and is
 explicitly marked unpublished.
 
 ```bash
-uv run --extra rag python scripts/rag.py query --query "RPC connection errors" --mode mix
+uv run --extra rag python scripts/rag.py query --snapshot runbooks-v1 \
+  --query "RPC connection errors" --mode mix
 ```
 
 An empty workspace returns `[]` without model calls. Once populated, retrieval
@@ -141,10 +143,58 @@ completion function into `RagRuntime`. Missing injection raises an explicit
 error only when retrieval needs an LLM. Provider-specific request options are
 owned by the CLI adapter. Initializing empty stores requires no model key.
 
+### Prepare and build a knowledge snapshot
+
+The corpus must provide an English schema-v2 `manifest.json` and `sources.json`.
+Only documents explicitly selected by the profile are read, from `documents/`.
+File hashes and referenced Git objects are verified before extraction. Web
+references require HTTPS, an access date and a version policy; their live
+contents and the semantic correctness of authored claims are not verified.
+
+```bash
+# Review normalized text, parent sections and child chunks; no paid calls.
+uv run --extra rag python scripts/rag.py prepare --corpus knowledge --profile core
+
+# Example budget: adjust for the selected corpus; exhausting it fails the build.
+uv run --extra rag python scripts/rag.py build --corpus knowledge --profile core \
+  --snapshot runbooks-v1 --max-model-calls 512 --build-timeout 1800
+uv run --extra rag python scripts/rag.py verify --snapshot runbooks-v1
+```
+
+Use `--demo-repo` when the referenced OpenTelemetry Demo repository is not at
+`../opentelemetry-demo`. `--env-file` selects provider credentials/settings;
+`--model-cache` or `TRACEMIND_RAG_MODEL_CACHE_DIRECTORY` shares cached models
+without sharing snapshot files.
+
+Markdown, HTML, authored JSON and text PDFs are normalized into sections.
+PDF headings use font-size heuristics tailored to the current corpus; OCR is
+not supported. Full sections are persisted as parents. LangChain's recursive
+splitter creates children using the pinned BGE tokenizer, with a default
+320-token budget including title/section headers and a target 32-token overlap
+within each section. Structural boundaries can reduce overlap. Original text
+and reversible character offsets are retained and checked; over-limit inputs
+are rejected rather than silently truncated.
+
+Build registers canonical parents/children and FTS5 indexes in SQLite, then
+uses those same child IDs in LightRAG. Local BGE creates vectors; the configured
+LLM extracts entities and relationships. Per-call time/output bounds, a whole-
+build call budget and a total timeout apply. `build.json` and document logs
+record progress and usage. Publication requires agreement between SQLite,
+LightRAG text and Qdrant chunks, and registered source IDs for every graph item.
+Local files are hashed before an atomic `snapshot.json` publication marker is
+written. Published SQLite is read-only; incomplete builds cannot be queried.
+Failed builds remain for inspection and require a new snapshot ID to retry.
+There is no cross-store transaction or automatic partial-graph repair.
+
+`verify` checks local snapshot hashes only; it does not recheck remote Qdrant.
+Parents can be read with `KeywordIndex.get_parent()`, but retrieval does not
+automatically expand child hits into full sections. Source/scope metadata is
+preserved, not yet enforced by an online query policy. A graph edge is extracted
+reference knowledge, not proof of a current incident's cause.
+
 ### Remaining boundaries
 
-Source verification, format selection, section-aware chunking, extraction,
-immutable snapshot publication and retrieval evaluation are the next stage.
+Controlled retrieval evaluation and online query planning remain pending.
 Agent integration will additionally supply English query planning, charge
 internal model calls to the outer run budget, and keep knowledge citations
 distinct from telemetry evidence IDs. The CLI is not a distributed retrieval

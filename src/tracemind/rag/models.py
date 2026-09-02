@@ -5,10 +5,9 @@ from hashlib import sha256
 from pydantic import BaseModel, Field
 
 
-class KnowledgeChunk(BaseModel):
-    """Canonical chunk metadata registered by the future ingestion stage."""
+class KnowledgeSource(BaseModel):
+    """Pinned provenance shared by a section and its retrieval chunks."""
 
-    chunk_id: str = Field(min_length=1)
     doc_id: str = Field(min_length=1)
     title: str
     section: str
@@ -17,6 +16,27 @@ class KnowledgeChunk(BaseModel):
     document_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_refs: list[str] = Field(min_length=1)
     source_revision: str = Field(min_length=1)
+    scope: str = ""
+    heading_path: list[str] = Field(default_factory=list)
+    extracted_sha256: str = ""
+
+
+class KnowledgeParent(KnowledgeSource):
+    """Complete normalized section; never embedded as an oversized child."""
+
+    parent_id: str = Field(min_length=1)
+    source_start: int = Field(ge=0)
+    source_end: int = Field(gt=0)
+
+
+class KnowledgeChunk(KnowledgeSource):
+    """A bounded child with offsets into its complete parent section."""
+
+    chunk_id: str = Field(min_length=1)
+    parent_id: str | None = None
+    source_start: int = Field(default=0, ge=0)
+    source_end: int = Field(default=0, ge=0)
+    source_text: str = ""
     identifiers: str = ""
 
     @property
@@ -35,7 +55,9 @@ class RetrievalHit(BaseModel):
 
 
 def fuse_candidates(
-    branches: dict[str, list[KnowledgeChunk]], *, limit: int,
+    branches: dict[str, list[KnowledgeChunk]],
+    *,
+    limit: int,
 ) -> list[RetrievalHit]:
     """Fuse reciprocal ranks instead of adding incompatible backend scores."""
     hits: dict[str, RetrievalHit] = {}
@@ -53,5 +75,6 @@ def fuse_candidates(
                 raise ValueError("conflicting metadata for one chunk ID")
             hit.branches.append(branch)
             hit.fusion_score += 1 / (60 + rank)
-    return sorted(hits.values(),
-                  key=lambda h: (-h.fusion_score, h.chunk.chunk_id))[:limit]
+    return sorted(
+        hits.values(), key=lambda h: (-h.fusion_score, h.chunk.chunk_id)
+    )[:limit]

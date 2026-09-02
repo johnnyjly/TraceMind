@@ -23,7 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 rag = [
+    "langchain-text-splitters>=1.1.3,<2",
     "lightrag-hku==1.5.7",
+    "pypdf>=6.1,<7",
     "qdrant-client==1.19.1",
     "sentence-transformers==6.1.0",
 ]

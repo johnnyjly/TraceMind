@@ -45,15 +45,33 @@ local BGE reranking. It exposes structured canonical knowledge chunks with
 document hashes and source revisions. `mix` and `naive` share the same downstream
 fusion and ranking. No knowledge enters diagnosis context automatically.
 
-This increment supplies setup/check/query commands and an unpublished bootstrap
-workspace. It does not ingest `knowledge/`, build a production corpus, publish
-immutable snapshots or register an Agent tool. Tokenizer limits prevent silent
-embedding/reranker truncation. Injected model calls have bounded accounting;
-future Agent integration must also charge them to the outer run budget.
+Explicit prepare/build/verify commands now select a manifest profile, verify
+source-file hashes and pinned Git bytes, and parse Markdown, HTML, JSON and text
+PDFs. Web sources retain access/version metadata without live verification.
+Complete sections are canonical parents; LangChain recursive splitting uses
+BGE token counts, section-local overlap and reversible original-text offsets
+for children. The child budget includes title/section headers. SQLite persists
+parents, children and both FTS5 indexes in a transaction.
+
+LightRAG receives the prepared child IDs through its custom chunking pipeline.
+Local BGE embeds chunks/entities/relationships and the injected LLM extracts
+the graph. A build has one call budget, per-call limits and a total timeout.
+Publication validates document status, canonical text across stores and graph
+source references, then freezes local hashes with an atomic snapshot marker.
+This is a publication gate, not a distributed transaction. Failures remain
+unpublished and retry with a new ID; partial graph repair is not implemented.
+Published SQLite is read-only and query caching is disabled. Local verification
+does not verify Qdrant contents. Parents are available by ID but are not expanded
+automatically during retrieval.
+
+The empty bootstrap workspace remains unpublished. No Agent tool is registered.
+Tokenizer limits prevent silent embedding/reranker truncation. Injected model
+calls have bounded accounting; future Agent integration must also charge them
+to the outer run budget.
 The library accepts an async completion callback; the CLI owns provider
 selection, credential loading and provider-specific request options.
-One process owns each local workspace. Source verification, ingestion recovery,
-snapshot publication, English query planning and knowledge-specific evaluation
+An OS file lock grants one process ownership of each local workspace. English
+query planning, online source/scope policy and knowledge-specific evaluation
 remain required before enabling retrieval in diagnosis runs.
 
 ### Diagnosis execution

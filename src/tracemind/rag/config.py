@@ -11,10 +11,13 @@ class RagSettings(BaseSettings):
     """Configure optional RAG without activating it in diagnosis runs."""
 
     model_config = SettingsConfigDict(
-        env_file=".env", env_prefix="TRACEMIND_RAG_", extra="ignore",
+        env_file=".env",
+        env_prefix="TRACEMIND_RAG_",
+        extra="ignore",
     )
 
     directory: Path = Path("artifacts/rag")
+    model_cache_directory: Path | None = None
     snapshot: str = Field(default="bootstrap", pattern=r"^[a-zA-Z0-9_-]+$")
     qdrant_url: AnyHttpUrl = "http://127.0.0.1:6333"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -25,7 +28,8 @@ class RagSettings(BaseSettings):
     reranker_revision: str = "2cfc18c9415c912f9d8155881c133215df768a70"
     reranker_max_tokens: int = Field(default=512, ge=1)
     embedding_query_prefix: str = (
-        "Represent this sentence for searching relevant passages: ")
+        "Represent this sentence for searching relevant passages: "
+    )
     device: Literal["cpu", "mps"] = "cpu"
     batch_size: int = Field(default=8, ge=1, le=64)
     chunk_tokens: int = Field(default=320, ge=1)
@@ -60,3 +64,10 @@ class RagSettings(BaseSettings):
     def workspace(self) -> Path:
         """Return the directory for one fixed snapshot identifier."""
         return self.directory / "snapshots" / self.snapshot
+
+    @property
+    def models_directory(self) -> Path:
+        """Allow independent snapshots to reuse cached, pinned model
+        weights.
+        """
+        return self.model_cache_directory or self.directory / "models"

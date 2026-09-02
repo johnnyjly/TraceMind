@@ -1,14 +1,13 @@
 """Bound and log internal LightRAG model calls without hidden SDK retries."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
 import logging
+from collections.abc import Awaitable, Callable
 from time import monotonic
 
 from langchain_core.messages import AIMessage
 
 from tracemind.rag.config import RagSettings
-
 
 logger = logging.getLogger(__name__)
 Completion = Callable[..., Awaitable[AIMessage]]
@@ -22,7 +21,9 @@ class RagModel:
     """
 
     def __init__(
-        self, settings: RagSettings, completion: Completion | None = None,
+        self,
+        settings: RagSettings,
+        completion: Completion | None = None,
     ) -> None:
         """Accept external model execution without choosing a provider."""
         self.settings = settings
@@ -42,8 +43,12 @@ class RagModel:
         self.unreported_calls = 0
 
     async def complete(
-        self, prompt, system_prompt=None, history_messages=None,
-        keyword_extraction=False, **kwargs,
+        self,
+        prompt,
+        system_prompt=None,
+        history_messages=None,
+        keyword_extraction=False,
+        **kwargs,
     ) -> str:
         """Invoke the supplied model with counted admission and hard limits."""
         if self._completion is None:
@@ -60,16 +65,34 @@ class RagModel:
         try:
             async with asyncio.timeout(self.settings.timeout_seconds):
                 response = await self._completion(
-                    messages, max_tokens=self.settings.llm_output_tokens,
-                    keyword_extraction=keyword_extraction)
+                    messages,
+                    max_tokens=min(
+                        kwargs.get("max_tokens")
+                        or self.settings.llm_output_tokens,
+                        self.settings.llm_output_tokens,
+                    ),
+                    keyword_extraction=keyword_extraction,
+                )
         finally:
-            logger.info("rag.model call=%s elapsed_ms=%.1f", self.calls,
-                        (monotonic() - started) * 1000)
+            logger.info(
+                "rag.model call=%s elapsed_ms=%.1f",
+                self.calls,
+                (monotonic() - started) * 1000,
+            )
         usage = response.usage_metadata
         if usage is not None:
             self.unreported_calls -= 1
             self.input_tokens += usage["input_tokens"]
             self.output_tokens += usage["output_tokens"]
         if not isinstance(response.content, str):
-            raise ValueError("RAG model must return textual content")
+            # Preserve ValueError for invalid provider payloads.
+            raise ValueError(  # noqa: TRY004
+                "RAG model must return textual content"
+            )
+        if response.response_metadata.get("finish_reason") in {
+            "length",
+            "max_tokens",
+            "MAX_TOKENS",
+        }:
+            raise RuntimeError("RAG model output was truncated")
         return response.content
