@@ -85,7 +85,9 @@ def test_discovery_and_empty_query_do_not_create_evidence_or_progress():
         assert all(e.data["evidence_ids"] == [] for e in completed)
         assert completed[-1].data["result_count"] == 0
         started = next(e for e in state.events if e.kind == "tool.started")
-        assert "指标名称和标签" in readable_event(started).message
+        assert readable_event(started).message == (
+            "Reading metric names and labels for payment"
+        )
 
     asyncio.run(execute())
 
