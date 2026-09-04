@@ -1,470 +1,208 @@
-# TraceMind single-agent design
+# TraceMind design
 
-## Priority and current status
+TraceMind is a portfolio-oriented incident diagnosis system for controlled
+microservice faults. A single agent chooses queries and interprets results;
+application code owns permissions, execution, state and termination.
 
-The next milestone is a reliable, observable single-agent diagnosis service.
-Multi-agent orchestration follows an evaluated single-agent baseline.
-The capabilities below are planned work unless explicitly marked current.
+This document describes the current implementation. Feature changes are in
+[CHANGELOG.md](CHANGELOG.md); setup and API usage start in [README.md](README.md).
 
-Current code provides a `create_agent` tool loop, five read-only telemetry
-tools plus run-local evidence retrieval, normalized observations, structured
-output, and one live payment-failure case. Telemetry defaults to discovered MCP
-tools over Streamable HTTP; direct/stdio execution paths have been removed.
-S1 adds per-run state, a tool registry and tool-name allowlist, model/tool call
-budgets, identical-query limits, model/tool/run timeouts, completion checks,
-and structured JSONL events. API and evaluation use the same controls; the
-case's tool budget also constrains execution. Scripted-model tests exercise the
-real agent loop, parallel admission, cancellation, isolation, and failure paths.
-
-S2 adds a per-run observation store with exact deduplication, bounded previews,
-a budgeted read_evidence tool, deterministic input reduction, and a conservative
-input estimate plus enforced provider output cap. Compression retains evidence
-references and tool-call/result pairing; oversized fixed input stops explicitly.
-Store size limits retain partial evidence with a context_limit outcome.
-
-Queued runs now have resumable checkpoints and durable evidence. S6 adds opt-in,
-human-confirmed structured memory with fixed run snapshots. Service/tenant
-authorization and full payload trace export remain pending. S1 disables SDK
-retries and records provider usage when available. Its
-event files contain operational metadata and evidence IDs, not full observations
-or recoverable graph state. Optional DEBUG logging exposes the same sanitized
-event metadata in the terminal without changing persisted events.
-Trace file I/O failures produce a server warning while preserving in-memory
-events and the primary run outcome. Expected external errors are classified as
-model/tool errors; unexpected implementation errors retain `internal_error`
-and their exception chain. API error `detail` stays a string, with run metadata
-in response headers; timezone-aware inputs remain required.
-
-## Agent and workflow responsibilities
-
-### Optional knowledge retrieval
-
-Offline preparation uses Docling converters and HybridChunker with the pinned
-embedding tokenizer. Complete parent sections and bounded child chunks retain
-file hashes, source revisions, headings and framework element pointers. Legacy
-snapshots retain their original offset validation. A changed parser requires a
-new snapshot; publication still gates canonical text, vectors and graph source
-IDs before recording immutable local hashes.
-
-LightRAG `mix` provides graph/vector candidates; SQLite FTS5 supplies independent
-BM25 candidates. LangChain EnsembleRetriever fuses all query branches, followed
-by one local BGE rerank. `naive` keeps the same lexical/fusion/ranking stages for
-comparison. Provider assembly lives in the application, not the retrieval
-library; omitted RAG model overrides use the explicitly configured main model.
-
-Online knowledge is off by default and requires a published snapshot plus
-explicit tool grants. Queue admission freezes KnowledgePolicy in RunState.
-The Agent may use `search_knowledge`, optionally requesting English translation
-or decomposition. All auxiliary model attempts and retries consume the parent
-Harness budget and carry the actual tool span as their parent. A configurable
-reserve protects final diagnosis calls. Optional retrieval failures degrade to
-tool errors; hard run deadlines and exhausted budgets remain authoritative.
-
-The application caches local model weights and serializes per-process queries.
-Each search receives a fresh counted callback/runtime. Published SQLite is
-read-only; writable LightRAG graph/JSON stores use a private temporary copy.
-Runtime close and cancellation release stores and the OS snapshot lock. Local
-inference is drained before cancellation releases ownership. These local stores
-and locks do not support distributed multi-worker retrieval.
-
-RunState retains ranked children and complete parents under count/byte caps.
-`read_knowledge` pages retained parent text without a live backend. Follow-ups
-copy sources and their pinned policy. Explanation allows retained-data readers
-only. Knowledge tool results use the shared context compressor, preserving the
-newest detail page and citation IDs. Valid knowledge citations cannot replace
-current telemetry evidence when completing a diagnosis.
-
-Offline IR evaluation uses ir-measures on the actual returned ranking. Labels
-stay outside the retrieval input. It reports document Recall, MRR and nDCG,
-returned IDs, time and internal model usage. Controlled diagnosis RAG off/on
-comparison is separate. Tenant/source authorization, distributed retrieval,
-and corpus-wide quality evaluation remain explicit later work.
-
-### Diagnosis execution
-
-One diagnostic agent chooses queries, interprets evidence, revises hypotheses,
-and proposes conclusions. Application code owns execution and termination.
-
-| Step | Owner | Contract |
-| --- | --- | --- |
-| Validate incident and resolve scope | Workflow | Scope comes from trusted configuration or authenticated identity |
-| Load state and compose context | Workflow | Apply context budget, evidence selection, and prompt version |
-| Propose query or diagnosis | Agent | Structured proposal with evidence references |
-| Authorize and execute tools | Workflow | Validate arguments, scope, budgets, timeout, and retry policy |
-| Normalize and store observations | Workflow | Preserve provenance and return bounded evidence |
-| Interpret evidence and choose follow-up | Agent | Distinguish observations, hypotheses, and missing information |
-| Accept diagnosis or request revision | Workflow | Validate completion contract and bound repair attempts |
-| Stop and publish result | Workflow | Persist terminal status, stop reason, and partial results |
+## Execution flow
 
 ```mermaid
 flowchart TD
-    A[Validate request and initialize run] --> B[Check budget and cancellation]
-    B --> C[Build bounded context]
+    A[Incident and fixed investigation window] --> B[Load policy and run state]
+    B --> C[Build bounded model context]
     C --> D[Agent proposes action]
     D -->|Tool call| E[Authorize and reserve budget]
     E --> F[Execute with timeout and bounded retry]
-    F --> G[Store observation and update state]
-    G --> B
-    D -->|Diagnosis proposal| H[Validate completion contract]
-    H -->|Revision allowed| G
+    F --> G[Validate and retain observations or references]
+    G --> C
+    D -->|Diagnosis| H[Validate schema and citations]
+    H -->|Bounded repair| C
     H -->|Accepted| I[Persist terminal result]
-    B -->|Limit or cancellation| I
-    E -->|Denied| G
+    E -->|Soft investigation limit| J[Close tools and request final diagnosis]
+    J --> C
+    C -->|Hard limit or cancellation| I
 ```
 
-Initially retain `create_agent` and use middleware for model/tool interception
-and custom state. Add explicit graph nodes where tested requirements cannot be
-expressed clearly through these hooks. Verify APIs against locked dependencies.
+The agent uses LangChain `create_agent` and LangGraph. API, worker and live
+evaluation share service assembly. Synchronous diagnoses execute in the request;
+queued runs execute in a separate worker with persistent recovery.
 
-## 1. Context engineering
+## Component ownership
 
-Compose model input from four layers:
+Paths below are relative to `src/tracemind/`.
 
-1. Versioned system instructions: diagnostic method, evidence requirements,
-   uncertainty, untrusted-data boundaries, and output contract.
-2. Run context: incident, fixed time window, available tools, remaining budget,
-   and policy feedback. Credentials stay outside model context.
-3. Working notes: hypotheses, supporting/contradicting evidence IDs, completed
-   queries, unresolved questions, and intended next checks.
-4. Selected evidence and recent complete model/tool exchanges.
-
-Store observations outside the prompt. Return bounded summaries, provenance,
-and references for detail retrieval. Normalize, filter, deduplicate, and cap
-fields/results before selecting relevant evidence. Preserve contradictions.
-Deduplication must consider trace/span identity, timestamps, metric labels,
-and error details; identical summary text does not establish duplication.
-
-Summarize older exchanges only when needed. Keep tool-call/result pairs valid,
-including pending responses. Summaries retain evidence IDs and never become
-new observed evidence. On summary failure, use deterministic selection and
-stored-detail references, or terminate with a context-limit reason. Any summary
-model performs a bounded transformation without investigation tool access.
-
-Budget the full input, including tool schemas, and reserve response tokens.
-Distinguish estimates from provider usage. Measure evidence retention and
-diagnostic accuracy after compression.
-
-### MCP telemetry service and dynamic tool binding
-
-The telemetry service is a standalone package in `services/otel-telemetry-mcp`
-with its own dependency lock, configuration, HTTP entrypoint and Docker image.
-It imports no TraceMind runtime modules. The service owns backend clients, typed
-arguments, full tool guidance and normalized observation/reply schemas. TraceMind
-validates received JSON into its existing Evidence model; neither package needs
-the other installed. The wire schema is the compatibility boundary.
-
-HTTP is the default application path. `HttpMcpClient` initializes one SDK
-Streamable HTTP session and fetches paginated tool definitions with bounded
-count, page bytes and discovery time. The generic tool binder filters names by
-the existing run allowlist, uses server descriptions/schemas for LangChain and
-injects fixed investigation timestamps according to server schema annotations.
-No per-query implementation is used in this path. Local `read_evidence` is
-registered alongside the remote tools and cannot be replaced by discovery.
-
-Tool names are validated strings; the six existing names are default grants,
-not a closed registry. The pure workflow policy intersects run/application
-grants with task restrictions and optional trusted Agent grants. It persists
-the resulting names in the existing run snapshot, with no database migration.
-The model sees only admitted tools, and the harness repeats admission checks
-for execution and retries. Future child-Agent grants must remain subsets of
-the investigation grants. Multi-agent orchestration and shared budget ownership
-are separate work.
-
-The transport returns standard MCP results without tool-name dispatch. The
-telemetry adapter is selected by the versioned result contract in tool `_meta`;
-the exact legacy TelemetryReply output schema is also accepted. Domain
-observations retain their existing validation, filtering, storage and citation
-rules. Generic text/JSON is reference material, never automatically Evidence,
-even if it contains IDs or resembles an observation. Generic results do not
-receive stored-evidence compression indexes or implicit retries. Server result
-contracts and preview hints describe handling; they cannot authorize tools.
-
-Discovery runs inside diagnosis lifecycle/deadline handling, emits metadata
-events and finishes before model dispatch. It is setup rather than a model or
-query attempt. Local-only explanation and resumed finalization skip it. Query
-admission, shared attempts, retries, no-progress detection, evidence retention,
-context shaping and completion checks remain in the existing harness/workflow.
-A dedicated task owns all SDK context entry/exit; closing it releases the HTTP
-session without terminating the server. No automatic direct fallback is used.
-
-The server uses JSON RPC responses over Streamable HTTP, maintains MCP session
-connections rather than investigation state, and reuses backend HTTP pools.
-Only typed observations become Evidence; metadata and safe error replies do
-not. Both endpoints cap decoded replies. Server model keys, run databases,
-checkpoints, long-term memory and agent execution are absent.
-
-Deployment uses a separate Compose project joined to the Demo network, with
-only localhost:8012 published. The default scope is a local machine; remote
-hosting/authentication is not implemented. Direct clients, manually registered
-telemetry wrappers and the original stdio implementation have been removed.
-Offline replay binds recorded MCP definitions to synthetic replies through the
-same tool binder. Historical records keep their old transport label.
-This change does not establish multi-worker checkpoint ownership guarantees.
-
-Validation covers real HTTP discovery and execution, server-owned descriptions,
-application context binding, permissions, parallel budgets, retry accounting,
-response limits, timeout/cancellation, evidence filtering, local-only operation
-and scripted API/worker/evaluation execution. Container verification checks that
-TraceMind and LangChain are absent. Live telemetry probes are separate from
-model-quality evaluation, and offline replay remains in-process.
-
-## 2. Run state and persistence
-
-Introduce single-agent `RunState`: run/thread IDs, incident and time window,
-access scope, lifecycle status, deadline, cancellation, bounded messages,
-working notes, evidence references, pending calls, call/attempt ledger, usage,
-failures, remaining budgets, diagnosis proposal, and stop reason. Record model,
-prompt, policy, tool-schema, and application versions for reproducibility.
-
-Run statuses include `queued`, `running`, `succeeded`, `inconclusive`,
-`failed`, and `cancelled`. Keep these separate from diagnosis status: a provider
-outage is an operational failure. Preserve partial evidence on failure.
-
-Use persistent LangGraph checkpoints for graph state and a run/evidence store
-for queryable records and artifacts. Start locally with SQLite; use PostgreSQL
-for multiple workers. In-memory checkpoints are for tests. Persist call IDs,
-budgets, and evidence references with recoverable state; recovery must not
-reset budgets or lose the current in-memory evidence collector.
-
-Checkpointing does not guarantee exactly-once external calls. Reuse durably
-recorded results and record any re-execution after ambiguous failures. Keep
-query windows fixed and record retrieval timestamps. Allow one active worker
-per run. Define request idempotency, version compatibility, retention, and
-startup/worker recovery; an in-process background task alone is insufficient.
-
-Optional human collaboration groups independent runs under an investigation
-ID. The first run remains autonomous; follow-up questions create new checkpoints
-and budgets after the current round finishes. Explain rounds expose only
-read_evidence; investigate rounds can query telemetry. New time windows filter
-inherited observations. The bounded context includes recent user requests and
-previous conclusions as untrusted historical claims, with evidence references.
-Follow-up context prioritizes citations and interleaves services and sources,
-including bounded normalized details and explicit omission markers. Explanation
-answers the requested question, language and level of detail using the pack
-first; necessary extra details use direct IDs or filtered catalogue reads.
-Historical run results are preserved. This does not add cross-incident memory
-or pause a running tool for human approval.
-
-Metric discovery is a separately authorized read-only metadata tool. Distinct
-name discovery avoids a series limit hiding every metric except one histogram;
-targeted series lookup reveals its actual labels. Both name and series responses
-are bounded by time, count and model-facing bytes. Metadata and empty-query
-guidance have no evidence IDs and cannot count as new observational progress.
-They help formulate queries but cannot substantiate a fault or its absence.
-Observed failure propagation and inferred internal mechanisms remain distinct
-in diagnosis prompts; semantic correctness still requires real-model review.
-
-Readable progress is a projection of durable events through SSE. Cursor replay,
-idle heartbeats and a committed terminal notification support reconnection;
-subscriber disconnection leaves execution intact. SQLite schema v2 adds incident
-records and run associations without changing checkpoint storage. The initial
-implementation polls small event snapshots and is scoped to local deployment.
-
-## 3. Long-term memory
-
-Cross-incident memory is optional until its quality is evaluated. Persisting a
-run does not automatically turn its contents into reusable knowledge.
-
-Store confirmed resolutions, useful diagnostic queries, and service conventions
-with provenance, service/environment scope, applicable version, verification
-status, timestamps, and expiry. Promote diagnoses only after independent
-confirmation or human review; model confidence is insufficient.
-
-Retrieve a small relevant set and label it as historical experience. Support
-correction and deletion. Versioned Runbooks remain a separate knowledge source.
-Start with structured retrieval and add semantic search when cases justify it.
-Evaluate with a frozen memory snapshot and held-out incidents. Ground truth
-and evaluation labels must never enter diagnosis context or memory.
-
-The first S6 increment is implemented with the existing SQLite ledger (schema
-v3), typed manual confirmations, correction/reconfirmation, revocation and
-deletion. Source runs require successful results and valid telemetry citations;
-confirmation notes and identity remain trusted-local human attestations.
-There is no automatic promotion, vector search or agent write tool. Retrieval
-uses exact environment/version, affected-service overlap and explicit expiry.
-Queued runs capture an opt-in policy and persist selected contents/revisions
-before model execution; restart never refreshes that run's library view.
-Historical hints are bounded separately and cannot become current Evidence.
-Explanation rounds do not perform new incident-memory retrieval. Snapshots remain
-in prior run records after edits or library deletion.
-
-The feedback-learning increment adds local-user preferences/skills and inferred
-human confirmations. `DiagnosisDraft.feedback_updates` is bounded to three
-proposals in the existing model response; no extraction model or additional
-call budget is introduced. The agent classifies ordinary feedback into lasting
-habits, reusable investigation methods, temporary requests or human-reported
-confirmed/corrected diagnoses. It reuses stable instruction keys and cites exact
-current feedback quotes. No user request to remember or register is required.
-Model confidence, questions and permission to try a repair are not confirmation.
-This semantic classification depends on the model and remains to be evaluated.
-
-Workflow validates quotes, source scope/observations, worker ownership and
-concurrent revisions. SQLite v4 adds guidance records and transactional per-run
-receipts. A receipt preserves original proposals and outcomes for idempotent
-recovery, including after a human deletes the resulting library record. Invalid
-proposals are reported separately from diagnosis acceptance. Preference/skill
-snapshots are loaded even for explanation rounds; historical incident retrieval
-remains disabled there. Guidance is scoped to one local user and survives
-deployment-version changes. It is subordinate to current requests and execution
-policy, and cannot grant permissions or become citable observations. Manual
-review/edit/delete endpoints complement automatic inference. Automated human
-confirmation can correct an inconclusive parent with observed telemetry and
-stores its feedback run/quote; it is a human report, not independent machine
-verification. Automatically confirmed records use a configurable 30-day expiry.
-Autonomous/frozen evaluations neither read this live guidance nor write feedback
-memories. A separate fixed-feedback benchmark is needed to measure learning.
-
-Evaluations default to memory-off even when runtime memory is enabled. An
-explicit frozen corpus predating the held-out window is required for memory-on;
-retrieval excludes the same incident, late confirmations, wrong scope and
-records expired by the evaluation start. Reports record corpus hashes and group
-memory modes separately. Paired scripted replay checks the workflow; no claim
-of improved real-model accuracy is made. Training/test separation still needs
-dataset review because IDs cannot identify copied labels or future answer text.
-
-## 4. Tool registry and permissions
-
-Registry entries specify schemas, read/write capability, permitted scope,
-timeout, result-size limit, retry classification, and concurrency limit. All
-four current tools can remain visible to a run authorized to use them.
-
-Filter visibility by policy and enforce the same policy at execution. Model
-arguments cannot grant permission. Resolve scope from configuration initially
-and authenticated identity for shared use; affected services are investigative
-hints, not access boundaries. Enforce service/environment, time-range,
-trace-detail, and query-cost restrictions. Free-form PromQL needs enforced
-scoping or a scoped backend, not just prompt instructions. Validate result
-sizes locally as well as requesting backend limits.
-
-Retain read-only telemetry access. Any future mutation tools need defined
-approval, idempotency, audit, and recovery behavior before exposure.
-
-## 5. Loop control and recovery
-
-Enforce budgets before starting work: model calls, tool calls, backend attempts,
-elapsed time, context tokens, and output-token reservation. Count retries,
-summary calls, and diagnosis repairs. Reserve budgets atomically for parallel
-calls. Keep recursion limits as a final guard. Detect repeated equivalent
-queries without progress, reuse results when appropriate, and terminate after
-bounded feedback if no useful progress is possible.
-
-Update usage from provider responses. Missing usage is unknown, not zero;
-record estimates separately. Cost estimates carry a pricing version. Admission
-estimates and output limits reduce overshoot but cannot guarantee an exact
-provider-billing ceiling after ambiguous timeouts.
-
-The agent proposes completion. Workflow code checks schema, evidence provenance,
-scope, time relevance, and required diagnostic fields, then accepts or requests
-a bounded repair. Require suspected service, failure mechanism, supporting and
-conflicting observations, and unresolved questions. Evidence IDs prove
-provenance, not causality. Multiple source types can describe the same event;
-evidence counts and model confidence alone do not prove a root cause. Evaluate
-causal quality against ground truth and reviewed cases.
-
-| Failure | Response |
+| Component | Responsibility |
 | --- | --- |
-| Transient timeout, 429, selected 5xx | Bounded backoff with jitter within the deadline; respect Retry-After |
-| Invalid arguments or query | Structured feedback for bounded correction; avoid blind retries |
-| Access denial or missing credentials | Explicit access/configuration failure; no unchanged retry |
-| Backend unavailable | Record failure; agent can use remaining authorized sources |
-| Provider failure | Bounded retry; optional compatible fallback with recorded model switch |
-| Malformed diagnosis | Bounded schema/contract repair |
-| Tool budget, repeated calls, or no progress | Close tools; submit a validated diagnosis from existing evidence within remaining hard budgets |
-| Model/context/graph exhaustion, deadline, cancellation | Stop under existing limits; persist partial results and explicit reason |
-| Unexpected software error | Mark failed and retain diagnostic trace |
+| `api/` | Request validation, run/investigation routes and SSE projection |
+| `agent/factory.py` | Shared model, transport and service assembly |
+| `agent/service.py` | Diagnosis lifecycle and terminal cleanup |
+| `agent/runtime/` | Graph adapter, harness, context controls, tools and knowledge integration |
+| `agent/workflow/` | Preparation, follow-up selection, grants and citation validation |
+| `agent/storage/` | SQLite transactions, run lifecycle, evidence and memory repositories |
+| `agent/memory/` | Feedback provenance and guidance planning |
+| `models/` | Incident, evidence, diagnosis, run and storage contracts |
+| `mcp/` | HTTP session, discovered-tool contracts and result adaptation |
+| `rag/` | Corpus preparation, snapshot publication and retrieval |
+| `evaluation/` | Replay, scoring, reports and fault configuration |
 
-Choose one transport-retry owner and account for SDK retries explicitly.
-Avoid multiplying SDK, middleware, and HTTP retries. Fallback is opt-in and
-must be recorded separately in controlled evaluations. Empty results,
-unavailable data, and contradictory evidence are distinct outcomes.
+The independent `services/otel-telemetry-mcp/` package owns telemetry HTTP clients,
+normalization and tool definitions. It imports no TraceMind or LangChain code.
+The pinned OpenTelemetry Demo stays in a sibling checkout; its built-in agentic
+mode is excluded from diagnosis.
 
-## 6. Tracing and operational interface
+## Tools and evidence
 
-Persist run, model-call, tool-call, backend-attempt, context-reduction,
-checkpoint, policy, and terminal events. Include run/span/parent IDs, sequence,
-timestamps, duration, status, sanitized errors, and input/output references.
-Model events record model/prompt version and token usage, including cache and
-reasoning usage when exposed. Tool events record arguments, result references,
-retry attempts, sizes, and reuse. Cover failure and cancellation paths.
+Live telemetry uses MCP Streamable HTTP. Initialization fetches paginated
+`tools/list` definitions under time/count/byte limits. The generic binder exposes
+only granted names and injects fixed investigation timestamps using server schema
+annotations. Parallel calls share the session; closing it leaves the server running.
+Local-only explanation and resumed finalization skip discovery. Discovery is setup
+inside the run deadline, not a model or query attempt.
 
-Start with a persistent event sink and run summaries, then export OpenTelemetry
-spans. Distinguish agent execution traces from application traces under
-investigation. Console output becomes a view of these events. Record observable
-actions and explicit diagnostic notes; private model chain-of-thought is not
-part of the trace contract.
+Application grants, task restrictions and optional trusted Agent grants are
+intersected and saved in `RunState.allowed_tools`. The harness checks grants again
+at execution and retry admission. Model output and server metadata cannot grant
+access. Defaults are five read-only telemetry operations plus local `read_evidence`;
+optional knowledge tools require explicit grants.
 
-Redact structured fields and embedded text before persistence. Define artifact
-retention and access. Large payloads use bounded previews and protected artifact
-references. Add run creation/status/result/cancel/resume endpoints as persistence
-lands. Keep the synchronous endpoint usable for short baseline runs. Shared
-deployment also requires authentication, admission/concurrency limits, worker
-recovery, dependency health, and retention controls.
+| Result | Treatment |
+| --- | --- |
+| `telemetry.v1` observations | Validate, filter by window, deduplicate and retain as Evidence |
+| Metric discovery metadata | Query guidance without evidence IDs or observational progress |
+| Generic MCP text/JSON | Reference material, never implicit incident evidence |
+| Knowledge hits | Retained source references with separate citation validation |
 
-## Delivery sequence and acceptance criteria
+The telemetry contract is selected by metadata; the exact legacy reply schema is
+also accepted. Preview hints cannot expand local limits. Generic tools have no
+implicit retries because side effects are unknown. Old stored `direct` labels
+remain readable, but live direct/stdio paths are gone. Replay uses recorded schemas
+and the production binder without contacting MCP.
 
-Each increment includes deterministic tests using scripted model responses and
-mock telemetry, plus relevant live scenarios. The following are planned gates.
+Complete diagnoses require unique, known telemetry citations inside the fixed
+window. Knowledge or memory cannot replace current observations. Empty results do
+not establish health. Observed failures and hypotheses about their internal
+mechanism remain distinct. Citation validation proves provenance, not causality.
+Tool-name grants and affected-service hints do not provide service/tenant isolation;
+shared use needs enforced backend scope and identity-based authorization.
 
-| Increment | Deliverable | Acceptance criterion |
-| --- | --- | --- |
-| S1: controlled loop (implemented) | Run state, registry/executor, completion gate, call/deadline budgets, structured events | Repeating model, parallel calls, invalid evidence, denied tool, and timeout terminate predictably; denied calls never reach the backend |
-| S2: bounded context (implemented) | Observation store, evidence selection, context assembly, compression | Large/noisy results fit context allowance; critical/contradictory evidence stays retrievable; tool messages remain valid |
-| S3: recovery (implemented; supports injected-failure testing) | Error taxonomy, retry ownership, fallback, no-progress detection | Injected 429/5xx/timeout/malformed output has bounded attempts, accounted usage, and useful terminal results |
-| S4: persistence (implemented for local queued runs) | Checkpoints, run store, resume/cancel, scheduling recovery | Restart retains evidence and budgets; concurrent resume is controlled; cancellation stops new work |
-| S5: evaluation and operations (evaluation increment implemented) | Broader cases, replay fixtures, metrics report, trace export, shared-service controls | Report accuracy, false completion, attempts, latency, usage/cost, and recovery; verify run isolation and trace coverage |
-| S6: optional memory (first increment implemented; real-model quality pending) | Human-confirmed records, structured scoped retrieval, immutable run snapshots, provenance and expiry | Frozen memory-on/off replay; reject stale/unconfirmed/same-incident records and keep evaluation labels outside runtime |
-| T1: independent telemetry MCP | Five server-defined tools discovered over Streamable HTTP; Docker deployment; direct/stdio removed | Real HTTP discovery/execution, harness gates, API/worker/evaluation wiring and container isolation; live-model quality remains unmeasured |
+## Context and loop controls
 
-S3 implements harness-owned retries, opt-in model fallback, bounded diagnosis
-repair, and observation-based no-progress detection, with injected-failure tests.
-Tool budget, repetition, and no-progress limits enter a tool-free finalization
-phase when model-call budget and time remain. The phase is recorded in durable
-events; final output shares existing budgets and citation validation.
-S4 adds a separate worker, SQLite run/evidence ledger, and LangGraph SQLite
-checkpoints for queued runs. The synchronous API and evaluation paths still run
-without persistent recovery. The two databases do not share a transaction;
-external calls may be retried after an ambiguous crash, and consumed attempts
-remain in the ledger. The local worker lease fences stale writers, while
-shared deployment needs a stronger queue and checkpoint store. S1 and S2 have deterministic
-execution tests. S2 uses exact-content deduplication and oldest-result reduction; it does
-not perform semantic ranking, hypothesis extraction, or LLM summarization.
-All original observations remain in the run-local store within its serialized
-byte cap. The input estimator uses UTF-8 bytes plus framing allowance, not an
-exact provider tokenizer. See README for configuration and limitations.
-Record code/model/tool versions and expand evaluation during each increment.
-Include missing telemetry, misleading upstream symptoms, conflicting evidence,
-and operational failures. Ground-truth evaluation stays outside the runtime
-completion gate. Multi-agent and RL follow this baseline; MCP telemetry is
-implemented as described above.
+Runs retain full normalized observations within a serialized byte cap. Exact
+duplicates share the first evidence ID; different timestamps, queries or attributes
+remain distinct. Tools return bounded previews with explicit omissions. Authorized
+`read_evidence` calls page stored catalogues or JSON without another backend query,
+using the same tool and time budgets.
 
-## Framework references
+Before each model call, middleware estimates serialized input including tool and
+diagnosis schemas and reserves output capacity. The estimator uses UTF-8 bytes plus
+framing allowance, not a provider tokenizer. Provider-reported usage is separate;
+missing usage is unknown, not zero.
 
-- [LangChain middleware](https://docs.langchain.com/oss/python/langchain/middleware/overview)
-  provides hooks around model/tool execution inside the current agent.
-- [Prebuilt middleware](https://docs.langchain.com/oss/python/langchain/middleware/built-in)
-  covers summarization, call limits, retries, and model fallback. Domain
-  authorization, evidence checks, and unified budgets remain application work.
-- [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
-  distinguishes thread checkpoints from cross-thread stores.
+Compression replaces oldest tool results with evidence indexes and, when readers
+are authorized, bounded previews. Tool-call/result pairing and the newest requested
+detail page are preserved. Stored observations and graph history remain available.
+There is no semantic ranking, working-note extraction or summarization model.
+Unfit input or evidence capacity ends with `context_limit` and partial evidence.
 
-### Storage and service boundaries
+The harness reserves attempts before yielding, including parallel calls. Retries,
+repairs, evidence reads and auxiliary RAG calls consume their relevant shared
+limits. Graph recursion is an additional guard. SDK retries are disabled; the
+harness owns bounded retry accounting and optional model fallback.
 
-`models/result.py` and `models/storage.py` own result/snapshot contracts without
-importing the execution service. `agent/storage/database.py` owns schema initialization
-and transactions, `persistence.py` owns run lifecycle storage, and
-`memory_repository.py` owns memory/feedback transactions. Pure follow-up
-selection and permission policy lives in `followup.py`; memory provenance and
-feedback planning live in `memory_policy.py`. Source-run reads,
-lease checks and feedback receipts stay in one SQLite transaction.
+| Condition | Behavior |
+| --- | --- |
+| Transient model/telemetry failure | Bounded retry within the deadline; fallback only when configured |
+| Invalid tool arguments or query | Sanitized correction feedback; no unchanged blind retry |
+| Missing, malformed or invalid diagnosis | Bounded structured-output/citation repair |
+| Tool budget, repeated call or no progress | Close tools; request diagnosis using supplied evidence |
+| Model/context/graph exhaustion, deadline or cancellation | Stop under existing limits and retain partial state |
+| Unexpected implementation failure | Operational failure with diagnostic metadata |
 
-`runner.py` adapts the LangChain graph; `preparation.py` builds historical and
-user context; `validation.py` validates citations. `service.py` coordinates
-these steps and owns terminal cleanup. `factory.py` assembles API, worker and
-live evaluation dependencies, with explicit evaluation memory overrides.
+Finalization grants no extra attempts, time, context or repair allowance. Its
+durable phase event keeps tools closed after recovery. Run lifecycle (`queued`,
+`running`, `succeeded`, `inconclusive`, `failed`, `cancelled`) is separate from
+diagnosis content and confidence.
 
-Storage I/O runs off the event loop. The harness reserves attempt counters
-without yielding, commits a copied snapshot under a per-run async lock, then
-executes external work. Results and rejected/skipped tool transitions are
-committed before returning to the graph. An interrupted storage await drains
-the underlying thread operation before propagating cancellation. API stores
-are initialized once per app/database path in the request thread pool.
+## Persistence and collaboration
+
+Queued runs use a SQLite run/evidence ledger and separate LangGraph checkpoints.
+RunState retains incident/window, limits, grants, attempts, evidence, usage, policy
+snapshots and stop reason. Worker leases and heartbeats control local recovery;
+consumed attempts and deadlines survive restart.
+
+Storage callbacks run outside the event loop. Admission awaits a copied, serialized
+durable snapshot before external work; results are committed before returning to
+the graph. Cancellation drains in-flight storage so late progress cannot overtake
+terminal cleanup. Feedback ownership, revision checks and receipts share an explicit
+transaction in the ledger.
+
+The ledger and checkpoints have no shared transaction. A crash after an external
+response can cause re-execution: checkpoints do not guarantee exactly-once calls.
+Lease checks fence ledger writes, but checkpoint writes do not enforce lease
+ownership. Supported deployment is one local worker. Back up both stores together.
+
+An investigation groups independent rounds under one incident. Each gets its own
+checkpoint, budget and result. Follow-ups inherit bounded historical context; new
+windows filter inherited observations. Prior conclusions and user hypotheses are
+untrusted claims. Explanation uses authorized retained-data readers only; further
+investigation may query telemetry. An active round blocks new questions and earlier
+results stay available.
+
+SSE projects durable events, replays by cursor and notifies termination after commit.
+Subscriber disconnection leaves the run active. JSONL is best-effort sanitized
+operational metadata, not checkpoints or full payloads. Reports and SQLite may
+contain full evidence and feedback.
+
+## Optional knowledge and memory
+
+| Source | Content and boundary |
+| --- | --- |
+| Incident history | Prior rounds and retained evidence for the same investigation |
+| Published RAG snapshot | Versioned documents, canonical chunks and source provenance |
+| Confirmed incident memory | Human-attested historical resolutions with scope and expiry |
+| User guidance | Preferences/skills inferred from quoted follow-up feedback |
+
+RAG uses Docling structural parsing, LightRAG graph/vector recall, SQLite FTS5/BM25
+recall, LangChain rank fusion and one local BGE rerank. Publication checks canonical
+IDs, graph sources and local hashes. Published snapshots are immutable; parser or
+configuration changes require a new snapshot ID.
+
+Online policy is pinned at admission. Searches retain children/full parents in
+RunState; follow-ups can read saved sources without a retrieval backend. The
+application assembles provider callbacks. Auxiliary calls share harness accounting
+and reserve final-synthesis capacity. Each search owns its callback and runtime;
+shared local weights, temporary graph copies and snapshot locks support local
+serialized retrieval. See [online integration](docs/rag-online-integration.md)
+for ownership details.
+
+Memory is disabled by default. Scoped retrieval excludes stale, revoked and
+same-incident records and freezes selected contents before model execution.
+Corrections/deletion affect future retrieval; prior snapshots remain auditable.
+Explanation does not retrieve new historical diagnoses.
+
+Feedback learning proposes at most three updates in the existing diagnosis response.
+Workflow validates current quotes, source observations, worker ownership and
+revisions, then writes updates with an idempotent receipt. Temporary requests are
+not promoted. Current requests and policy override saved guidance. Model confidence
+alone cannot confirm a resolution; classification quality needs real-model evaluation.
+
+## Evaluation and remaining boundaries
+
+Scripted tests and fixed telemetry replay exercise actual workflow paths, including
+recovery, persistence and citation gates. Their scores/timings do not measure real
+model accuracy or network latency. Live scoring checks services, terms and evidence
+provenance, not causality. Ground truth and relevance labels stay outside runtime.
+
+Memory evaluation uses frozen pre-incident corpora, never live user guidance.
+Retrieval Recall/MRR/nDCG is separate from diagnosis quality. RAG/memory off/on
+comparisons need controlled windows, tools and budgets with separate cost/latency.
+
+Remaining work includes broader real-model evaluation, full trace export,
+authentication, tenant/source authorization, retention controls, automatic alert
+ingestion, distributed retrieval and worker ownership guarantees. Before adding
+workers, enforce checkpoint ownership and test process-level takeover/stale-writer
+races. Multi-agent work follows an evaluated single-agent baseline; mutation tools
+and reinforcement learning are outside current scope.
