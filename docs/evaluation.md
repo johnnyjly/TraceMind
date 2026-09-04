@@ -25,6 +25,11 @@ files stay unchanged and the Demo's agentic mode is excluded. MCP joins the Demo
 network; set `OTEL_DEMO_NETWORK` for a different name. Live evaluation calls shared
 service assembly directly; only interactive investigations need API and worker.
 
+The Compose override caps checkout and product catalog at 64 MiB each, with
+`GOMEMLIMIT=48MiB`. These are ceilings, not preallocated RAM. Measure working
+sets, restart counts and OOM events under the intended traffic before
+increasing load.
+
 ## Live fault cases
 
 | Case | Fault | Expected observations |

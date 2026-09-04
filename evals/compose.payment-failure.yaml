@@ -1,4 +1,18 @@
 services:
+  checkout:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    environment:
+      GOMEMLIMIT: 48MiB
+  product-catalog:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    environment:
+      GOMEMLIMIT: 48MiB
   flagd:
     volumes:
       - ${TRACEMIND_FLAGD_CONFIG}:/etc/flagd/demo.flagd.json:ro
