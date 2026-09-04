@@ -19,6 +19,8 @@ class KnowledgeSource(BaseModel):
     scope: str = ""
     heading_path: list[str] = Field(default_factory=list)
     extracted_sha256: str = ""
+    source_items: list[str] = Field(default_factory=list)
+    parser_version: str = "legacy-v1"
 
 
 class KnowledgeParent(KnowledgeSource):
@@ -30,7 +32,7 @@ class KnowledgeParent(KnowledgeSource):
 
 
 class KnowledgeChunk(KnowledgeSource):
-    """A bounded child with offsets into its complete parent section."""
+    """A bounded child with source pointers, or legacy character offsets."""
 
     chunk_id: str = Field(min_length=1)
     parent_id: str | None = None
@@ -50,31 +52,9 @@ class RetrievalHit(BaseModel):
 
     chunk: KnowledgeChunk
     branches: list[str]
-    fusion_score: float
+    fusion_score: float = Field(description=(
+        "Reciprocal position in the framework-fused list. "
+        "Legacy records may contain raw RRF scores."
+    ))
     rerank_score: float | None = None
-
-
-def fuse_candidates(
-    branches: dict[str, list[KnowledgeChunk]],
-    *,
-    limit: int,
-) -> list[RetrievalHit]:
-    """Fuse reciprocal ranks instead of adding incompatible backend scores."""
-    hits: dict[str, RetrievalHit] = {}
-    for branch, chunks in branches.items():
-        seen = set()
-        for rank, chunk in enumerate(chunks, 1):
-            if chunk.chunk_id in seen:
-                continue
-            seen.add(chunk.chunk_id)
-            hit = hits.get(chunk.chunk_id)
-            if hit is None:
-                hit = RetrievalHit(chunk=chunk, branches=[], fusion_score=0)
-                hits[chunk.chunk_id] = hit
-            elif hit.chunk != chunk:
-                raise ValueError("conflicting metadata for one chunk ID")
-            hit.branches.append(branch)
-            hit.fusion_score += 1 / (60 + rank)
-    return sorted(
-        hits.values(), key=lambda h: (-h.fusion_score, h.chunk.chunk_id)
-    )[:limit]
+    parent: KnowledgeParent | None = None

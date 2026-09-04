@@ -62,6 +62,10 @@ def plan_follow_up(
         learning_policy=memory_policy,
         investigation_start=start, investigation_end=end,
         limits=limits.model_copy(deep=True),
+        knowledge_policy=(parent.state.knowledge_policy.model_copy(deep=True)
+                          if parent.state.knowledge_policy else None),
+        knowledge=[item.model_copy(deep=True)
+                   for item in parent.state.knowledge],
         allowed_tools=resolve_tool_policy(allowed_tools, purpose=purpose),
         status=RunStatus.QUEUED,
     )

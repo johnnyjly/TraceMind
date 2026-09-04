@@ -8,8 +8,8 @@ with supporting evidence.
 The single-agent baseline includes context management, execution controls,
 recovery, persistence, tracing and optional feedback memory; see
 [the single-agent design](DESIGN.md). Telemetry tools are discovered from an
-independently deployed MCP service over Streamable HTTP. Multi-agent orchestration, repository
-and Runbook tools, RAG integration, mutation approval and reinforcement learning remain
+independently deployed MCP service over Streamable HTTP. Multi-agent orchestration,
+code repository tools, mutation approval and reinforcement learning remain
 later phases.
 
 ## Current status
@@ -26,6 +26,7 @@ The current single-agent baseline provides:
 - Gemini and OpenAI model providers selected through environment settings;
 - validation that a completed diagnosis cites evidence actually returned by a tool;
 - synchronous diagnosis and queued persistent run API endpoints;
+- optional snapshot-pinned knowledge tools with retained parent sections;
 - unit tests for the public model and API contracts.
 
 ## Requirements
@@ -80,14 +81,14 @@ without an API key.
 ## RAG ingestion and retrieval (optional)
 
 The optional RAG package provides explicit offline ingestion and an isolated
-retrieval runtime. It is not registered as an Agent tool and does not change
-the single-agent baseline.
+retrieval runtime. Online knowledge tools are opt-in; the default single-agent
+baseline keeps retrieval disabled.
 No documents are automatically imported from `knowledge/`.
 
 ```text
 Query → LightRAG mix (graph + vector recall) ─┐
       → SQLite FTS5 BM25 recall ────────────┤
-                         deduplicate / RRF → local BGE reranking
+                  LangChain Ensemble RRF → local BGE reranking
                                           → cited knowledge chunks
 ```
 
@@ -111,7 +112,8 @@ uv run --extra rag python scripts/rag.py check
 ```
 
 The `models` command downloads revision-pinned `BAAI/bge-small-en-v1.5`
-(384 dimensions) and `BAAI/bge-reranker-base`, then checks local inference.
+(384 dimensions), `BAAI/bge-reranker-base`, and Docling layout/table models,
+then checks local inference. Docling OCR is disabled.
 Subsequent runtime initialization uses cached weights only. CPU is the default;
 Apple Silicon MPS can be selected through `TRACEMIND_RAG_DEVICE=mps`.
 Qdrant is an independent Docker service on localhost:6333 with a named volume.
@@ -135,9 +137,10 @@ extraction can call the configured model; the bridge enforces per-operation call
 and time limits and logs reported tokens. Embedding and reranking run locally,
 with tokenizer checks that reject inputs exceeding model limits.
 
-The CLI selects `TRACEMIND_RAG_LLM_PROVIDER` and `TRACEMIND_RAG_LLM_MODEL`,
-using the selected provider's existing application credential. DeepSeek is the
-configuration default, not an automatic fallback. The retrieval library never
+The application assembles the model callback. Omit both
+`TRACEMIND_RAG_LLM_PROVIDER` and `TRACEMIND_RAG_LLM_MODEL` to use the primary
+model, or set both to select a separate model with its existing application
+credential. There is no provider default inside RAG. The retrieval library never
 loads application credentials or chooses a provider: callers inject an async
 completion function into `RagRuntime`. Missing injection raises an explicit
 error only when retrieval needs an LLM. Provider-specific request options are
@@ -166,14 +169,18 @@ Use `--demo-repo` when the referenced OpenTelemetry Demo repository is not at
 `--model-cache` or `TRACEMIND_RAG_MODEL_CACHE_DIRECTORY` shares cached models
 without sharing snapshot files.
 
-Markdown, HTML, authored JSON and text PDFs are normalized into sections.
-PDF headings use font-size heuristics tailored to the current corpus; OCR is
-not supported. Full sections are persisted as parents. LangChain's recursive
-splitter creates children using the pinned BGE tokenizer, with a default
-320-token budget including title/section headers and a target 32-token overlap
-within each section. Structural boundaries can reduce overlap. Original text
-and reversible character offsets are retained and checked; over-limit inputs
-are rejected rather than silently truncated.
+Docling parses Markdown, HTML, authored JSON text and PDFs. Its
+HierarchicalChunker preserves full parent sections; HybridChunker creates
+children with the pinned embedding tokenizer and a 320-token cap. Children
+carry document-element pointers and heading paths. No reverse character search
+or sliding overlap is used. Parent text offsets describe the canonical
+normalized document. Source hashes/revisions still identify the original file.
+The standard PDF pipeline uses local layout/table models without OCR. Explicit
+`TRACEMIND_RAG_PDF_PIPELINE=native` uses text extraction without layout models.
+Missing standard models fail with setup instructions rather than falling back.
+
+This parser change requires a new snapshot ID. Existing published snapshots
+and stored investigation references remain readable with their legacy offsets.
 
 Build registers canonical parents/children and FTS5 indexes in SQLite, then
 uses those same child IDs in LightRAG. Local BGE creates vectors; the configured
@@ -187,23 +194,76 @@ Failed builds remain for inspection and require a new snapshot ID to retry.
 There is no cross-store transaction or automatic partial-graph repair.
 
 `verify` checks local snapshot hashes only; it does not recheck remote Qdrant.
-Parents can be read with `KeywordIndex.get_parent()`, but retrieval does not
-automatically expand child hits into full sections. Source/scope metadata is
-preserved, not yet enforced by an online query policy. A graph edge is extracted
-reference knowledge, not proof of a current incident's cause.
+Each returned child carries its full parent section. Source/scope metadata is
+preserved; tenant-specific knowledge authorization is not yet implemented.
+A graph edge is extracted reference knowledge, not current fault evidence.
 
-### Remaining boundaries
+### Enable online knowledge
 
-Controlled retrieval evaluation and online query planning remain pending.
-Agent integration will additionally supply English query planning, charge
-internal model calls to the outer run budget, and keep knowledge citations
-distinct from telemetry evidence IDs. The CLI is not a distributed retrieval
-service: use one process per workspace; local graph/JSON stores do not support
-concurrent cross-process writers. Qdrant does not make those stores distributed.
+After publishing and verifying a snapshot, set these values in your local
+configuration and restart the API and worker:
 
-Interfaces follow the pinned [LightRAG core documentation](https://github.com/HKUDS/LightRAG/blob/main/docs/ProgramingWithCore.md)
-and the [BGE embedding](https://huggingface.co/BAAI/bge-small-en-v1.5) and
-[reranker](https://huggingface.co/BAAI/bge-reranker-base) model contracts.
+```dotenv
+TRACEMIND_AGENT_KNOWLEDGE_ENABLED=true
+TRACEMIND_AGENT_KNOWLEDGE_SNAPSHOT=runbooks-v2
+TRACEMIND_AGENT_ALLOWED_TOOLS=["query_metrics","discover_metrics","search_traces","get_trace_detail","search_logs","read_evidence","search_knowledge","read_knowledge"]
+```
+
+`search_knowledge` optionally translates/decomposes questions into English,
+fuses all planned queries, then reranks once. The model decides whether to
+retrieve. Keyword extraction, translation and retries consume the same run
+model budget and trace as diagnosis. Auxiliary calls reserve at least one
+remaining model call for final synthesis. Local embedding/reranking consume
+time, but no provider tokens. Cold model startup may exceed the default
+20-second tool timeout; use a measured local timeout when enabling retrieval.
+
+`read_knowledge` pages the retained full parent, falling back to a child for
+legacy records. Sources are copied into durable RunState, separate from
+telemetry evidence. Follow-up explanation can read them without Qdrant or a
+model callback. Tool results participate in deterministic context compression;
+the newest requested detail page remains intact. Complete diagnoses still
+require current incident evidence, even when knowledge citations are valid.
+
+Per-process model weights are reused. Each search owns a fresh counted model
+bridge and closes its runtime in `finally`; callbacks never cross runs.
+Published SQLite is read-only, while framework JSON/graph stores run from a
+private temporary copy. An admission lock serializes local searches and an OS
+lock protects each snapshot across processes. This is a local deployment
+contract, not a distributed RAG service; concurrent workers on the same
+snapshot may receive a safe retrieval-unavailable result.
+
+### Evaluate retrieval
+
+Judgments live outside the corpus and are never passed to retrieval. Example
+suite schema (document IDs must match the selected snapshot):
+
+```json
+{
+  "snapshot": "runbooks-v2",
+  "questions": [{
+    "id": "metrics-empty",
+    "query": "How should an empty metric query be investigated?",
+    "relevant": {"runbooks.empty-metric-results": 1}
+  }]
+}
+```
+
+```bash
+uv run --extra rag python scripts/rag.py evaluate --snapshot runbooks-v2 \
+  --suite evals/retrieval/local-suite.json --k 5 --mode mix \
+  --output artifacts/evaluations/retrieval-mix.json
+```
+
+`ir-measures` reports document Recall@K, MRR@K and nDCG@K; duplicate document
+hits count once, empty results remain in the denominator. The report retains
+returned chunk IDs, latency and internal model usage. K cannot exceed the
+configured result limit. Compare `mix` and `naive` with the same frozen suite;
+compare Agent RAG off/on separately for diagnosis accuracy, cost and latency.
+Small plumbing checks do not establish corpus-wide retrieval quality.
+
+Framework contracts: [Docling chunking](https://docling-project.github.io/docling/concepts/chunking/),
+[LightRAG 1.5.7](https://github.com/HKUDS/LightRAG/tree/v1.5.7),
+[ir-measures](https://ir-measur.es/en/latest/getting-started.html).
 
 ## Telemetry MCP service
 

@@ -14,9 +14,10 @@ from pydantic import ValidationError
 from tracemind.rag.config import RagSettings
 from tracemind.rag.engine import RagRuntime
 from tracemind.rag.keyword import KeywordIndex
-from tracemind.rag.llm import RagModel
+from tracemind.rag.model_bridge import LightRAGModelBridge
 from tracemind.rag.local_models import LocalModels
-from tracemind.rag.models import KnowledgeChunk, fuse_candidates
+from tracemind.rag.fusion import fuse_candidates
+from tracemind.rag.models import KnowledgeChunk
 
 
 def chunk(key, text="Inspect connection errors.", **updates):
@@ -47,7 +48,6 @@ def test_example_config_and_invalid_bounds():
     for update in (
         {"snapshot": "../outside"},
         {"chunk_tokens": 510},
-        {"chunk_overlap_tokens": 320},
         {"result_limit": 21},
     ):
         with pytest.raises(ValidationError):
@@ -160,7 +160,7 @@ def test_internal_model_budget_usage_and_failed_attempts():
             )
 
     client = FakeModel()
-    model = RagModel(settings(llm_max_calls=2), client.ainvoke)
+    model = LightRAGModelBridge(settings(llm_max_calls=2), client.ainvoke)
 
     async def exercise():
         await model.complete("query")
@@ -177,14 +177,15 @@ def test_internal_model_budget_usage_and_failed_attempts():
 
 
 def test_model_requires_injection_and_forwards_keyword_intent():
-    missing = RagModel(settings())
+    missing = LightRAGModelBridge(settings())
     requests = []
 
     async def complete(messages, **kwargs):
         requests.append((messages, kwargs))
         return AIMessage(content="{}")
 
-    model = RagModel(settings(llm_provider="external-provider"), complete)
+    model = LightRAGModelBridge(
+        settings(llm_provider="external-provider"), complete)
 
     async def exercise():
         with pytest.raises(RuntimeError, match="injected"):

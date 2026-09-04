@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     agent_diagnosis_repairs: int = Field(default=1, ge=0, le=3)
     agent_no_progress_rounds: int = Field(default=3, ge=1)
     agent_memory_enabled: bool = False
+    agent_knowledge_enabled: bool = False
+    agent_knowledge_snapshot: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    agent_knowledge_max_references: int = Field(default=20, ge=1, le=100)
+    agent_knowledge_retention_bytes: int = Field(default=262144, ge=1)
+    agent_knowledge_context_bytes: int = Field(default=8192, ge=64)
+    agent_knowledge_max_queries: int = Field(default=3, ge=1, le=3)
+    agent_knowledge_result_limit: int = Field(default=5, ge=1, le=20)
+    agent_knowledge_model_output_tokens: int = Field(default=2048, ge=1)
+    agent_knowledge_reserved_model_calls: int = Field(default=1, ge=1)
     agent_memory_environment: str | None = Field(
         default=None, min_length=1, max_length=120,
     )
@@ -89,7 +100,30 @@ class Settings(BaseSettings):
         """Require explicit deployment identity before enabling memory."""
         if self.agent_memory_enabled:
             self.memory_policy
+        if self.agent_knowledge_enabled:
+            self.knowledge_policy
         return self
+
+    @property
+    def knowledge_policy(self):
+        """Freeze online run limits independently of CLI configuration."""
+        from tracemind.models.knowledge import KnowledgePolicy
+
+        if not self.agent_knowledge_enabled:
+            return None
+        if not self.agent_knowledge_snapshot:
+            raise ValueError(
+                "online knowledge requires a published snapshot ID")
+        return KnowledgePolicy(
+            snapshot=self.agent_knowledge_snapshot,
+            max_references=self.agent_knowledge_max_references,
+            retention_bytes=self.agent_knowledge_retention_bytes,
+            context_bytes=self.agent_knowledge_context_bytes,
+            max_queries=self.agent_knowledge_max_queries,
+            reserved_model_calls=self.agent_knowledge_reserved_model_calls,
+            result_limit=self.agent_knowledge_result_limit,
+            model_output_tokens=self.agent_knowledge_model_output_tokens,
+        )
 
     @property
     def memory_policy(self) -> MemoryPolicy | None:

@@ -37,42 +37,48 @@ in response headers; timezone-aware inputs remain required.
 
 ## Agent and workflow responsibilities
 
-### Optional RAG infrastructure
+### Optional knowledge retrieval
 
-The separate `tracemind.rag` package implements the approved LightRAG baseline:
-Qdrant vectors, NetworkX relationships, SQLite FTS5 BM25 recall, RRF fusion and
-local BGE reranking. It exposes structured canonical knowledge chunks with
-document hashes and source revisions. `mix` and `naive` share the same downstream
-fusion and ranking. No knowledge enters diagnosis context automatically.
+Offline preparation uses Docling converters and HybridChunker with the pinned
+embedding tokenizer. Complete parent sections and bounded child chunks retain
+file hashes, source revisions, headings and framework element pointers. Legacy
+snapshots retain their original offset validation. A changed parser requires a
+new snapshot; publication still gates canonical text, vectors and graph source
+IDs before recording immutable local hashes.
 
-Explicit prepare/build/verify commands now select a manifest profile, verify
-source-file hashes and pinned Git bytes, and parse Markdown, HTML, JSON and text
-PDFs. Web sources retain access/version metadata without live verification.
-Complete sections are canonical parents; LangChain recursive splitting uses
-BGE token counts, section-local overlap and reversible original-text offsets
-for children. The child budget includes title/section headers. SQLite persists
-parents, children and both FTS5 indexes in a transaction.
+LightRAG `mix` provides graph/vector candidates; SQLite FTS5 supplies independent
+BM25 candidates. LangChain EnsembleRetriever fuses all query branches, followed
+by one local BGE rerank. `naive` keeps the same lexical/fusion/ranking stages for
+comparison. Provider assembly lives in the application, not the retrieval
+library; omitted RAG model overrides use the explicitly configured main model.
 
-LightRAG receives the prepared child IDs through its custom chunking pipeline.
-Local BGE embeds chunks/entities/relationships and the injected LLM extracts
-the graph. A build has one call budget, per-call limits and a total timeout.
-Publication validates document status, canonical text across stores and graph
-source references, then freezes local hashes with an atomic snapshot marker.
-This is a publication gate, not a distributed transaction. Failures remain
-unpublished and retry with a new ID; partial graph repair is not implemented.
-Published SQLite is read-only and query caching is disabled. Local verification
-does not verify Qdrant contents. Parents are available by ID but are not expanded
-automatically during retrieval.
+Online knowledge is off by default and requires a published snapshot plus
+explicit tool grants. Queue admission freezes KnowledgePolicy in RunState.
+The Agent may use `search_knowledge`, optionally requesting English translation
+or decomposition. All auxiliary model attempts and retries consume the parent
+Harness budget and carry the actual tool span as their parent. A configurable
+reserve protects final diagnosis calls. Optional retrieval failures degrade to
+tool errors; hard run deadlines and exhausted budgets remain authoritative.
 
-The empty bootstrap workspace remains unpublished. No Agent tool is registered.
-Tokenizer limits prevent silent embedding/reranker truncation. Injected model
-calls have bounded accounting; future Agent integration must also charge them
-to the outer run budget.
-The library accepts an async completion callback; the CLI owns provider
-selection, credential loading and provider-specific request options.
-An OS file lock grants one process ownership of each local workspace. English
-query planning, online source/scope policy and knowledge-specific evaluation
-remain required before enabling retrieval in diagnosis runs.
+The application caches local model weights and serializes per-process queries.
+Each search receives a fresh counted callback/runtime. Published SQLite is
+read-only; writable LightRAG graph/JSON stores use a private temporary copy.
+Runtime close and cancellation release stores and the OS snapshot lock. Local
+inference is drained before cancellation releases ownership. These local stores
+and locks do not support distributed multi-worker retrieval.
+
+RunState retains ranked children and complete parents under count/byte caps.
+`read_knowledge` pages retained parent text without a live backend. Follow-ups
+copy sources and their pinned policy. Explanation allows retained-data readers
+only. Knowledge tool results use the shared context compressor, preserving the
+newest detail page and citation IDs. Valid knowledge citations cannot replace
+current telemetry evidence when completing a diagnosis.
+
+Offline IR evaluation uses ir-measures on the actual returned ranking. Labels
+stay outside the retrieval input. It reports document Recall, MRR and nDCG,
+returned IDs, time and internal model usage. Controlled diagnosis RAG off/on
+comparison is separate. Tenant/source authorization, distributed retrieval,
+and corpus-wide quality evaluation remain explicit later work.
 
 ### Diagnosis execution
 

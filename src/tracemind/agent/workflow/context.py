@@ -183,6 +183,11 @@ def json_text(value: object) -> str:
                       separators=(",", ":"))
 
 
+def estimate_payload(payload: object) -> int:
+    """Estimate text/JSON tokens using UTF-8 bytes plus framing allowance."""
+    return len(json_text(payload).encode("utf-8")) + 1024
+
+
 def estimate_input(request: ModelRequest) -> int:
     """Estimate input size from messages, tools, and the response schema.
 
@@ -207,7 +212,7 @@ def estimate_input(request: ModelRequest) -> int:
     }
     # One UTF-8 byte per estimated token is deliberately conservative for
     # text/JSON. Allow extra framing space; this is not a tokenizer guarantee.
-    return len(json_text(payload).encode("utf-8")) + 1024
+    return estimate_payload(payload)
 
 
 @dataclass(frozen=True)
@@ -227,19 +232,19 @@ class ContextSelection:
     omitted_previews: int = 0
 
 
-def bounded_index(items: list[dict], count: int) -> list[dict]:
+def bounded_index(items: list[dict], count: int, *, key: str = "id",
+                  reader: str = "read_evidence") -> list[dict]:
     """Retain a prefix of evidence references and all non-evidence records.
 
     Omission concerns this input view only. The run-local evidence catalogue
     remains pageable, including references no longer displayed here.
     """
-    references = [item for item in items if "id" in item]
-    metadata = [item for item in items if "id" not in item]
+    references = [item for item in items if key in item]
+    metadata = [item for item in items if key not in item]
     return [*references[:count], *metadata, {
         "context_omitted_count": len(references) - count,
         "retrieval": (
-            "read_evidence without evidence_id pages all run-local evidence; "
-            "with evidence_id reads full detail"
+            f"{reader} pages retained references and reads full detail"
         ),
     }]
 
@@ -290,16 +295,18 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
             )
 
     # Omitted references must remain discoverable through an authorized tool.
-    can_read = any(
-        convert_to_openai_tool(tool)["function"]["name"] == "read_evidence"
-        for tool in request.tools
-    )
+    readers = {convert_to_openai_tool(tool)["function"]["name"]
+               for tool in request.tools}
     omitted = 0
-    if can_read:
+    if readers:
         for index in eligible:
             message = messages[index]
+            key = message.artifact.get("context_reference_key", "id")
+            reader = message.artifact.get("context_reader", "read_evidence")
+            if reader not in readers:
+                continue
             items = message.artifact["context_index"]
-            count = sum("id" in item for item in items)
+            count = sum(key in item for item in items)
             if not count:
                 continue
 
@@ -307,7 +314,8 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
                 """Build a view while preserving messages and artifacts."""
                 view = list(messages)
                 view[index] = message.model_copy(update={
-                    "content": json_text(bounded_index(items, keep)),
+                    "content": json_text(bounded_index(
+                        items, keep, key=key, reader=reader)),
                 })
                 return request.override(messages=view)
 

@@ -24,7 +24,9 @@ from tracemind.telemetry.errors import RemoteTelemetryError
 
 
 LOCAL_TOOL_NAMES = frozenset({"read_evidence"})
-RESERVED_TOOL_NAMES = LOCAL_TOOL_NAMES | {"DiagnosisDraft"}
+RESERVED_TOOL_NAMES = LOCAL_TOOL_NAMES | {
+    "DiagnosisDraft", "search_knowledge", "read_knowledge",
+}
 EVIDENCE_PAGE_SIZE = 20
 MAX_EVIDENCE_PREVIEWS = 100
 
@@ -253,6 +255,7 @@ def _query_executor(
 
 def create_local_tools(
     collector: EvidenceCollector, harness: RunHarness,
+    extra_tools: Sequence[BaseTool] = (),
 ) -> list[BaseTool]:
     """Bind tools that operate solely on the current investigation state."""
     @tool(response_format="content_and_artifact")
@@ -286,13 +289,16 @@ def create_local_tools(
         artifact["detail_page"] = evidence_id is not None
         return result, artifact
 
-    return ([read_evidence]
-            if "read_evidence" in harness.state.allowed_tools else [])
+    candidates = [read_evidence, *extra_tools]
+    if len({t.name for t in candidates}) != len(candidates):
+        raise ValueError("duplicate local tool names")
+    return [t for t in candidates if t.name in harness.state.allowed_tools]
 
 
 async def create_mcp_tools(
     client: ToolClient, *, start: datetime, end: datetime,
     collector: EvidenceCollector, harness: RunHarness,
+    local_tools: Sequence[BaseTool] = (),
 ) -> list[BaseTool]:
     """Bind server-discovered schemas to the existing execution policy.
 
@@ -300,8 +306,8 @@ async def create_mcp_tools(
     removed from model inputs and injected at dispatch. Discovery cannot
     expand the local allowlist or replace a local tool.
     """
-    local = create_local_tools(collector, harness)
-    allowed = set(harness.state.allowed_tools) - LOCAL_TOOL_NAMES
+    local = create_local_tools(collector, harness, local_tools)
+    allowed = set(harness.state.allowed_tools) - {t.name for t in local}
     if not allowed or harness.finalization_reason is not None:
         return local
     started = monotonic()
@@ -316,7 +322,8 @@ async def create_mcp_tools(
             duration_ms=(monotonic() - started) * 1000)
         harness.stop(StopReason.TOOL_ERROR)
     tools = bind_mcp_tools(client, definitions, start=start, end=end,
-                           collector=collector, harness=harness)
+                           collector=collector, harness=harness,
+                           local_tools=local_tools)
     harness.emit("mcp.discovery.completed", data={
         "tool_names": [t.name for t in tools]},
         duration_ms=(monotonic() - started) * 1000)
@@ -327,13 +334,15 @@ async def create_mcp_tools(
 def bind_mcp_tools(
     client: ToolClient, definitions: list[Tool], *, start: datetime,
     end: datetime, collector: EvidenceCollector, harness: RunHarness,
+    local_tools: Sequence[BaseTool] = (),
 ) -> list[BaseTool]:
     """Bind discovered or recorded definitions using identical run policy."""
-    local = create_local_tools(collector, harness)
-    allowed = set(harness.state.allowed_tools) - LOCAL_TOOL_NAMES
+    local = create_local_tools(collector, harness, local_tools)
+    local_names = {t.name for t in local}
+    allowed = set(harness.state.allowed_tools) - local_names
     names = [t.name for t in definitions]
     if (len(names) != len(set(names))
-            or RESERVED_TOOL_NAMES.intersection(names)):
+            or (RESERVED_TOOL_NAMES | local_names).intersection(names)):
         harness.emit("mcp.discovery.failed", data={
             "category": "tool_contract_mismatch"})
         harness.stop(StopReason.TOOL_ERROR)

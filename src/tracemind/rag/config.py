@@ -33,13 +33,13 @@ class RagSettings(BaseSettings):
     device: Literal["cpu", "mps"] = "cpu"
     batch_size: int = Field(default=8, ge=1, le=64)
     chunk_tokens: int = Field(default=320, ge=1)
-    chunk_overlap_tokens: int = Field(default=32, ge=0)
+    pdf_pipeline: Literal["standard", "native"] = "standard"
     mode: Literal["mix", "naive"] = "mix"
     candidate_limit: int = Field(default=20, ge=1, le=100)
     result_limit: int = Field(default=5, ge=1, le=20)
     bm25_enabled: bool = True
-    llm_provider: str = Field(default="deepseek", min_length=1)
-    llm_model: str = Field(default="deepseek-flash", min_length=1)
+    llm_provider: str | None = Field(default=None, min_length=1)
+    llm_model: str | None = Field(default=None, min_length=1)
     llm_max_calls: int = Field(default=4, ge=1)
     llm_output_tokens: int = Field(default=2048, ge=1)
     timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -50,8 +50,6 @@ class RagSettings(BaseSettings):
     @model_validator(mode="after")
     def validate_sizes(self) -> "RagSettings":
         """Keep chunking and retrieval bounds internally consistent."""
-        if not self.chunk_overlap_tokens < self.chunk_tokens:
-            raise ValueError("chunk overlap must be smaller than chunk size")
         if self.chunk_tokens + 32 > self.embedding_max_tokens:
             raise ValueError("chunk size must reserve embedding prefix space")
         if self.result_limit > self.candidate_limit:
@@ -71,3 +69,8 @@ class RagSettings(BaseSettings):
         weights.
         """
         return self.model_cache_directory or self.directory / "models"
+
+    @property
+    def docling_directory(self) -> Path:
+        """Keep PDF layout models outside published knowledge snapshots."""
+        return self.models_directory / "docling"

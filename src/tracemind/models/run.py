@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.incident import Incident
+from tracemind.models.knowledge import KnowledgePolicy, KnowledgeReference
 from tracemind.models.memory import (
     FeedbackUpdate,
     GuidanceSnapshot,
@@ -144,6 +145,8 @@ class RunState(BaseModel):
     investigation_end: datetime
     limits: RunLimits
     allowed_tools: tuple[ToolName, ...]
+    knowledge_policy: KnowledgePolicy | None = None
+    knowledge: list[KnowledgeReference] = Field(default_factory=list)
     prompt_version: str = "single-agent-v5"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING

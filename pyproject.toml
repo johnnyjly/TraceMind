@@ -23,6 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 rag = [
+    "docling==2.137.0",
+    "ir-measures>=0.4,<0.5",
+    "langchain-classic>=1.0.8,<2",
     "langchain-text-splitters>=1.1.3,<2",
     "lightrag-hku==1.5.7",
     "pypdf>=6.1,<7",

@@ -1,141 +1,111 @@
-"""Structure-aware children with reversible offsets into complete sections."""
+"""Docling hierarchical parents and token-bounded retrieval children."""
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from docling.chunking import HybridChunker
+from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
 
 from tracemind.rag.config import RagSettings
-from tracemind.rag.corpus import Corpus, Document
+from tracemind.rag.corpus import PARSER_VERSION, Corpus, Document
 from tracemind.rag.models import KnowledgeChunk, KnowledgeParent
+
+
+class ModelTokenizer(BaseTokenizer):
+    """Adapt the selected embedding tokenizer to Docling's public interface."""
+
+    tokenizer: Any
+    max_tokens: int
+
+    def count_tokens(self, text: str) -> int:
+        """Count content tokens without model boundary markers."""
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def get_max_tokens(self) -> int:
+        """Return the configured maximum for contextualized child text."""
+        return self.max_tokens
+
+    def get_tokenizer(self):
+        """Expose the tokenizer used by framework split and merge steps."""
+        return self.tokenizer
 
 
 @dataclass(frozen=True)
 class PreparedDocument:
+    """Canonical source material passed unchanged to all storage backends."""
+
     document: Document
     parents: tuple[KnowledgeParent, ...]
     chunks: tuple[KnowledgeChunk, ...]
 
 
-def _slices(text: str, header: str, tokenizer, settings: RagSettings):
-    """Delegate splitting to LangChain; map its text back to source offsets."""
-
-    def token_count(value):
-        return len(tokenizer.encode(value, add_special_tokens=False))
-
-    capacity = settings.chunk_tokens - token_count(header)
-    if capacity <= settings.chunk_overlap_tokens:
-        raise ValueError("section heading leaves insufficient chunk space")
-    if not token_count(text):
-        raise ValueError("section contains no tokens")
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=capacity,
-        chunk_overlap=settings.chunk_overlap_tokens,
-        length_function=token_count,
-        separators=[
-            r"\n\s*\n",
-            r"\n(?=\s*(?:\d+[.)]\s|[-*+]\s|```|~~~|\|))",
-            r"(?<=[.!?])\s+",
-            r"\n",
-            r"[ \t]+",
-            "",
-        ],
-        is_separator_regex=True,
-        keep_separator=True,
-        strip_whitespace=False,
-    )
-    previous_start, previous_end = -1, 0
-    previous_text = ""
-    for source_text in splitter.split_text(text):
-        search_start = previous_end
-        if previous_text and settings.chunk_overlap_tokens:
-            offsets = tokenizer(
-                previous_text,
-                add_special_tokens=False,
-                return_offsets_mapping=True,
-            )["offset_mapping"]
-            # LangChain's add_start_index subtracts overlap as characters,
-            # even with a token length function. Bound the search in tokens
-            # instead, including whitespace before the overlapping tokens.
-            overlap = settings.chunk_overlap_tokens
-            search_start = previous_start + (
-                offsets[-overlap - 1][1] if len(offsets) > overlap else 0
-            )
-        start = text.find(source_text, max(previous_start + 1, search_start))
-        end = start + len(source_text)
-        if start < 0 or start > previous_end or end <= previous_end:
-            raise ValueError("splitter output cannot be mapped without gaps")
-        if token_count(header + source_text) > settings.chunk_tokens:
-            raise ValueError("splitter output exceeds chunk token budget")
-        yield start, end
-        previous_start, previous_end = start, end
-        previous_text = source_text
-    if previous_end != len(text):
-        raise ValueError("splitter output does not cover the complete section")
-
-
 def prepare_document(
-    document: Document, corpus: Corpus, tokenizer, settings: RagSettings
+    document: Document, corpus: Corpus, tokenizer, settings: RagSettings,
 ) -> PreparedDocument:
-    """Keep full section parents; embed only bounded child windows."""
-    parents, chunks = [], []
+    """Preserve full parents and framework element references."""
+    if document.structure is None:
+        raise ValueError("new ingestion requires a Docling document")
+    parents, chunks, by_heading = [], [], {}
     entry = document.metadata
     position = 0
-    for n, section in enumerate(document.sections):
+    for number, section in enumerate(document.sections):
         prefix = f"## {section.heading}\n"
         parent = KnowledgeParent(
-            parent_id=f"{document.key}-section-{n:03d}",
-            doc_id=entry["doc_id"],
-            title=entry["title"],
+            parent_id=f"{document.key}-section-{number:03d}",
+            doc_id=entry["doc_id"], title=entry["title"],
             section=section.heading,
-            heading_path=list(section.heading_path),
-            text=section.text,
-            document_path=entry["path"],
-            document_sha256=entry["sha256"],
+            heading_path=list(section.heading_path), text=section.text,
+            document_path=entry["path"], document_sha256=entry["sha256"],
             source_refs=entry["source_refs"],
             source_revision="registry-sha256:" + corpus.sources_sha256,
             scope=entry.get("scope", ""),
             extracted_sha256=document.extracted_sha256,
+            source_items=list(section.source_items),
+            parser_version=PARSER_VERSION,
             source_start=position + len(prefix),
             source_end=position + len(prefix) + len(section.text),
         )
         parents.append(parent)
+        by_heading[section.heading_path] = parent
         position = parent.source_end + 2
-        header = f"{entry['title']}\n{section.heading}\n\n"
-        for start, end in _slices(section.text, header, tokenizer, settings):
-            source_text = section.text[start:end]
-            text = header + source_text
-            matches = re.findall(
-                r"`([^`\n]+)`|\b([A-Z][A-Z_]{2,})\b|([\w.-]+[./:_-][\w./:-]+)",
-                source_text,
-            )
-            identifiers = " ".join(
+    adapter = ModelTokenizer(
+        tokenizer=tokenizer,
+        max_tokens=settings.chunk_tokens)
+    chunker = HybridChunker(tokenizer=adapter, merge_peers=True)
+    for chunk in chunker.chunk(document.structure):
+        path = tuple(chunk.meta.headings or [entry["title"]])
+        if any(h.casefold() == "sources" for h in path):
+            continue
+        parent = by_heading[path]
+        text = chunker.contextualize(chunk)
+        if adapter.count_tokens(text) > settings.chunk_tokens:
+            raise ValueError("framework chunk exceeds embedding token budget")
+        matches = re.findall(
+            r"`([^`\n]+)`|\b([A-Z][A-Z_]{2,})\b|([\w.-]+[./:_-][\w./:-]+)",
+            chunk.text,
+        )
+        identifiers = " ".join(dict.fromkeys(
+            value for match in matches for value in match if value))
+        metadata = parent.model_dump(exclude={
+            "source_start", "source_end", "text", "source_items",
+        })
+        chunks.append(KnowledgeChunk(
+            **metadata, chunk_id=f"{document.key}-chunk-{len(chunks):03d}",
+            text=text, source_text=chunk.text,
+            source_items=list(
                 dict.fromkeys(
-                    value for match in matches for value in match if value
-                )
-            )
-            metadata = parent.model_dump(
-                exclude={"source_start", "source_end", "text"}
-            )
-            chunks.append(
-                KnowledgeChunk(
-                    **metadata,
-                    chunk_id=f"{document.key}-chunk-{len(chunks):03d}",
-                    text=text,
-                    source_start=start,
-                    source_end=end,
-                    source_text=source_text,
-                    identifiers=identifiers,
-                )
-            )
+                    i.self_ref for i in chunk.meta.doc_items)),
+            identifiers=identifiers,
+        ))
+    if not chunks:
+        raise ValueError("document has no retrieval chunks")
     return PreparedDocument(document, tuple(parents), tuple(chunks))
 
 
 def prepare_corpus(
-    corpus: Corpus, tokenizer, settings: RagSettings
+    corpus: Corpus, tokenizer, settings: RagSettings,
 ) -> tuple[PreparedDocument, ...]:
     """Prepare verified documents without embedding or paid model calls."""
-    return tuple(
-        prepare_document(doc, corpus, tokenizer, settings)
-        for doc in corpus.documents
-    )
+    return tuple(prepare_document(doc, corpus, tokenizer, settings)
+                 for doc in corpus.documents)

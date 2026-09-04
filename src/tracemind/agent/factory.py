@@ -6,14 +6,20 @@ from tracemind.agent.runtime.llm import (
 )
 from tracemind.agent.memory.lookup import GuidanceLookup, MemoryLookup
 from tracemind.agent.runtime.runner import AgentRunner, LangChainAgentRunner
+from tracemind.agent.runtime.knowledge import KnowledgeSearch
+from tracemind.agent.runtime.rag_model_factory import create_rag_completion
 from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
 from tracemind.mcp.client import ToolClient
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.run import RunLimits
+from tracemind.models.knowledge import KnowledgePolicy
+from tracemind.rag.config import RagSettings
+from tracemind.rag.model_bridge import Completion
 
 
 def build_runner(settings: Settings, *, checkpointer=None, callbacks=None):
+    """Build the controlled graph with the configured provider clients."""
     return LangChainAgentRunner(
         create_chat_model(settings),
         fallback_model=create_fallback_model(settings),
@@ -26,7 +32,24 @@ def build_service(
     limits: RunLimits | None = None, memory_policy: MemoryPolicy | None = None,
     memory_lookup: MemoryLookup | None = None,
     guidance_lookup: GuidanceLookup | None = None,
+    knowledge_policy: KnowledgePolicy | None = None,
+    knowledge_search: KnowledgeSearch | None = None,
+    knowledge_completion: Completion | None = None,
+    knowledge_model_name: str = "rag-auxiliary",
 ) -> DiagnosisService:
+    """Assemble optional knowledge without extending the caller's grants."""
+    if settings.agent_knowledge_enabled:
+        # Load the optional retrieval stack only when knowledge is enabled.
+        from tracemind.rag.retriever import get_snapshot_retriever
+
+        rag = RagSettings()
+        knowledge_policy = knowledge_policy or settings.knowledge_policy
+        knowledge_search = knowledge_search or get_snapshot_retriever(
+            rag.model_dump_json())
+        knowledge_completion = (
+            knowledge_completion or create_rag_completion(settings, rag))
+        if knowledge_model_name == "rag-auxiliary":
+            knowledge_model_name = rag.llm_model or settings.llm_model
     return DiagnosisService(
         runner,
         tool_client=tool_client,
@@ -37,4 +60,8 @@ def build_service(
         memory_policy=memory_policy,
         memory_lookup=memory_lookup,
         guidance_lookup=guidance_lookup,
+        knowledge_policy=knowledge_policy,
+        knowledge_search=knowledge_search,
+        knowledge_completion=knowledge_completion,
+        knowledge_model_name=knowledge_model_name,
     )

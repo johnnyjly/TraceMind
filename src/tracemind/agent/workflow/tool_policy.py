@@ -18,7 +18,8 @@ def resolve_tool_policy(
     """
     selected = dict.fromkeys(allowed_tools)
     if purpose is RunPurpose.EXPLAIN:
-        selected = {name: None for name in selected if name == "read_evidence"}
+        selected = {name: None for name in selected
+                    if name in {"read_evidence", "read_knowledge"}}
     if agent_tools is not None:
         agent_allowed = set(agent_tools)
         selected = {name: None for name in selected if name in agent_allowed}

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import httpx
 
+from tracemind.agent.runtime.rag_model_factory import create_rag_completion
+from tracemind.config import Settings
 from tracemind.rag.chunking import prepare_corpus
 from tracemind.rag.config import RagSettings
 from tracemind.rag.corpus import PARSER_VERSION, load_corpus
@@ -21,7 +23,7 @@ from tracemind.rag.ingestion import (
     snapshot_path,
     verify_snapshot,
 )
-from tracemind.rag.llm import Completion
+from tracemind.rag.model_bridge import Completion
 from tracemind.rag.local_models import LocalModels, load_tokenizer
 
 
@@ -29,30 +31,9 @@ def create_completion(
     settings: RagSettings, *, env_file: Path | None = None
 ) -> Completion:
     """Assemble a lazy provider adapter outside the retrieval library."""
-    model = None
-
-    async def complete(messages, *, max_tokens, keyword_extraction):
-        """Create the selected client once, only when a model is needed."""
-        nonlocal model
-        if model is None:
-            from tracemind.agent.runtime.llm import create_chat_model
-            from tracemind.config import Settings
-
-            provider_settings = Settings(
-                llm_provider=settings.llm_provider,
-                llm_model=settings.llm_model,
-                **({"_env_file": env_file} if env_file else {}),
-            )
-            model = create_chat_model(provider_settings)
-        target = model
-        if keyword_extraction and settings.llm_provider in {
-            "openai",
-            "deepseek",
-        }:
-            target = model.bind(response_format={"type": "json_object"})
-        return await target.ainvoke(messages, max_tokens=max_tokens)
-
-    return complete
+    provider_settings = Settings(
+        **({"_env_file": env_file} if env_file else {}))
+    return create_rag_completion(provider_settings, settings)
 
 
 async def run(args) -> None:
@@ -65,6 +46,7 @@ async def run(args) -> None:
             "directory": args.directory,
             "model_cache_directory": args.model_cache,
             "llm_max_calls": args.max_model_calls,
+            "mode": args.mode,
         }.items()
         if value is not None
     }
@@ -80,6 +62,8 @@ async def run(args) -> None:
                 "tracemind": Path(__file__).resolve().parents[1],
                 "opentelemetry-demo": args.demo_repo,
             },
+            pdf_pipeline=settings.pdf_pipeline,
+            artifacts_path=settings.docling_directory,
         )
         tokenizer = await asyncio.to_thread(load_tokenizer, settings)
         prepared = await asyncio.to_thread(
@@ -162,6 +146,13 @@ async def run(args) -> None:
     if args.action == "models":
         models = LocalModels(settings)
         await asyncio.to_thread(models.load, download=True)
+        if settings.pdf_pipeline == "standard":
+            from docling.utils.model_downloader import download_models
+            await asyncio.to_thread(
+                download_models, output_dir=settings.docling_directory,
+                with_code_formula=False, with_picture_classifier=False,
+                with_rapidocr=False,
+            )
         vectors = await models.embed(["A service request failed."])
         scores = await models.rank(
             "service failure",
@@ -224,6 +215,16 @@ async def run(args) -> None:
                     }
                 )
             )
+        elif args.action == "evaluate":
+            from tracemind.evaluation.retrieval import (
+                RetrievalSuite, evaluate_retrieval,
+            )
+            suite = RetrievalSuite.model_validate_json(args.suite.read_text())
+            report = await evaluate_retrieval(runtime, suite, k=args.k)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(report, indent=2) + "\n")
+            print(json.dumps({"output": str(args.output),
+                              "metrics": report["metrics"]}))
         else:
             hits = await runtime.search(args.query, mode=args.mode)
             print(json.dumps([hit.model_dump() for hit in hits], indent=2))
@@ -244,6 +245,7 @@ def main() -> None:
             "build",
             "verify",
             "query",
+            "evaluate",
         ),
     )
     parser.add_argument("--snapshot")
@@ -260,9 +262,14 @@ def main() -> None:
     parser.add_argument("--build-timeout", type=float, default=1800)
     parser.add_argument("--query")
     parser.add_argument("--mode", choices=("mix", "naive"))
+    parser.add_argument("--suite", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--k", type=int, default=5)
     args = parser.parse_args()
     if args.action == "query" and not args.query:
         parser.error("query requires --query")
+    if args.action == "evaluate" and (not args.suite or not args.output):
+        parser.error("evaluate requires --suite and --output")
     if args.action == "build" and (
         not args.snapshot
         or args.snapshot == "bootstrap"

@@ -3,13 +3,13 @@
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
-from html.parser import HTMLParser
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 
-PARSER_VERSION = "tracemind-sections-v1"
+PARSER_VERSION = "docling-structure-v2"
 
 
 def digest(value: bytes) -> str:
@@ -24,16 +24,22 @@ def canonical_json(value) -> bytes:
 
 @dataclass(frozen=True)
 class Section:
+    """Group normalized framework elements under one source heading path."""
+
     heading: str
     text: str
     heading_path: tuple[str, ...] = ()
+    source_items: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class Document:
+    """Preserve verified metadata alongside the parsed framework document."""
+
     metadata: dict
     sections: tuple[Section, ...]
     extracted_sha256: str
+    structure: object = field(default=None, compare=False, repr=False)
 
     @property
     def key(self) -> str:
@@ -49,11 +55,14 @@ class Document:
 
     @property
     def text(self) -> str:
+        """Serialize normalized parents into the canonical ingestion text."""
         return "\n\n".join(f"## {s.heading}\n{s.text}" for s in self.sections)
 
 
 @dataclass(frozen=True)
 class Corpus:
+    """Keep selected verified documents and frozen registry identities."""
+
     documents: tuple[Document, ...]
     profile: str
     manifest_sha256: str
@@ -72,163 +81,94 @@ def clean_text(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.splitlines()).strip()
 
 
+def _convert(data: bytes, fmt: str, *, pdf_pipeline: str = "standard",
+             artifacts_path: Path | None = None):
+    """Use Docling's converters; PDF processing mode is explicit."""
+    from docling.document_converter import (
+        DocumentConverter, NativePdfFormatOption, PdfFormatOption,
+    )
+    from docling.datamodel.base_models import DocumentStream, InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+    formats = {"markdown": (InputFormat.MD, "md"),
+               "html": (InputFormat.HTML, "html"),
+               "pdf": (InputFormat.PDF, "pdf")}
+    kind, extension = formats[fmt]
+    options = {}
+    if kind is InputFormat.PDF:
+        if pdf_pipeline == "native":
+            options[kind] = NativePdfFormatOption()
+        else:
+            if artifacts_path is None or not artifacts_path.exists():
+                raise RuntimeError(
+                    "Docling PDF models missing; run rag.py models")
+            options[kind] = PdfFormatOption(
+                pipeline_options=PdfPipelineOptions(
+                    artifacts_path=artifacts_path, do_ocr=False))
+    converter = DocumentConverter(
+        allowed_formats=[kind],
+        format_options=options)
+    return converter.convert(DocumentStream(
+        name="document." + extension, stream=BytesIO(data),
+    )).document
+
+
+def _sections(structure, title: str) -> tuple[Section, ...]:
+    """Group framework elements by heading path, preserving source pointers."""
+    from docling.chunking import HierarchicalChunker
+
+    groups = {}
+    for chunk in HierarchicalChunker().chunk(structure):
+        path = tuple(chunk.meta.headings or [title])
+        if any(h.casefold() == "sources" for h in path):
+            continue
+        texts, refs = groups.setdefault(path, ([], []))
+        texts.append(chunk.text)
+        refs.extend(item.self_ref for item in chunk.meta.doc_items)
+    sections = tuple(Section(" / ".join(path), "\n\n".join(texts), path,
+                             tuple(dict.fromkeys(refs)))
+                     for path, (texts, refs) in groups.items() if texts)
+    if not sections:
+        raise ValueError("document contains no extractable text")
+    return sections
+
+
 def markdown_sections(text: str, title: str) -> tuple[Section, ...]:
-    """Keep section hierarchy; exclude frontmatter and the source
-    bibliography.
-    """
+    """Parse headings, fences and inline markup through Docling."""
     text = clean_text(text)
     if text.startswith("---\n"):
-        parts = text.split("\n---", 1)
-        if len(parts) != 2:
+        _, separator, text = text[4:].partition("\n---")
+        if not separator:
             raise ValueError("unterminated Markdown frontmatter")
-        text = parts[1].lstrip("\n")
-    sections, lines, headings = [], [], []
-    fenced = False
-
-    def flush():
-        body = clean_text("\n".join(lines))
-        if body and not any(h.casefold() == "sources" for _, h in headings):
-            hierarchy = tuple(h for _, h in headings) or (title,)
-            sections.append(Section(" / ".join(hierarchy), body, hierarchy))
-        lines.clear()
-
-    for line in text.splitlines():
-        if re.match(r"^\s*(```|~~~)", line):
-            fenced = not fenced
-        match = (
-            None if fenced else re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
-        )
-        if match:
-            flush()
-            level, heading = len(match[1]), match[2]
-            headings = [(n, h) for n, h in headings if n < level]
-            headings.append((level, heading))
-        else:
-            lines.append(line)
-    flush()
-    if not sections:
-        raise ValueError("document contains no indexable sections")
-    return tuple(sections)
+    return _sections(_convert(text.encode(), "markdown"), title)
 
 
-class _HTMLText(HTMLParser):
-    """Extract body blocks and headings without navigation, CSS or scripts."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-        self.body = False
-        self.skip = 0
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "body":
-            self.body = True
-        if not self.body:
-            return
-        if self.skip:
-            self.skip += (
-                1 if tag not in {"br", "img", "hr", "meta", "input"} else 0
-            )
-            return
-        if tag in {"script", "style", "nav", "footer"} or any(
-            k == "class" and "meta" in v.split() for k, v in attrs if v
-        ):
-            self.skip = 1
-        elif re.fullmatch("h[1-6]", tag):
-            self.parts.append("\n\n" + "#" * int(tag[1]) + " ")
-        elif tag in {"p", "li", "tr", "pre", "br", "div"}:
-            self.parts.append("\n")
-        elif tag in {"td", "th"}:
-            self.parts.append(" | ")
-
-    def handle_endtag(self, tag):
-        if self.skip:
-            self.skip -= 1
-        elif tag in {"p", "li", "tr", "pre"} or re.fullmatch("h[1-6]", tag):
-            self.parts.append("\n")
-        if tag == "body":
-            self.body = False
-
-    def handle_data(self, data):
-        if self.body and not self.skip:
-            self.parts.append(data)
-
-
-def _pdf_text(data: bytes) -> str:
-    """Extract text PDFs; preserve font-marked headings across page breaks."""
-    from io import BytesIO
-
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        raise RuntimeError(
-            "PDF ingestion requires pypdf in the rag extra"
-        ) from exc
-
-    reader = PdfReader(BytesIO(data))
-    parts = []
-    previous_heading_size = None
-    for page in reader.pages:
-
-        def visit(text, cm, tm, font, size):
-            nonlocal previous_heading_size
-            value = text.strip()
-            if not value:
-                return
-            if (
-                value.startswith(
-                    (
-                        "TraceMind | authored knowledge reference",
-                        "Document text SHA-256:",
-                    )
-                )
-                or value.isdigit()
-                or "| verified " in value
-            ):
-                return
-            if size >= 12:
-                if previous_heading_size == size:
-                    parts[-1] = parts[-1].rstrip() + " " + value + "\n"
-                else:
-                    parts.append(
-                        "\n" + ("# " if size >= 16 else "## ") + value + "\n"
-                    )
-                previous_heading_size = size
-            else:
-                parts.append(text)
-                previous_heading_size = None
-
-        page.extract_text(visitor_text=visit)
-        parts.append("\n")
-    text = "".join(parts)
-    if not text.strip():
-        raise ValueError("PDF has no extractable text; OCR is not configured")
-    return text
-
-
-def parse_document(data: bytes, entry: dict) -> Document:
-    """Parse exactly one representation; never duplicate JSON text/sections."""
+def parse_document(data: bytes, entry: dict, *, pdf_pipeline="standard",
+                   artifacts_path: Path | None = None) -> Document:
+    """Convert one verified representation; retain framework provenance."""
     fmt = entry["format"]
-    if fmt == "pdf":
-        text = _pdf_text(data)
-    elif fmt == "html":
-        parser = _HTMLText()
-        parser.feed(data.decode("utf-8"))
-        text = "".join(parser.parts)
-    elif fmt == "json":
+    if fmt == "json":
         record = json.loads(data)
         if record["doc_id"] != entry["doc_id"]:
             raise ValueError("JSON document identity differs from manifest")
         text = record["text"]
         if digest(text.encode()) != entry["content_sha256"]:
             raise ValueError("JSON authored content hash mismatch")
-    elif fmt == "markdown":
-        text = data.decode("utf-8")
-    else:
+        data, fmt = text.encode(), "markdown"
+    if fmt not in {"markdown", "html", "pdf"}:
         raise ValueError(f"unsupported document format: {fmt}")
-    sections = markdown_sections(text, entry["title"])
+    if fmt == "markdown":
+        text = clean_text(data.decode())
+        if text.startswith("---\n"):
+            _, separator, text = text[4:].partition("\n---")
+            if not separator:
+                raise ValueError("unterminated Markdown frontmatter")
+        data = text.encode()
+    structure = _convert(data, fmt, pdf_pipeline=pdf_pipeline,
+                         artifacts_path=artifacts_path)
+    sections = _sections(structure, entry["title"])
     extracted = "\n\n".join(f"{s.heading}\n{s.text}" for s in sections)
-    return Document(entry, sections, digest(extracted.encode()))
+    return Document(entry, sections, digest(extracted.encode()), structure)
 
 
 def verify_source(source: dict, repositories: dict[str, Path]) -> dict:
@@ -268,7 +208,8 @@ def verify_source(source: dict, repositories: dict[str, Path]) -> dict:
 
 
 def load_corpus(
-    root: Path, *, profile: str, repositories: dict[str, Path]
+    root: Path, *, profile: str, repositories: dict[str, Path],
+    pdf_pipeline: str = "standard", artifacts_path: Path | None = None,
 ) -> Corpus:
     """Validate explicit profile files and provenance before model
     execution.
@@ -312,7 +253,9 @@ def load_corpus(
             if ref not in sources:
                 sources[ref] = registry["sources"][ref]
                 checks[ref] = verify_source(sources[ref], repositories)
-        documents.append(parse_document(data, entry))
+        documents.append(parse_document(
+            data, entry, pdf_pipeline=pdf_pipeline,
+            artifacts_path=artifacts_path))
     return Corpus(
         tuple(documents),
         profile,

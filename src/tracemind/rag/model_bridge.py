@@ -1,4 +1,4 @@
-"""Bound and log internal LightRAG model calls without hidden SDK retries."""
+"""Bridge LightRAG prompts to counted, injected model completions."""
 
 import asyncio
 import logging
@@ -13,12 +13,8 @@ logger = logging.getLogger(__name__)
 Completion = Callable[..., Awaitable[AIMessage]]
 
 
-class RagModel:
-    """Own the model budget of one serialized CLI retrieval operation.
-
-    This is not an Agent harness integration. Before exposing RAG as an
-    Agent tool, its internal calls must also consume that run's budget.
-    """
+class LightRAGModelBridge:
+    """Bound retrieval/build; online completion also charges its Harness."""
 
     def __init__(
         self,

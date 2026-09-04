@@ -84,7 +84,7 @@ def classify_failure(error: Exception) -> Failure:
 
 
 class ModelCallFailed(RuntimeError):
-    """Expose an exhausted transient failure to the fallback workflow."""
+    """Expose a model failure to an optional or fallback workflow."""
 
     def __init__(self, failure: Failure, *, timed_out: bool) -> None:
         """Retain safe classification without copying exception messages."""

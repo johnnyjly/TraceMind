@@ -15,10 +15,13 @@ from tracemind.models.storage import TERMINAL
 
 
 TOOLS = {
-    "query_metrics": "monitoring metrics", "search_traces": "distributed traces",
+    "query_metrics": "monitoring metrics",
+    "search_traces": "distributed traces",
     "get_trace_detail": "trace details", "search_logs": "service logs",
     "read_evidence": "saved evidence",
     "discover_metrics": "metric names and labels",
+    "search_knowledge": "reference knowledge",
+    "read_knowledge": "saved reference sections",
 }
 MESSAGES = {
     "run.queued": ("queued", "Investigation received, awaiting execution"),
@@ -27,14 +30,28 @@ MESSAGES = {
     "model.started": ("analyzing", "Analyzing available information"),
     "model.failed": ("error", "Model call failed"),
     "model.cancelled": ("cancelling", "Model call cancelled"),
-    "recovery.retry_scheduled": ("retrying", "Call temporarily failed, retrying"),
+    "recovery.retry_scheduled": (
+        "retrying", "Call temporarily failed, retrying"),
     "model.switched": ("retrying", "Switching to fallback model"),
-    "recovery.ambiguous_call": ("resuming", "The outcome of the interrupted call is unconfirmed"),
+    "recovery.ambiguous_call": (
+        "resuming", "The outcome of the interrupted call is unconfirmed"),
     "diagnosis.repair_requested": ("analyzing", "Correcting diagnosis output"),
-    "policy.finalizing": ("finalizing", "Tool investigation stopped, preparing conclusions from available evidence"),
-    "memory.selected": ("historical_context", "Historical experience retrieved, checking current evidence"),
-    "guidance.selected": ("historical_context", "User preferences and investigation skill loaded"),
-    "memory.feedback_saved": ("memory_updated", "Feedback memory processing completed"),
+    "policy.finalizing": (
+        "finalizing", "Tool investigation stopped, preparing conclusions "
+        "from available evidence"),
+    "memory.selected": (
+        "historical_context", "Historical experience retrieved, "
+        "checking current evidence"),
+    "guidance.selected": (
+        "historical_context",
+        "User preferences and investigation skill loaded"),
+    "memory.feedback_saved": (
+        "memory_updated", "Feedback memory processing completed"),
+    "knowledge.search.started": ("querying", "Searching reference knowledge"),
+    "knowledge.search.completed": (
+        "query_completed", "Reference knowledge saved"),
+    "knowledge.search.failed": (
+        "error", "Reference knowledge search unavailable"),
 }
 
 
@@ -52,7 +69,8 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         target = f" {service}" if service else ""
         phase = "querying"
         if event.kind == "tool.started":
-            message = f"Reading {tool} for{target}" if target else f"Reading {tool}"
+            message = (f"Reading {tool} for{target}"
+                       if target else f"Reading {tool}")
         elif event.kind == "tool.completed":
             phase = "query_completed"
             count = data.get("result_count", 0)
@@ -63,7 +81,8 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         elif event.kind == "tool.cancelled":
             phase, message = "cancelling", f"Reading {tool} cancelled"
         elif event.kind == "tool.skipped":
-            phase, message = "finalizing", f"Skipped {tool}, investigation is finalizing"
+            phase, message = (
+                "finalizing", f"Skipped {tool}, investigation is finalizing")
         else:
             return None
     elif event.kind == "observations.stored":
@@ -73,8 +92,10 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         phase = "finished"
         message = {
             "succeeded": "Diagnosis completed",
-            "inconclusive": "Investigation finished without a confirmed root cause",
-            "cancelled": "Investigation cancelled", "failed": "Investigation failed",
+            "inconclusive": (
+                "Investigation finished without a confirmed root cause"),
+            "cancelled": "Investigation cancelled",
+            "failed": "Investigation failed",
         }.get(data.get("status"), "Investigation finished")
     elif event.kind in MESSAGES:
         phase, message = MESSAGES[event.kind]

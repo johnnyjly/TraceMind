@@ -2,7 +2,7 @@
 
 import asyncio
 import sqlite3
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from httpx import ASGITransport, AsyncClient
 
@@ -18,6 +18,35 @@ PAYLOAD = {
     "investigation_start": "2024-09-01T00:00:00Z",
     "investigation_end": "2024-09-01T01:00:00Z",
 }
+
+
+def test_queue_freezes_knowledge_policy_for_run_and_investigation(tmp_path):
+    """Admission saves run policy without granting any new tool access."""
+    repository = RunRepository(tmp_path / "knowledge.sqlite3")
+    configured = Settings(_env_file=None, agent_knowledge_enabled=True,
+                          agent_knowledge_snapshot="published-v2")
+
+    async def requests():
+        async with AsyncClient(transport=ASGITransport(app=app),
+                               base_url="http://test") as client:
+            for url in ("/api/v1/runs", "/api/v1/investigations"):
+                response = await client.post(url, json=PAYLOAD)
+                assert response.status_code == 202
+                body = response.json()
+                run_id = body["run"]["id"] if "run" in body else body["id"]
+                state = repository.get(UUID(run_id)).state
+                assert state.knowledge_policy == configured.knowledge_policy
+                assert "search_knowledge" not in state.allowed_tools
+
+    overrides = {get_run_repository: lambda: repository,
+                 get_request_settings: lambda: configured,
+                 get_agent_runner: lambda: object()}
+    app.dependency_overrides.update(overrides)
+    try:
+        asyncio.run(requests())
+    finally:
+        for dependency in overrides:
+            app.dependency_overrides.pop(dependency)
 
 
 def test_investigation_creation_followup_history_and_idempotency(tmp_path):

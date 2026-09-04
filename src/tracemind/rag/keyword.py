@@ -5,11 +5,8 @@ import sqlite3
 from hashlib import sha256
 from pathlib import Path
 
-from tracemind.rag.models import (
-    KnowledgeChunk,
-    KnowledgeParent,
-    fuse_candidates,
-)
+from tracemind.rag.fusion import fuse_candidates
+from tracemind.rag.models import KnowledgeChunk, KnowledgeParent
 
 
 class KeywordIndex:
@@ -79,24 +76,25 @@ class KeywordIndex:
             for chunk in chunks:
                 if chunk.parent_id is not None:
                     parent = self.get_parent(chunk.parent_id)
-                    expected = parent.text[
-                        chunk.source_start: chunk.source_end
-                    ]
-                    if (
-                        chunk.source_end > len(parent.text)
-                        or chunk.source_end <= chunk.source_start
-                        or chunk.source_text != expected
-                        or chunk.doc_id != parent.doc_id
-                        or chunk.document_sha256 != parent.document_sha256
-                        or chunk.source_refs != parent.source_refs
-                        or chunk.source_revision != parent.source_revision
-                        or chunk.section != parent.section
-                        or chunk.text
-                        != f"{parent.title}\n{parent.section}\n\n{expected}"
-                    ):
-                        raise ValueError(
-                            "child chunk differs from its parent source"
-                        )
+                    if chunk.parser_version != "legacy-v1":
+                        if (not chunk.source_items
+                                or not chunk.source_text
+                                or not chunk.text.endswith(chunk.source_text)
+                                or not set(chunk.source_items).issubset(
+                                    parent.source_items)
+                                or chunk.doc_id != parent.doc_id
+                                or chunk.document_sha256 != (
+                                    parent.document_sha256)
+                                or chunk.source_revision != (
+                                    parent.source_revision)
+                                or chunk.source_refs != parent.source_refs
+                                or chunk.section != parent.section
+                                or chunk.parser_version != (
+                                    parent.parser_version)):
+                            raise ValueError(
+                                "child chunk differs from its parent source")
+                    else:
+                        self._validate_legacy_child(chunk, parent)
                 self._db.execute(
                     "INSERT OR REPLACE INTO chunks VALUES (?, ?, ?)",
                     (
@@ -118,6 +116,23 @@ class KeywordIndex:
                     "INSERT INTO identifiers VALUES (?, ?)",
                     (chunk.chunk_id, chunk.identifiers),
                 )
+
+    @staticmethod
+    def _validate_legacy_child(chunk: KnowledgeChunk,
+                               parent: KnowledgeParent) -> None:
+        """Validate pre-Docling snapshots without rewriting their schema."""
+        expected = parent.text[chunk.source_start:chunk.source_end]
+        canonical = f"{parent.title}\n{parent.section}\n\n{expected}"
+        if (chunk.source_end > len(parent.text)
+                or chunk.source_end <= chunk.source_start
+                or chunk.source_text != expected
+                or chunk.doc_id != parent.doc_id
+                or chunk.document_sha256 != parent.document_sha256
+                or chunk.source_refs != parent.source_refs
+                or chunk.source_revision != parent.source_revision
+                or chunk.section != parent.section
+                or chunk.text != canonical):
+            raise ValueError("child chunk differs from its parent source")
 
     def get(self, chunk_id: str) -> KnowledgeChunk:
         """Require registered provenance and an unchanged canonical payload."""

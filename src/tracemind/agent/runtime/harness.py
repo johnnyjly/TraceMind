@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -79,6 +80,9 @@ class RunHarness:
         self._signatures = dict(state.tool_signatures)
         self._active: set[asyncio.Task[Any]] = set()
         self._model_span: UUID | None = None
+        self._tool_span: ContextVar[UUID | None] = ContextVar(
+            "tool_span", default=None,
+        )
         self.validate_draft: Callable[[Any], None] | None = None
         self._result_fingerprints = set(state.result_fingerprints)
         self._progress = state.progress_count
@@ -266,11 +270,19 @@ class RunHarness:
     async def model_call(
         self, call: Callable[[], Awaitable[T]], *, model_name: str,
         allow_fallback: bool = False,
+        purpose: str = "diagnosis", required: bool = True,
+        reserved_calls: int = 0,
     ) -> T:
-        """Retry transient calls within the shared call budget and deadline."""
+        """Retry transient calls within the shared call budget and deadline.
+
+        Optional calls may return a recoverable failure to their workflow;
+        run admission and hard limits apply equally to every call.
+        """
         for attempt in range(self.state.limits.retry_attempts + 1):
             try:
-                return await self._model_attempt(call, model_name=model_name)
+                return await self._model_attempt(
+                    call, model_name=model_name, purpose=purpose,
+                    reserved_calls=reserved_calls)
             except (TimeoutError, *MODEL_SERVICE_ERRORS) as exc:
                 failure = classify_failure(exc)
                 if (
@@ -280,7 +292,7 @@ class RunHarness:
                     await self._wait_retry("model", attempt, failure)
                     continue
                 timed_out = isinstance(exc, TimeoutError)
-                if allow_fallback and failure.retryable:
+                if not required or (allow_fallback and failure.retryable):
                     raise ModelCallFailed(
                         failure, timed_out=timed_out
                     ) from exc
@@ -348,7 +360,9 @@ class RunHarness:
                   data={"repair": self.state.diagnosis_repairs})
 
     async def _model_attempt(
-        self, call: Callable[[], Awaitable[T]], *, model_name: str
+        self, call: Callable[[], Awaitable[T]], *, model_name: str,
+        purpose: str,
+        reserved_calls: int = 0,
     ) -> T:
         """Reserve one model call, enforce its timeout, and record
         usage/events.
@@ -360,13 +374,24 @@ class RunHarness:
         self.check_active()
         if self.state.model_calls >= self.state.limits.model_calls:
             self.stop(StopReason.MODEL_BUDGET)
+        if (self.state.model_calls + reserved_calls
+                >= self.state.limits.model_calls):
+            self.emit("model.skipped", data={
+                "purpose": purpose, "reason": "model_budget_reserved",
+                "reserved_calls": reserved_calls,
+            })
+            raise ModelCallFailed(Failure("model_budget_reserved"),
+                                  timed_out=False)
         self.state.model_calls += 1
         self.state.active_model = model_name
         span = uuid4()
-        self._model_span = span
+        parent = self._tool_span.get() or self.state.id
+        if purpose == "diagnosis":
+            self._model_span = span
         started = monotonic()
-        self.emit("model.started", span_id=span, parent_span_id=self.state.id,
-                  data={"model": model_name, "call": self.state.model_calls})
+        self.emit("model.started", span_id=span, parent_span_id=parent,
+                  data={"model": model_name, "call": self.state.model_calls,
+                        "purpose": purpose})
         reported = False
         call_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         try:
@@ -375,10 +400,9 @@ class RunHarness:
             ):
                 await self.checkpoint()
                 response = await call()
-            # ModelResponse contains the provider AIMessage,
-            # including usage if supplied.
+            # Main-loop responses wrap AIMessage; auxiliary calls return it.
             usage = [getattr(item, "usage_metadata", None)
-                     for item in getattr(response, "result", ())]
+                     for item in getattr(response, "result", (response,))]
             for item in usage:
                 if item is not None:
                     reported = True
@@ -394,7 +418,7 @@ class RunHarness:
                         "total_tokens", 0
                     )
             self.emit("model.completed",
-                      span_id=span, parent_span_id=self.state.id,
+                      span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"usage_reported": reported,
                             **{key: value if reported else None
@@ -403,18 +427,18 @@ class RunHarness:
             return response
         except TimeoutError:
             self.emit("model.failed",
-                      span_id=span, parent_span_id=self.state.id,
+                      span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"error_type": "TimeoutError"})
             raise
         except asyncio.CancelledError:
             self.emit("model.cancelled",
-                      span_id=span, parent_span_id=self.state.id,
+                      span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000)
             raise
         except Exception as exc:
             self.emit("model.failed",
-                      span_id=span, parent_span_id=self.state.id,
+                      span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
                       data={"error_type": type(exc).__name__,
                             "category": classify_failure(exc).category,
@@ -524,6 +548,7 @@ class RunHarness:
         self.emit("tool.started", span_id=span, parent_span_id=parent,
                   data={"tool": name, "arguments_sha256": signature,
                         **display})
+        token = self._tool_span.set(span)
         try:
             async with asyncio.timeout(self.state.limits.tool_timeout_seconds):
                 await self.checkpoint()
@@ -556,6 +581,8 @@ class RunHarness:
                             "category": classify_failure(exc).category,
                             "status_code": classify_failure(exc).status_code})
             raise
+        finally:
+            self._tool_span.reset(token)
 
     async def drain(self) -> None:
         """Cancel sibling tool tasks before producing a terminal snapshot."""

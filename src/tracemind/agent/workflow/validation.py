@@ -1,10 +1,12 @@
 """Completion checks independent of storage and model execution."""
 from collections import Counter
+from collections.abc import Sequence
 from datetime import datetime
 
 from tracemind.agent.errors import DiagnosisValidationError
 from tracemind.models import DiagnosisStatus, Evidence
 from tracemind.models.result import DiagnosisDraft
+from tracemind.models.knowledge import KnowledgeReference
 
 
 def validate_draft(
@@ -13,6 +15,7 @@ def validate_draft(
     *,
     start: datetime,
     end: datetime,
+    knowledge: Sequence[KnowledgeReference] = (),
 ) -> None:
     """Reject unsupported citations, blank explanations, and invalid
     times.
@@ -23,6 +26,21 @@ def validate_draft(
     correctness.
     """
     observed = {item.id: item for item in evidence}
+    known_refs = {item.id for item in knowledge}
+    unknown_refs = [ref for ref in draft.knowledge_refs
+                    if ref not in known_refs]
+    if unknown_refs:
+        raise DiagnosisValidationError(
+            "agent cited knowledge unavailable in this run",
+            code="unknown_knowledge",
+            knowledge_refs=unknown_refs,
+        )
+    if len(set(draft.knowledge_refs)) != len(draft.knowledge_refs):
+        raise DiagnosisValidationError(
+            "diagnosis contains duplicate knowledge references",
+            code="duplicate_knowledge",
+            knowledge_refs=draft.knowledge_refs,
+        )
     unknown = list(dict.fromkeys(
         i for i in draft.evidence_ids if i not in observed
     ))

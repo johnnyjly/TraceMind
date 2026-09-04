@@ -3,6 +3,7 @@
 import asyncio
 
 from tracemind.rag.config import RagSettings
+from tracemind.async_utils import run_io
 
 
 class LocalModels:
@@ -66,7 +67,7 @@ class LocalModels:
                 for ids in lengths
             ):
                 raise ValueError("embedding input exceeds tokenizer limit")
-            return await asyncio.to_thread(
+            return await run_io(
                 self.embedding.encode,
                 values,
                 batch_size=self.settings.batch_size,
@@ -91,7 +92,7 @@ class LocalModels:
                 len(ids) > self.settings.reranker_max_tokens for ids in lengths
             ):
                 raise ValueError("reranker input exceeds tokenizer limit")
-            values = await asyncio.to_thread(
+            values = await run_io(
                 self.reranker.predict,
                 [(query, text) for text in texts],
                 batch_size=self.settings.batch_size,
@@ -129,6 +130,4 @@ def load_tokenizer(settings: RagSettings):
         local_files_only=True,
         use_fast=True,
     )
-    if not tokenizer.is_fast:
-        raise ValueError("structure-aware chunking requires character offsets")
     return tokenizer

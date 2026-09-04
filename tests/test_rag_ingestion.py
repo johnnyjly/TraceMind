@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import replace
 from io import BytesIO
-from itertools import pairwise
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +24,7 @@ from tracemind.rag.corpus import (
 from tracemind.rag.engine import RagRuntime
 from tracemind.rag.ingestion import build_snapshot, verify_snapshot
 from tracemind.rag.keyword import KeywordIndex
-from tracemind.rag.llm import RagModel
+from tracemind.rag.model_bridge import LightRAGModelBridge
 
 
 class WordTokenizer:
@@ -82,61 +82,57 @@ def corpus_fixture(tmp_path, *, text=None):
     return root, manifest
 
 
-def configured(tmp_path, *, chunk_overlap_tokens=5, **kwargs):
+def configured(tmp_path, **kwargs):
     return RagSettings(
         _env_file=None,
         directory=tmp_path / "rag",
         snapshot="synthetic-v1",
         chunk_tokens=40,
-        chunk_overlap_tokens=chunk_overlap_tokens,
         **kwargs,
     )
 
 
-def prepared_fixture(tmp_path, *, chunk_overlap_tokens=5):
+def prepared_fixture(tmp_path):
     root, _ = corpus_fixture(tmp_path)
     corpus = load_corpus(root, profile="core", repositories={})
-    settings = configured(tmp_path, chunk_overlap_tokens=chunk_overlap_tokens)
+    settings = configured(tmp_path)
     return corpus, prepare_corpus(corpus, WordTokenizer(), settings), settings
 
 
-def test_structured_children_overlap_and_recover_complete_parent(tmp_path):
-    # Each paragraph has 16 tokens; overlap must fit a whole structural unit.
-    corpus, prepared, settings = prepared_fixture(
-        tmp_path, chunk_overlap_tokens=17
-    )
+def test_docling_children_preserve_source_pointers_and_complete_parent(
+        tmp_path):
+    corpus, prepared, settings = prepared_fixture(tmp_path)
     doc = prepared[0]
     assert len(doc.parents) == 2
     assert doc.parents[0].heading_path == ["Connections", "Investigation"]
     assert len(doc.chunks) > len(doc.parents)
     for parent in doc.parents:
         assert (
-            doc.document.text[parent.source_start : parent.source_end]
+            doc.document.text[parent.source_start: parent.source_end]
             == parent.text
         )
         children = [c for c in doc.chunks if c.parent_id == parent.parent_id]
-        assert children[0].source_start == 0
-        assert children[-1].source_end == len(parent.text)
+        assert {
+            ref for child in children for ref in child.source_items} == set(
+            parent.source_items)
         for child in children:
-            assert (
-                parent.text[child.source_start : child.source_end]
-                == child.source_text
-            )
-            assert (
-                len(WordTokenizer().encode(child.text))
-                <= settings.chunk_tokens
-            )
-        for first, second in pairwise(children):
-            assert first.source_start < second.source_start < first.source_end
-            assert first.source_text.endswith(
-                parent.text[second.source_start : first.source_end]
-            )
+            assert child.parser_version == "docling-structure-v2"
+            assert child.source_text and child.text.endswith(child.source_text)
+            assert len(
+                WordTokenizer().encode(
+                    child.text)) <= settings.chunk_tokens
+        original = Counter(re.findall(r"[\w./-]+", parent.text))
+        emitted = Counter(
+            re.findall(
+                r"[\w./-]+",
+                "\n".join(
+                    c.source_text for c in children)))
+        assert emitted == original
     assert "UNAVAILABLE" in doc.parents[1].text
     assert "rpc.deadline_exceeded" in doc.chunks[-1].identifiers
     assert prepare_corpus(corpus, WordTokenizer(), settings) == prepared
 
 
-@pytest.mark.parametrize("overlap", [0, 5])
 @pytest.mark.parametrize(
     "body",
     [
@@ -147,29 +143,28 @@ def test_structured_children_overlap_and_recover_complete_parent(tmp_path):
         "\n".join(["\tVALKEY_ADDR  rpc.deadline_exceeded. Mixed CASE."] * 40),
     ],
 )
-def test_repeated_text_offsets_preserve_complete_source(
-    tmp_path, body, overlap
+def test_repeated_text_preserves_element_provenance_and_all_content(
+    tmp_path, body
 ):
     root, _ = corpus_fixture(tmp_path, text="# Guide\n## Checks\n" + body)
     corpus = load_corpus(root, profile="core", repositories={})
     tokenizer = WordTokenizer()
-    settings = configured(tmp_path, chunk_overlap_tokens=overlap)
+    settings = configured(tmp_path)
     doc = prepare_corpus(corpus, tokenizer, settings)[0]
     parent = doc.parents[0]
-    covered_end = 0
+    assert {
+        ref for child in doc.chunks for ref in child.source_items} == set(
+        parent.source_items)
     for child in doc.chunks:
-        assert child.source_start <= covered_end < child.source_end
-        assert (
-            child.source_text
-            == parent.text[child.source_start : child.source_end]
-        )
+        assert child.source_text and child.text.endswith(child.source_text)
         assert len(tokenizer.encode(child.text)) <= settings.chunk_tokens
-        covered_end = child.source_end
-    assert covered_end == len(parent.text)
-    if overlap and "\n" not in body:
-        assert doc.chunks[1].source_start < doc.chunks[0].source_end
-    if not overlap:
-        assert "".join(c.source_text for c in doc.chunks) == parent.text
+    original = Counter(re.findall(r"[\w./-]+", parent.text))
+    emitted = Counter(
+        re.findall(
+            r"[\w./-]+",
+            "\n".join(
+                c.source_text for c in doc.chunks)))
+    assert emitted == original
 
 
 def test_whole_build_timeout_prevents_publication(tmp_path):
@@ -224,7 +219,7 @@ def test_internal_model_respects_summary_cap_and_rejects_truncation(tmp_path):
             },
         )
 
-    model = RagModel(configured(tmp_path), complete)
+    model = LightRAGModelBridge(configured(tmp_path), complete)
     with pytest.raises(RuntimeError, match="truncated"):
         asyncio.run(model.complete("summarize", max_tokens=16))
     assert requests[0]["max_tokens"] == 16
@@ -319,7 +314,8 @@ def test_html_noise_removed_and_json_single_representation():
     <footer>footer noise</footer></body></html>"""
     entry = {"format": "html", "title": "Guide"}
     doc = parse_document(html, entry)
-    assert doc.sections[0].text == "Keep VALKEY_ADDR."
+    assert doc.sections[0].text == "Keep `VALKEY_ADDR` ."
+    assert "menu" not in doc.text and "footer noise" not in doc.text
     text = "# Guide\n## Checks\nOne copy only."
     record = {"doc_id": "a", "text": text, "sections": [{"duplicate": text}]}
     entry = {
@@ -364,16 +360,20 @@ def test_text_pdf_headings_and_empty_pdf():
     output = BytesIO()
     writer.write(output)
     doc = parse_document(
-        output.getvalue(), {"format": "pdf", "title": "Guide"}
+        output.getvalue(), {"format": "pdf", "title": "Guide"},
+        pdf_pipeline="native"
     )
-    assert doc.sections[0].heading_path == ("Guide", "Limits")
-    assert doc.sections[0].text == "Do not infer causality."
+    assert doc.sections[0].heading_path == ("Guide",)
+    assert "Do not infer causality." in doc.sections[0].text
+    assert "Limits" in doc.sections[0].text
     empty = pypdf.PdfWriter()
     empty.add_blank_page(width=400, height=400)
     output = BytesIO()
     empty.write(output)
     with pytest.raises(ValueError, match="no extractable text"):
-        parse_document(output.getvalue(), {"format": "pdf", "title": "Empty"})
+        parse_document(
+            output.getvalue(), {
+                "format": "pdf", "title": "Empty"}, pdf_pipeline="native")
 
 
 def test_parent_persistence_rollback_and_readonly_index(tmp_path):
@@ -392,7 +392,7 @@ def test_parent_persistence_rollback_and_readonly_index(tmp_path):
     index = KeywordIndex(path, readonly=True)
     try:
         hit = index.search("rpc.deadline_exceeded", limit=1)[0]
-        assert index.get_parent(hit.parent_id).text.endswith("`/get-quote`.")
+        assert index.get_parent(hit.parent_id) == doc.parents[1]
         with pytest.raises(RuntimeError, match="read-only"):
             index.register([])
     finally:
@@ -406,7 +406,7 @@ class FakeRuntime:
 
     def __init__(self, settings, *, failure=None):
         self.settings = settings
-        self.model = RagModel(settings)
+        self.model = LightRAGModelBridge(settings)
         self.index = None
         self.rows, self.statuses = {}, {}
         self.failure = failure

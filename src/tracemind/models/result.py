@@ -34,6 +34,7 @@ class DiagnosisDraft(BaseModel):
     root_cause: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
+    knowledge_refs: list[str] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
     feedback_updates: list[FeedbackUpdate] = Field(
         default_factory=list, max_length=3,
