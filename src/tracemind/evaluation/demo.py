@@ -8,7 +8,10 @@ from pathlib import Path
 
 
 DEMO_COMMIT = "dedc0178918e260823323b8d95005a8cb924b007"
-SCENARIO_NAMES = ("payment_failure", "cart_failure", "shipping_slowdown")
+SCENARIO_NAMES = (
+    "payment_failure", "cart_failure", "shipping_slowdown",
+    "product_catalog_lock_contention", "payment_unreachable",
+)
 
 
 def prepare_flag_config(

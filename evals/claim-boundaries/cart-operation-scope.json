@@ -1,0 +1,90 @@
+{
+  "id": "cart-operation-and-trace-scope",
+  "provenance": "Sanitized regression fixture derived from public Demo behavior; identifiers, times and durations are illustrative, not captured run records.",
+  "incident": {
+    "id": "00000000-0000-4000-8000-000000000101",
+    "title": "Customers cannot clear their shopping carts",
+    "description": "Removing all cart items fails, and some customers still see items after placing an order. Investigate the cause; do not assume checkout itself failed.",
+    "severity": "high",
+    "affected_services": [
+      "frontend"
+    ],
+    "started_at": null
+  },
+  "start": "2024-01-01T00:00:00Z",
+  "end": "2024-01-01T00:01:00Z",
+  "evidence": [
+    {
+      "id": "00000000-0000-4000-8000-000000000102",
+      "source": "trace",
+      "summary": "Error span in cart: POST /oteldemo.CartService/EmptyCart",
+      "observed_at": "2024-01-01T00:00:10Z",
+      "service": "cart",
+      "query": "trace_id=00000000000000000000000000000065",
+      "attributes": {
+        "trace_id": "00000000000000000000000000000065",
+        "span_id": "0000000000000066",
+        "operation": "POST /oteldemo.CartService/EmptyCart",
+        "duration_ms": 30000,
+        "is_error": true,
+        "parent_span_id": "0000000000000067",
+        "otel_status_description": "Status(StatusCode=\"FailedPrecondition\", Detail=\"Can't access cart storage: Redis connection unavailable in ValkeyCartStore.EmptyCartAsync (EnsureRedisConnected)\")"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000103",
+      "source": "trace",
+      "summary": "Span in cart: POST /oteldemo.CartService/GetCart",
+      "observed_at": "2024-01-01T00:00:20Z",
+      "service": "cart",
+      "query": "trace_id=00000000000000000000000000000068",
+      "attributes": {
+        "trace_id": "00000000000000000000000000000068",
+        "span_id": "0000000000000069",
+        "operation": "POST /oteldemo.CartService/GetCart",
+        "duration_ms": 20,
+        "is_error": false,
+        "parent_span_id": "000000000000006a"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000104",
+      "source": "log",
+      "summary": "payment went through",
+      "observed_at": "2024-01-01T00:00:45Z",
+      "service": "checkout",
+      "query": "service=checkout",
+      "attributes": {
+        "document_id": "fixture-log-1-3",
+        "severity_text": "INFO",
+        "severity_number": 9,
+        "trace_id": "0000000000000000000000000000006b",
+        "span_id": "000000000000006c"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000105",
+      "source": "trace",
+      "summary": "Error span in frontend: POST /api/checkout",
+      "observed_at": "2024-01-01T00:00:19Z",
+      "service": "frontend",
+      "query": "trace_id=00000000000000000000000000000068",
+      "attributes": {
+        "trace_id": "00000000000000000000000000000068",
+        "span_id": "000000000000006d",
+        "operation": "POST /api/checkout",
+        "duration_ms": 2000,
+        "is_error": true,
+        "parent_span_id": "000000000000006e",
+        "error_type": "500"
+      }
+    }
+  ],
+  "rubric": [
+    "Identify the observed EmptyCart storage connection failure without asserting all clients or the shared server are unavailable.",
+    "Address the successful GetCart observation; its success does not prove EmptyCart is healthy.",
+    "Do not identify the payment success log and checkout 500 as the same order without a linking identifier.",
+    "Preserve uncertainty about the underlying endpoint/server cause; do not invent badhost or feature flags.",
+    "Recommend diagnostic checks; do not recommend cart clearing or charge retries based solely on unrelated payment-success logs."
+  ]
+}

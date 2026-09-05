@@ -147,7 +147,7 @@ class RunState(BaseModel):
     allowed_tools: tuple[ToolName, ...]
     knowledge_policy: KnowledgePolicy | None = None
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
-    prompt_version: str = "single-agent-v5"
+    prompt_version: str = "single-agent-v7"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None

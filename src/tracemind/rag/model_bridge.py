@@ -13,6 +13,29 @@ logger = logging.getLogger(__name__)
 Completion = Callable[..., Awaitable[AIMessage]]
 
 
+def completion_text(response: AIMessage) -> str:
+    """Read provider text blocks and reject incomplete or refused output."""
+    metadata = response.response_metadata
+    if metadata.get("finish_reason") in {
+        "length", "max_tokens", "MAX_TOKENS",
+    } or metadata.get("status") in {"incomplete", "failed", "cancelled"}:
+        raise RuntimeError("RAG model output was truncated or incomplete")
+    if response.additional_kwargs.get("refusal") or response.tool_calls:
+        raise ValueError("RAG model must return textual content")
+    if isinstance(response.content, str):
+        text = response.content
+    else:
+        blocks = response.content_blocks
+        if any(block.get("type") not in {"text", "reasoning"}
+               for block in blocks):
+            raise ValueError("RAG model must return textual content")
+        text = "".join(block["text"] for block in blocks
+                       if block.get("type") == "text")
+    if not text.strip():
+        raise ValueError("RAG model must return textual content")
+    return text
+
+
 class LightRAGModelBridge:
     """Bound retrieval/build; online completion also charges its Harness."""
 
@@ -80,15 +103,4 @@ class LightRAGModelBridge:
             self.unreported_calls -= 1
             self.input_tokens += usage["input_tokens"]
             self.output_tokens += usage["output_tokens"]
-        if not isinstance(response.content, str):
-            # Preserve ValueError for invalid provider payloads.
-            raise ValueError(  # noqa: TRY004
-                "RAG model must return textual content"
-            )
-        if response.response_metadata.get("finish_reason") in {
-            "length",
-            "max_tokens",
-            "MAX_TOKENS",
-        }:
-            raise RuntimeError("RAG model output was truncated")
-        return response.content
+        return completion_text(response)

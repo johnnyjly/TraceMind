@@ -1,6 +1,7 @@
 """Check open tool contracts and application-owned permission narrowing."""
 
 import asyncio
+import json
 
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 from pydantic import ValidationError
@@ -183,6 +184,37 @@ def test_renamed_telemetry_tool_reaches_validated_diagnosis(legacy_schema):
     assert run.state.status is RunStatus.SUCCEEDED
     assert run.diagnosis.evidence_ids == [observation.id]
     assert client.calls == [("inspect.service", {"service": "payment"})]
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_queries_explain_no_new_evidence_without_counting_feedback(empty):
+    observation = Evidence(source="log", observed_at=END,
+                           summary="Payment Charge failed")
+    declared = definition("inspect.service", meta={
+        RESULT_CONTRACT_KEY: TELEMETRY_CONTRACT,
+    })
+    client = Client([declared], CallToolResult(content=[], structuredContent={
+        "evidence": ([] if empty else [observation.model_dump(mode="json")]),
+    }))
+
+    async def exercise():
+        tools, collector, harness = await bind(
+            client, state(("inspect.service",)))
+        results = []
+        for index in range(2):
+            message = await tools["inspect.service"].ainvoke({
+                "name": "inspect.service", "args": {},
+                "id": f"query-{index}", "type": "tool_call",
+            })
+            results.append(json.loads(message.content))
+        feedback = results[-1][-1]
+        assert feedback["kind"] == "query_feedback"
+        assert feedback["new_evidence"] == 0
+        assert harness.state.progress_count == (0 if empty else 1)
+        assert len(collector.evidence) == (0 if empty else 1)
+        assert len(client.calls) == 2
+
+    asyncio.run(exercise())
 
 
 def test_generic_reference_id_cannot_become_a_diagnosis_citation():

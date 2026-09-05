@@ -40,12 +40,18 @@ def build_service(
     """Assemble optional knowledge without extending the caller's grants."""
     if settings.agent_knowledge_enabled:
         # Load the optional retrieval stack only when knowledge is enabled.
-        from tracemind.rag.retriever import get_snapshot_retriever
-
         rag = RagSettings()
         knowledge_policy = knowledge_policy or settings.knowledge_policy
-        knowledge_search = knowledge_search or get_snapshot_retriever(
-            rag.model_dump_json())
+        if knowledge_search is None:
+            if rag.service_url is not None:
+                from tracemind.rag.query_client import (
+                    HttpSnapshotRetriever,
+                )
+                knowledge_search = HttpSnapshotRetriever(rag)
+            else:
+                from tracemind.rag.retriever import get_snapshot_retriever
+                knowledge_search = get_snapshot_retriever(
+                    rag.model_dump_json())
         knowledge_completion = (
             knowledge_completion or create_rag_completion(settings, rag))
         if knowledge_model_name == "rag-auxiliary":

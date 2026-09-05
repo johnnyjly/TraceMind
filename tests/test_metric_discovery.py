@@ -70,7 +70,10 @@ def test_discovery_and_empty_query_do_not_create_evidence_or_progress():
             assert rejected.value.failure.category == "invalid_request"
         harness.check_progress()
         assert discovery[0]["metrics"][0]["metric"] == "rpc_calls_total"
-        assert empty == []
+        assert len(empty) == 1
+        assert empty[0]["kind"] == "query_feedback"
+        assert empty[0]["new_evidence"] == 0
+        assert "id" not in empty[0]
         assert "does not establish health" in (
             tools["query_metrics"].description)
         assert collector.evidence == []
@@ -106,9 +109,12 @@ def test_real_loop_can_discover_query_and_return_grounded_uncertainty(
             return tool_call("query_metrics", {
                 "expression": 'rpc_calls_total{job="payment"}',
             })
-        empty = next(m.content for m in reversed(messages)
-                     if isinstance(m, ToolMessage))
-        assert empty == []
+        empty = json.loads(next(m.content for m in reversed(messages)
+                                if isinstance(m, ToolMessage)))
+        assert len(empty) == 1
+        assert empty[0]["kind"] == "query_feedback"
+        assert empty[0]["new_evidence"] == 0
+        assert "id" not in empty[0]
         return tool_call("DiagnosisDraft", {
             "status": "inconclusive", "confidence": 0,
             "root_cause": "No matching metric samples; cause remains unknown",

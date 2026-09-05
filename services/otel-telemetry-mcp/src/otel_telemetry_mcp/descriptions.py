@@ -11,6 +11,12 @@ DESCRIPTIONS = {
         'evidence list when no samples match. An empty result does not '
         'establish health: check names, labels and sample availability '
         'before retrying. Do not guess names or label variants.\n\n'
+        'Counters and histogram buckets are cumulative, not counts within '
+        'the incident window. For a windowed claim, use rate or increase '
+        'with a range inside that window and enough samples. Buckets are '
+        'cumulative across le boundaries too. Compare matching labels, '
+        'units and cohorts; do not infer a specific connection failure '
+        'from unrelated memory or traffic counters.\n\n'
         'Conditional example: ONLY if request_count_total and the label '
         'job="orders" are confirmed, the expression '
         '\'request_count_total{job="orders"}\' can inspect those samples.'
@@ -35,7 +41,22 @@ DESCRIPTIONS = {
     ),
     'search_traces': (
         'Find recent Jaeger traces for one service in the supplied '
-        'start/end window.'
+        'start/end window. Copy an observed telemetry service name; do not '
+        'derive it from an RPC class name or guess spelling variants. '
+        'Returned attributes.services lists actual service names from the '
+        'in-window spans of that trace (possibly incomplete). Use those '
+        'names for downstream queries. Inspect a promising trace before '
+        'searching every service; repeated trace details may add no evidence. '
+        'Use min_duration_ms for slow spans or errors_only for error-tagged '
+        'spans; filters run before the backend result limit. Empty searches '
+        'return bounded global service-name hints without evidence IDs. '
+        'Those names do not establish activity in the incident window. '
+        'This is a bounded recent sample, not the slowest or failing traces '
+        'across the whole window. If frontend samples do not show the '
+        'reported fault, search the suspected downstream service using its '
+        'observed name. For latency, inspect slow downstream spans before '
+        'spending the budget on broad metric discovery. A normal recent '
+        'sample cannot exclude intermittent failures.'
     ),
     'get_trace_detail': (
         'Inspect a known trace: return error spans plus up to 20 longest '
@@ -52,6 +73,11 @@ DESCRIPTIONS = {
     'search_logs': (
         'Find OpenSearch logs for one service in the supplied start/end '
         'window, optionally matching text. Results are a bounded sample; '
+        'use the exact observed telemetry service name. If a filtered '
+        'search is empty or fails to explain the observed operation, '
+        'inspect one unfiltered sample for that service in the same '
+        'window, unless already inspected. Do not cycle through guessed '
+        'service names or assume the cause must appear at error severity. '
         'absence of a message does not prove absence of a fault. Event time '
         'is preferred; when it is absent or zero, observation time is used, '
         'marked by timestamp_source=observedTimestamp in evidence. '
@@ -84,7 +110,17 @@ PARAMETER_DESCRIPTIONS = {
             'time range. Results may be incomplete even at this limit.'
         ),
     },
-    'search_traces': {},
+    'search_traces': {
+        'min_duration_ms': (
+            'Optional positive minimum matching span duration in '
+            'milliseconds. Not whole-trace duration; omit or use null for '
+            'no duration filter.'
+        ),
+        'errors_only': (
+            'Match indexed error=true span tags when true. Does not cover '
+            'failures without this tag. Combined with duration using AND.'
+        ),
+    },
     'get_trace_detail': {
         'trace_id': (
             'Copy the exact attributes.trace_id from returned trace or log '

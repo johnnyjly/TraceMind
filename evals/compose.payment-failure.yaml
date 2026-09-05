@@ -13,7 +13,19 @@ services:
           memory: 64M
     environment:
       GOMEMLIMIT: 48MiB
+  astronomy-db:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
   flagd:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
     volumes:
       - ${TRACEMIND_FLAGD_CONFIG}:/etc/flagd/demo.flagd.json:ro
   jaeger:

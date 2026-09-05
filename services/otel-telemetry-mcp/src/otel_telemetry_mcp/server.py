@@ -101,7 +101,7 @@ def create_server(settings: Settings, backend: TelemetryBackend | None = None):
                 reply = TelemetryReply(error=classify_failure(exc))
             else:
                 reply = (TelemetryReply(metadata=result)
-                         if name == "discover_metrics"
+                         if isinstance(result, dict)
                          else TelemetryReply(evidence=result))
         if len(reply.model_dump_json().encode()) > settings.response_bytes:
             reply = TelemetryReply(error=RemoteFailure(

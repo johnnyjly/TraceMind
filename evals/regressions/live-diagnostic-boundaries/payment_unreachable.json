@@ -1,0 +1,80 @@
+{
+  "case": {
+    "id": "payment_unreachable",
+    "description": "Sanitized regression fixture derived from public Demo behavior. Identifiers, times and durations are illustrative; scripted actions check harness behavior, not model quality.",
+    "incident": {
+      "title": "Customers cannot complete checkout",
+      "description": "Orders fail during checkout while product browsing still works. Investigate which part of the request path is failing and why.",
+      "severity": "high",
+      "affected_services": [
+        "frontend"
+      ]
+    },
+    "fault": {
+      "feature_flag": "paymentUnreachable",
+      "variant": "on"
+    },
+    "ground_truth": {
+      "root_cause_service": "checkout",
+      "root_cause_terms": [
+        "badaddress",
+        "dns",
+        "name resolution",
+        "resolver",
+        "address",
+        "endpoint"
+      ],
+      "required_evidence_source": "trace"
+    },
+    "max_tool_calls": 12
+  },
+  "start": "2024-01-01T00:00:00Z",
+  "end": "2024-01-01T00:01:00Z",
+  "responses": [
+    {
+      "method": "get_trace_detail",
+      "arguments": {
+        "trace_id": "0000000000000000000000000000012d"
+      },
+      "evidence": [
+        {
+          "id": "00000000-0000-4000-8000-000000000301",
+          "source": "trace",
+          "summary": "Error span in checkout: oteldemo.PaymentService/Charge",
+          "observed_at": "2024-01-01T00:00:30Z",
+          "service": "checkout",
+          "query": "trace_id=0000000000000000000000000000012d",
+          "attributes": {
+            "trace_id": "0000000000000000000000000000012d",
+            "span_id": "000000000000012e",
+            "operation": "oteldemo.PaymentService/Charge",
+            "duration_ms": 100,
+            "is_error": true,
+            "parent_span_id": "000000000000012f",
+            "otel_status_description": "name resolver error: produced zero addresses"
+          }
+        }
+      ]
+    }
+  ],
+  "script": [
+    {
+      "name": "get_trace_detail",
+      "args": {
+        "trace_id": "0000000000000000000000000000012d"
+      }
+    },
+    {
+      "name": "DiagnosisDraft",
+      "args": {
+        "status": "complete",
+        "root_cause": "checkout cannot call payment: the gRPC name resolver produced zero addresses. The configured target and DNS records require verification.",
+        "confidence": 0.7,
+        "cite_indices": [
+          0
+        ],
+        "remediation": []
+      }
+    }
+  ]
+}

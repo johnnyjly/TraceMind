@@ -180,10 +180,11 @@ def _query_executor(
     ) -> tuple[list[dict], dict]:
         """Execute a query and return previews with a compact index."""
         evidence_result = False
+        added = 0
 
         async def collect() -> list[dict]:
             """Store observations, select previews, and trace retention."""
-            nonlocal evidence_result
+            nonlocal evidence_result, added
             reply = await call()
             harness.check_active()
             if reply.metadata is not None:
@@ -235,6 +236,7 @@ def _query_executor(
                         "result does not establish service health."
                     ),
                 })
+            added = len(collector.evidence) - before
             harness.emit("observations.stored",
                          parent_span_id=harness.state.id,
                          data={"received": len(observations),
@@ -248,6 +250,17 @@ def _query_executor(
             return result
 
         result = await harness.tool_call(name, arguments, collect)
+        if evidence_result and not added:
+            result.append({
+                "kind": "query_feedback",
+                "new_evidence": 0,
+                "guidance": (
+                    "No new evidence was added. Reuse the observations "
+                    "already available; do not repeat this query unless "
+                    "a specific missing detail can change the diagnosis. "
+                    "An empty result does not establish service health."
+                ),
+            })
         return result, (context_index(result) if evidence_result else {})
 
     return execute

@@ -11,6 +11,8 @@ from uuid import UUID
 import httpx
 
 from tracemind.evaluation.models import EvaluationCase
+from tracemind.evaluation.evaluator import evaluate_diagnosis
+from tracemind.models.result import DiagnosisRun
 
 
 logger = logging.getLogger("tracemind.demo")
@@ -18,7 +20,32 @@ CASE_PATH = (Path(__file__).resolve().parents[1]
              / "evals/cases/payment_failure.json")
 
 
-async def watch(client: httpx.AsyncClient, run_id: UUID, *, after: int = 0):
+def log_result(payload: dict, case: EvaluationCase | None = None) -> None:
+    """Separate execution status, actual limits and case acceptance."""
+    run = DiagnosisRun.model_validate(payload)
+    state = run.state
+    if state is not None:
+        logger.info(
+            "Execution: %s (%s); %.1fs; model calls %d/%d; tool calls %d/%d",
+            state.status.value, state.stop_reason,
+            (state.elapsed_ms or 0) / 1000,
+            state.model_calls, state.limits.model_calls,
+            run.tool_call_count, state.limits.tool_calls,
+        )
+    if case is not None:
+        score = evaluate_diagnosis(
+            case, run, elapsed_ms=(state.elapsed_ms or 0) if state else 0,
+        )
+        logger.info("Case %s: %s (case tool budget: %d)", case.id,
+                    "passed" if score.passed else "failed scoring",
+                    case.max_tool_calls)
+    logger.info("诊断结果:\n%s", json.dumps(
+        run.diagnosis.model_dump(mode="json"), indent=2, ensure_ascii=False,
+    ))
+
+
+async def watch(client: httpx.AsyncClient, run_id: UUID, *, after: int = 0,
+                case: EvaluationCase | None = None):
     """Reconnect with the last delivered sequence; never cancel the worker."""
     cursor = after
     for attempt in range(4):
@@ -45,10 +72,21 @@ async def watch(client: httpx.AsyncClient, run_id: UUID, *, after: int = 0):
                                         payload["result_url"]
                                     )
                                     result.raise_for_status()
-                                    logger.info("诊断结果:\n%s", json.dumps(
-                                        result.json()["diagnosis"],
-                                        indent=2, ensure_ascii=False,
-                                    ))
+                                    log_result(result.json(), case)
+                                else:
+                                    result = await client.get(
+                                        f"/api/v1/runs/{run_id}"
+                                    )
+                                    result.raise_for_status()
+                                    status = result.json()
+                                    logger.info(
+                                        "Execution: %s (%s); model calls %s; "
+                                        "tool calls %s",
+                                        status["status"],
+                                        status["stop_reason"],
+                                        status["model_calls"],
+                                        status["tool_calls"],
+                                    )
                                 return payload["status"]
                             if (event == "progress" and sequence is not None
                                     and sequence > cursor):
@@ -68,6 +106,7 @@ async def watch(client: httpx.AsyncClient, run_id: UUID, *, after: int = 0):
 async def run(args) -> str:
     """Use the public API for creation, follow-up and progress subscription."""
     timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
+    case = None
     async with httpx.AsyncClient(base_url=args.api_url,
                                  timeout=timeout) as client:
         if args.run_id:
@@ -103,7 +142,7 @@ async def run(args) -> str:
             logger.info("Investigation ID: %s", created["id"])
             run_id = UUID(created["run"]["id"])
         logger.info("Run ID: %s", run_id)
-        return await watch(client, run_id, after=args.after)
+        return await watch(client, run_id, after=args.after, case=case)
 
 
 def main() -> None:

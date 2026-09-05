@@ -67,6 +67,21 @@ to the independent [telemetry service](services/otel-telemetry-mcp/README.md).
 
 ### 3. Start API and worker
 
+If online knowledge is enabled and `TRACEMIND_RAG_SERVICE_URL` is set, first
+start the independent retrieval process in its own terminal:
+
+```bash
+uv run --extra rag python scripts/run_rag_service.py
+curl --fail http://127.0.0.1:8011/ready
+```
+
+`TRACEMIND_RAG_SNAPSHOT` must name an existing published snapshot and match
+`TRACEMIND_AGENT_KNOWLEDGE_SNAPSHOT`. The process loads and warms the local
+models before accepting queries. It binds localhost, uses two inference threads,
+and retains its model/store lifetime independently of API and worker restarts.
+Qdrant remains in `deploy/compose.rag.yaml`. See
+[service operation](docs/rag-online-integration.md#independent-query-service).
+
 In separate terminals with the same `.env`:
 
 ```bash
@@ -119,8 +134,12 @@ Request examples and lifecycle details are in [Running TraceMind](docs/operation
 
 ```bash
 uv run pytest
+uv run --extra rag pytest --require-rag
 uv run python scripts/run_evaluation_suite.py
 ```
+
+The base installation skips optional RAG modules. The full RAG acceptance command
+requires the extra and fails early if its dependencies are missing.
 
 The replay suite needs no Docker or model credentials. Scripted replay measures
 workflow behavior; live diagnosis quality requires separate controlled cases.

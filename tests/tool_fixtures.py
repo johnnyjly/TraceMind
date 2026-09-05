@@ -29,7 +29,8 @@ class FixtureToolClient:
 
     async def call(self, name, arguments):
         try:
-            args = TOOL_ARGUMENTS[name].model_validate(arguments).model_dump()
+            args = TOOL_ARGUMENTS[name].model_validate(arguments).model_dump(
+                exclude_unset=True)
         except ValidationError as exc:
             raise RemoteTelemetryError(
                 'invalid_request',
@@ -56,7 +57,7 @@ class FixtureToolClient:
                 result = await getattr(target, operation)(**args)
         except ServerError as exc:
             raise TelemetryClientError(str(exc)) from exc.__cause__
-        if name == 'discover_metrics':
+        if isinstance(result, dict):
             reply = TelemetryReply(metadata=result)
         else:
             reply = TelemetryReply(evidence=[

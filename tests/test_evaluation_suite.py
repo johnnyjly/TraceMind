@@ -59,6 +59,19 @@ def test_replays_follow_expected_outcomes(path: Path, tmp_path: Path) -> None:
         assert report.run_state.tool_calls == {"search_traces": 2}
 
 
+@pytest.mark.parametrize("path", sorted(Path(
+    "evals/regressions/live-diagnostic-boundaries").glob("*.json")),
+    ids=lambda p: p.stem)
+def test_audited_diagnostic_boundaries(path, tmp_path):
+    fixture = ReplayFixture.load(path)
+    report = asyncio.run(run_replay_evaluation(fixture, settings(tmp_path)))
+    assert report.result.passed
+    assert trace_issues(report.run_state) == []
+    assert report.run_state.model_calls == 2
+    assert sum(report.run_state.tool_calls.values()) == 1
+    assert len(report.diagnosis.evidence_ids) == 1
+
+
 def test_false_completion_on_insufficient_evidence() -> None:
     fixture = ReplayFixture.load(Path("evals/replays/missing_telemetry.json"))
     run = DiagnosisRun(

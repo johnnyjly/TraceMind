@@ -115,9 +115,12 @@ def test_finalization_cannot_exceed_remaining_model_attempts(tmp_path):
         model, telemetry, tmp_path,
         limits=RunLimits(model_calls=1, tool_calls=1),
     ))
-    assert model.calls == len(telemetry.calls) == 1
+    assert model.calls == 1
+    assert telemetry.calls == []
+    assert model.bindings == [["DiagnosisDraft"]]
     assert run.state.stop_reason is StopReason.MODEL_BUDGET
-    assert not any(e.kind == "policy.finalizing" for e in run.state.events)
+    assert [e.data["reason"] for e in run.state.events
+            if e.kind == "policy.finalizing"] == ["model_budget"]
 
 
 @pytest.mark.parametrize("hard_stop", [
@@ -187,7 +190,12 @@ def test_finalization_preserves_context_gate(tmp_path):
     assert any(e.kind == "policy.finalizing" for e in run.state.events)
 
 
-def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(tmp_path):
+@pytest.mark.parametrize("limits", [
+    RunLimits(tool_calls=1), RunLimits(model_calls=3),
+])
+def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(
+    tmp_path, limits,
+):
     requests = []
 
     def respond(request):
@@ -213,6 +221,9 @@ def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(tmp_path):
                 "evidence_ids": [json.loads(observation["content"])[0]["id"]],
             }
         if len(requests) > 1:
+            assert payload["messages"][-1]["role"] == "user"
+            assert "Investigation is now closed" in (
+                payload["messages"][-1]["content"])
             assert [t["function"]["name"] for t in payload["tools"]] == [
                 "DiagnosisDraft",
             ]
@@ -246,7 +257,7 @@ def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(tmp_path):
                 max_retries=0,
             )
             return await make_service(
-                model, telemetry, tmp_path, limits=RunLimits(tool_calls=1),
+                model, telemetry, tmp_path, limits=limits,
             ).diagnose_with_evidence(INCIDENT, start=START, end=END)
 
     run = asyncio.run(scenario())

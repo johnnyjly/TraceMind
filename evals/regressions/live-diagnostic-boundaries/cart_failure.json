@@ -1,0 +1,79 @@
+{
+  "case": {
+    "id": "cart_failure",
+    "description": "Sanitized regression fixture derived from public Demo behavior. Identifiers, times and durations are illustrative; scripted actions check harness behavior, not model quality.",
+    "incident": {
+      "title": "Customers cannot clear their shopping carts",
+      "description": "Removing all cart items fails, and some customers still see items after placing an order. Investigate the cause; do not assume checkout itself failed.",
+      "severity": "high",
+      "affected_services": [
+        "frontend"
+      ]
+    },
+    "fault": {
+      "feature_flag": "cartFailure",
+      "variant": "100%"
+    },
+    "ground_truth": {
+      "root_cause_service": "cart",
+      "root_cause_terms": [
+        "emptycart",
+        "clear",
+        "redis",
+        "valkey",
+        "badhost"
+      ],
+      "required_evidence_source": "trace"
+    },
+    "max_tool_calls": 12
+  },
+  "start": "2024-01-01T00:00:00Z",
+  "end": "2024-01-01T00:01:00Z",
+  "responses": [
+    {
+      "method": "get_trace_detail",
+      "arguments": {
+        "trace_id": "000000000000000000000000000000c9"
+      },
+      "evidence": [
+        {
+          "id": "00000000-0000-4000-8000-000000000201",
+          "source": "trace",
+          "summary": "Error span in cart: POST /oteldemo.CartService/EmptyCart",
+          "observed_at": "2024-01-01T00:00:30Z",
+          "service": "cart",
+          "query": "trace_id=000000000000000000000000000000c9",
+          "attributes": {
+            "trace_id": "000000000000000000000000000000c9",
+            "span_id": "00000000000000ca",
+            "operation": "POST /oteldemo.CartService/EmptyCart",
+            "duration_ms": 100,
+            "is_error": true,
+            "parent_span_id": "00000000000000cb",
+            "otel_status_description": "Status(StatusCode=\"FailedPrecondition\", Detail=\"Can't access cart storage: Redis connection unavailable in ValkeyCartStore.EmptyCartAsync (EnsureRedisConnected)\")"
+          }
+        }
+      ]
+    }
+  ],
+  "script": [
+    {
+      "name": "get_trace_detail",
+      "args": {
+        "trace_id": "000000000000000000000000000000c9"
+      }
+    },
+    {
+      "name": "DiagnosisDraft",
+      "args": {
+        "status": "complete",
+        "root_cause": "cart EmptyCart fails because it cannot connect to Redis-compatible storage. The precise address or server-side cause remains unverified.",
+        "confidence": 0.7,
+        "cite_indices": [
+          0
+        ],
+        "remediation": []
+      }
+    }
+  ]
+}

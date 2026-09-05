@@ -4,9 +4,12 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from tracemind.rag.chunking import PreparedDocument
 from tracemind.rag.corpus import PARSER_VERSION, Corpus, digest
+
+if TYPE_CHECKING:
+    from tracemind.rag.chunking import PreparedDocument
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ def verify_snapshot(workspace: Path) -> dict:
 async def build_snapshot(
     runtime,
     corpus: Corpus,
-    prepared: tuple[PreparedDocument, ...],
+    prepared: tuple["PreparedDocument", ...],
     *,
     timeout_seconds: float,
 ) -> dict:

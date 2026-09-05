@@ -1,0 +1,17 @@
+{
+  "id": "product_catalog_lock_contention",
+  "description": "Product catalog reads stall during recurring PostgreSQL table lock contention.",
+  "incident": {
+    "title": "Product browsing and checkout intermittently stall",
+    "description": "Customers report intermittent long waits while browsing products and placing orders. Some requests still succeed. Investigate the shared source of latency using current telemetry.",
+    "severity": "high",
+    "affected_services": ["frontend"]
+  },
+  "fault": {"feature_flag": "productCatalogLockContention", "variant": "on"},
+  "ground_truth": {
+    "root_cause_service": "product-catalog",
+    "root_cause_terms": ["lock contention", "table lock", "access exclusive", "locking"],
+    "required_evidence_source": "log"
+  },
+  "max_tool_calls": 12
+}

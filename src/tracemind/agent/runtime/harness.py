@@ -267,11 +267,21 @@ class RunHarness:
             self.emit("policy.finalizing", parent_span_id=self.state.id,
                       data={"reason": reason.value})
 
+    @property
+    def finalization_calls(self) -> int:
+        """Reserve synthesis and remaining repair, leaving a discovery turn."""
+        limits = self.state.limits
+        return min(
+            1 + limits.diagnosis_repairs - self.state.diagnosis_repairs,
+            max(1, limits.model_calls - 1),
+        )
+
     async def model_call(
         self, call: Callable[[], Awaitable[T]], *, model_name: str,
         allow_fallback: bool = False,
         purpose: str = "diagnosis", required: bool = True,
         reserved_calls: int = 0,
+        before_attempt: Callable[[], None] | None = None,
     ) -> T:
         """Retry transient calls within the shared call budget and deadline.
 
@@ -280,6 +290,8 @@ class RunHarness:
         """
         for attempt in range(self.state.limits.retry_attempts + 1):
             try:
+                if before_attempt is not None:
+                    before_attempt()
                 return await self._model_attempt(
                     call, model_name=model_name, purpose=purpose,
                     reserved_calls=reserved_calls)
@@ -481,7 +493,10 @@ class RunHarness:
                         evidence_result=evidence_result, remote=remote,
                     )
                     for item in result:
-                        if not evidence_result or "id" in item:
+                        if ("id" in item or "knowledge_ref" in item
+                                or (not evidence_result and name not in {
+                                    "search_knowledge", "read_knowledge",
+                                })):
                             fingerprint = hashlib.sha256(json.dumps(
                                 item, sort_keys=True, default=str
                             ).encode()).hexdigest()

@@ -1,9 +1,17 @@
 """Check runtime ownership, batched ranking and independent IR evaluation."""
+# Optional dependencies are checked before retrieval imports.
+# flake8: noqa: E402
 
 import asyncio
+import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
+pytest.importorskip("ir_measures", reason="requires the rag extra")
+pytest.importorskip("qdrant_client", reason="requires the rag extra")
+pytest.importorskip("langchain_classic", reason="requires the rag extra")
+pytest.importorskip("lightrag", reason="requires the rag extra")
 from langchain_core.messages import AIMessage
 
 from tracemind.evaluation.retrieval import RetrievalSuite, evaluate_retrieval
@@ -13,6 +21,8 @@ from tracemind.rag.keyword import KeywordIndex
 from tracemind.rag.models import RetrievalHit
 from tracemind.rag.retriever import SnapshotRetriever
 from test_rag import chunk, settings
+
+pytestmark = pytest.mark.rag
 
 
 def test_planned_queries_fuse_before_exactly_one_rerank(tmp_path):
@@ -115,6 +125,202 @@ def test_retriever_isolates_callbacks_and_closes_on_cancellation(monkeypatch):
     assert runtimes[0].completion is not runtimes[1].completion
 
 
+@pytest.mark.parametrize("role", ["keyword", "embedding"])
+def test_real_framework_queues_stop_before_close_returns(tmp_path, role):
+    from lightrag import LightRAG
+    from lightrag.utils import EmbeddingFunc, Tokenizer
+    import numpy as np
+    from tracemind.rag.qdrant import register_storage
+
+    register_storage()
+
+    class Tokens:
+        def encode(self, text):
+            return list(text.encode())
+
+        def decode(self, tokens):
+            return bytes(tokens).decode()
+
+    async def exercise():
+        entered, stopped = asyncio.Event(), asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        async def embed(texts, **kwargs):
+            if role == "embedding":
+                await blocked()
+            return np.zeros((len(texts), 2))
+
+        rag = LightRAG(
+            working_dir=str(tmp_path), workspace="queue-test-" + role,
+            vector_storage="AsyncQdrantVectorDBStorage",
+            vector_db_storage_cls_kwargs={"qdrant_url": "http://127.0.0.1:6333",
+                                         "qdrant_timeout": 1},
+            tokenizer=Tokenizer("fixture", Tokens()), llm_model_func=blocked,
+            embedding_func=EmbeddingFunc(
+                embedding_dim=2, max_token_size=512, func=embed))
+        runtime = RagRuntime(settings())
+        runtime.rag = rag
+        queue = (rag.role_llm_funcs[role] if role == "keyword"
+                 else rag.embedding_func.func)
+        task = asyncio.create_task(queue("RPC timeout" if role == "keyword"
+                                         else ["RPC timeout"]))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not stopped.is_set()
+        await runtime.close()
+        assert stopped.is_set()
+        assert (await queue.get_queue_stats())["worker_count"] == 0
+        await runtime.close()
+
+    asyncio.run(exercise())
+
+
+def test_close_drains_inference_even_when_cleanup_is_cancelled_twice():
+    from lightrag.utils import priority_limit_async_func_call
+    from tracemind.async_utils import run_io
+
+    entered, release = threading.Event(), threading.Event()
+    finalized = []
+
+    def inference():
+        entered.set()
+        assert release.wait(3)
+
+    async def exercise():
+        async def embed():
+            await run_io(inference)
+
+        async def finalize():
+            assert release.is_set()
+            finalized.append(True)
+
+        queue = priority_limit_async_func_call(1)(embed)
+        runtime = RagRuntime(settings())
+        runtime.rag = SimpleNamespace(
+            role_llm_funcs={}, embedding_func=SimpleNamespace(func=queue),
+            finalize_storages=finalize)
+        task = asyncio.create_task(queue())
+        await asyncio.to_thread(entered.wait)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        close = asyncio.create_task(runtime.close())
+        await asyncio.sleep(.01)
+        close.cancel()
+        await asyncio.sleep(0)
+        close.cancel()
+        await asyncio.sleep(.01)
+        assert not close.done() and not finalized
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close
+        assert finalized == [True]
+        assert (await queue.get_queue_stats())["worker_count"] == 0
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+
+
+def test_same_snapshot_name_cannot_open_another_directory(tmp_path, monkeypatch):
+    import tracemind.rag.engine as engine
+
+    monkeypatch.setattr(engine, "_snapshot_workspaces", {})
+    opened = []
+
+    async def initialize(runtime, **kwargs):
+        opened.append(runtime.settings.workspace)
+
+    monkeypatch.setattr(RagRuntime, "_initialize", initialize)
+
+    async def exercise():
+        first = RagRuntime(settings(directory=tmp_path / "a",
+                                    snapshot="same"))
+        await first.initialize()
+        await first.close()
+        second = RagRuntime(settings(directory=tmp_path / "b",
+                                     snapshot="same"))
+        with pytest.raises(ValueError, match="another local directory"):
+            await second.initialize()
+        assert second._workspace_lock is None
+        assert len(opened) == 1
+
+    asyncio.run(exercise())
+
+
+def test_ambient_qdrant_workspace_cannot_override_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setenv("QDRANT_WORKSPACE", "some-other-snapshot")
+    runtime = RagRuntime(settings(directory=tmp_path,
+                                  snapshot="requested"))
+    with pytest.raises(ValueError, match="QDRANT_WORKSPACE"):
+        asyncio.run(runtime.initialize())
+    assert not runtime.settings.workspace.exists()
+
+
+@pytest.mark.parametrize("phase", ["initialize", "search", "close"])
+@pytest.mark.parametrize("kind", ["connection", "service", "sqlite"])
+def test_storage_failures_degrade_in_the_real_diagnosis_graph(
+        monkeypatch, phase, kind):
+    import tracemind.rag.retriever as retriever
+    from qdrant_client.http.exceptions import (
+        ResponseHandlingException, UnexpectedResponse,
+    )
+    import httpx
+    from test_online_knowledge import (
+        END, INCIDENT, START, ScriptedModel, answer, service, tool_call,
+    )
+
+    failure = {
+        "connection": ResponseHandlingException(httpx.ConnectError("private")),
+        "service": UnexpectedResponse(503, "Unavailable", b"private",
+                                      httpx.Headers()),
+        "sqlite": sqlite3.OperationalError("private"),
+    }[kind]
+    closed = []
+
+    class Runtime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def initialize(self):
+            if phase == "initialize":
+                raise failure
+
+        async def search(self, *args, **kwargs):
+            if phase == "search":
+                raise failure
+            return []
+
+        async def close(self):
+            closed.append(True)
+            if phase == "close":
+                raise failure
+
+    monkeypatch.setattr(retriever, "RagRuntime", Runtime)
+    monkeypatch.setattr(retriever, "verify_snapshot",
+                        lambda path: {"snapshot": path.name})
+    search = SnapshotRetriever(settings())
+    model = ScriptedModel(respond=lambda messages, calls: (
+        tool_call("search_knowledge", {"query": "RPC timeout"}) if calls == 1
+        else answer(messages)))
+    result = asyncio.run(service(model, search).diagnose_with_evidence(
+        INCIDENT, start=START, end=END))
+    assert result.state.status.value == "inconclusive"
+    assert model.calls == 2
+    assert result.state.knowledge == []
+    assert closed == [True]
+    assert "private" not in str(result.state.events)
+
+
 def test_ir_metrics_include_zero_hits_and_deduplicate_documents():
     suite = RetrievalSuite(snapshot="v1", questions=[
         {"id": "one", "query": "RPC timeout", "relevant": {"synthetic.a": 1}},
@@ -143,3 +349,52 @@ def test_ir_metrics_include_zero_hits_and_deduplicate_documents():
     with pytest.raises(ValueError, match="snapshot"):
         asyncio.run(evaluate_retrieval(
             runtime, suite.model_copy(update={"snapshot": "other"}), k=2))
+
+
+def test_abstention_questions_do_not_distort_positive_ranking_metrics():
+    async def search(query):
+        return [] if query == "unknown" else [RetrievalHit(
+            chunk=chunk("a"), branches=["naive"], fusion_score=1,
+            rerank_score=.2)]
+
+    runtime = SimpleNamespace(
+        settings=settings(snapshot="v1"), search=search,
+        model=SimpleNamespace(calls=0, input_tokens=0, output_tokens=0,
+                              unreported_calls=0))
+    suite = RetrievalSuite(snapshot="v1", questions=[
+        {"id": "positive", "query": "RPC", "relevant": {"synthetic.a": 1}},
+        {"id": "negative", "query": "unknown", "relevant": {}},
+        {"id": "false-hit", "query": "wrong", "relevant": {}},
+    ])
+    report = asyncio.run(evaluate_retrieval(runtime, suite, k=1))
+    assert set(report["metrics"].values()) == {1}
+    assert report["abstention"] == {
+        "questions": 2, "correct": 1, "false_abstentions": 0,
+    }
+    assert report["queries"][0]["rerank_scores"] == [.2]
+    suite.questions = suite.questions[1:]
+    report = asyncio.run(evaluate_retrieval(runtime, suite, k=1))
+    assert report["metrics"] == {}
+
+
+@pytest.mark.parametrize("score, expected", [(.01, 0), (.2, 1), (.3, 1)])
+def test_calibrated_threshold_can_return_no_knowledge(tmp_path, score, expected):
+    runtime = RagRuntime(settings(rerank_min_score=.2))
+    runtime._published = True
+    runtime.index = KeywordIndex(tmp_path / "keyword.sqlite3")
+    candidate = chunk("a")
+    runtime.index.register([candidate])
+
+    async def retrieve(*args):
+        return {"status": "success", "data": {"chunks": [
+            {"chunk_id": candidate.chunk_id, "content": candidate.text}]}}
+
+    async def rank(*args):
+        return [score]
+
+    runtime.rag = SimpleNamespace(aquery_data=retrieve)
+    runtime.models.rank = rank
+    try:
+        assert len(asyncio.run(runtime.search("RPC"))) == expected
+    finally:
+        runtime.index.close()

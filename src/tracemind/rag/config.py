@@ -20,6 +20,8 @@ class RagSettings(BaseSettings):
     model_cache_directory: Path | None = None
     snapshot: str = Field(default="bootstrap", pattern=r"^[a-zA-Z0-9_-]+$")
     qdrant_url: AnyHttpUrl = "http://127.0.0.1:6333"
+    service_url: AnyHttpUrl | None = None
+    service_query_timeout: float = Field(default=15, gt=0, le=20)
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_revision: str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
     embedding_dimension: int = Field(default=384, ge=1)
@@ -37,6 +39,13 @@ class RagSettings(BaseSettings):
     mode: Literal["mix", "naive"] = "mix"
     candidate_limit: int = Field(default=20, ge=1, le=100)
     result_limit: int = Field(default=5, ge=1, le=20)
+    rerank_min_score: float | None = Field(
+        default=None, allow_inf_nan=False,
+        description=(
+            "Optional cutoff calibrated for the snapshot and reranker; "
+            "not a relevance probability."
+        ),
+    )
     bm25_enabled: bool = True
     llm_provider: str | None = Field(default=None, min_length=1)
     llm_model: str | None = Field(default=None, min_length=1)

@@ -79,7 +79,8 @@ class Backend:
         self.calls.append(("discover_metrics", arguments))
         return {"metrics": [{"metric": "payment_errors_total"}]}
 
-    async def search_traces(self, service, *, start, end):
+    async def search_traces(self, service, *, start, end,
+                            min_duration_ms=None, errors_only=False):
         self.calls.append(("search_traces", service, start, end))
         return [Evidence(id=UUID(int=2), source="trace", service=service,
                          summary="payment Charge failed", observed_at=end,
@@ -505,4 +506,34 @@ def test_entrypoints_use_shared_http_service_assembly(
                 assert report.telemetry_transport == 'mcp'
             assert any(call[0] == 'query_metrics' for call in backend.calls)
 
+    asyncio.run(exercise())
+
+
+def test_trace_filters_and_hints_cross_http_without_becoming_evidence():
+    class EmptyBackend(Backend):
+        async def search_traces(self, service, *, start, end,
+                                min_duration_ms=None, errors_only=False):
+            self.calls.append((service, start, end, min_duration_ms,
+                               errors_only))
+            return {'kind': 'trace_search_hints', 'service_known': False,
+                    'available_services': ['product-catalog']}
+
+    async def exercise():
+        backend = EmptyBackend()
+        async with http_server(backend) as url:
+            client = HttpMcpClient(url)
+            h, store = harness(), EvidenceCollector()
+            try:
+                tools = {t.name: t for t in await create_mcp_tools(
+                    client, start=START, end=END, collector=store, harness=h)}
+                result = await tools['search_traces'].ainvoke({
+                    'service': 'productcatalog', 'min_duration_ms': 1000,
+                    'errors_only': True})
+                assert backend.calls == [
+                    ('productcatalog', START, END, 1000, True)]
+                assert result[0]['available_services'] == ['product-catalog']
+                assert not store.evidence
+                assert h.state.progress_count == 0
+            finally:
+                await client.aclose()
     asyncio.run(exercise())

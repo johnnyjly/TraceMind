@@ -1,4 +1,6 @@
 """Validate preparation, parent recovery and failed/publication boundaries."""
+# Optional dependencies are checked before retrieval imports.
+# flake8: noqa: E402
 
 import asyncio
 import json
@@ -10,6 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+pytest.importorskip("docling", reason="requires the rag extra")
+pytest.importorskip("langchain_classic", reason="requires the rag extra")
+pytest.importorskip("lightrag", reason="requires the rag extra")
 from langchain_core.messages import AIMessage
 
 from tracemind.rag.chunking import prepare_corpus
@@ -25,6 +30,8 @@ from tracemind.rag.engine import RagRuntime
 from tracemind.rag.ingestion import build_snapshot, verify_snapshot
 from tracemind.rag.keyword import KeywordIndex
 from tracemind.rag.model_bridge import LightRAGModelBridge
+
+pytestmark = pytest.mark.rag
 
 
 class WordTokenizer:
@@ -329,6 +336,19 @@ def test_html_noise_removed_and_json_single_representation():
     record["text"] += "tamper"
     with pytest.raises(ValueError, match="authored content hash"):
         parse_document(json.dumps(record).encode(), entry)
+
+
+def test_partial_conversion_cannot_be_prepared_for_publication(monkeypatch):
+    from docling.document_converter import DocumentConverter
+    from docling.datamodel.base_models import ConversionStatus
+
+    result = SimpleNamespace(status=ConversionStatus.PARTIAL_SUCCESS,
+                             document=object())
+    monkeypatch.setattr(DocumentConverter, "convert",
+                        lambda *args, **kwargs: result)
+    with pytest.raises(ValueError, match="conversion is incomplete"):
+        parse_document(b"# Guide\nPartial",
+                       {"format": "markdown", "title": "Guide"})
 
 
 def test_text_pdf_headings_and_empty_pdf():

@@ -151,8 +151,9 @@ def test_worker_persists_graph_and_terminal_result(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("finalizing", [False, True])
+@pytest.mark.parametrize("model_budget", [2, 8])
 def test_resume_reuses_checkpoint_and_retained_evidence(
-    tmp_path: Path, finalizing: bool,
+    tmp_path: Path, finalizing: bool, model_budget: int,
 ) -> None:
     """Restart after a tool step without reissuing its telemetry query."""
     settings = Settings(
@@ -166,7 +167,8 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
         incident=Incident(title="checkout error", description="HTTP 500"),
         investigation_start=START,
         investigation_end=START + timedelta(hours=1),
-        limits=RunLimits(), allowed_tools=("query_metrics",),
+        limits=RunLimits(model_calls=model_budget),
+        allowed_tools=("query_metrics",),
         status=RunStatus.QUEUED,
     )
     repository.create(state, request_hash="restart-test")
@@ -244,12 +246,13 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
     assert telemetry.calls == 1
     assert completed.result is not None
     assert completed.result.diagnosis.evidence_ids == [halfway.evidence[0].id]
-    if finalizing:
+    if finalizing or model_budget == 2:
         assert resumed_model.bindings == [["DiagnosisDraft"]]
         phases = [e for e in completed.state.events
                   if e.kind == "policy.finalizing"]
         assert len(phases) == 1
-        assert phases[0].data["reason"] == "no_progress"
+        assert phases[0].data["reason"] == (
+            "no_progress" if finalizing else "model_budget")
 
 
 def test_active_cancellation_stops_worker(tmp_path: Path) -> None:

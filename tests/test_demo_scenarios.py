@@ -35,7 +35,7 @@ def load_script(name):
 
 @pytest.fixture
 def demo(tmp_path):
-    """Build a pristine flag file with all three scenario faults off."""
+    """Build a pristine flag file with all supported scenario faults off."""
     source = tmp_path / "src/flagd/demo.flagd.json"
     source.parent.mkdir(parents=True)
     source.write_text(json.dumps({"flags": {
@@ -45,6 +45,11 @@ def demo(tmp_path):
                         "variants": {"off": 0, "100%": 1}},
         "intlShippingSlowdown": {"defaultVariant": "off",
                                  "variants": {"off": 0, "5sec": 5}},
+        "productCatalogLockContention": {"defaultVariant": "off",
+                                         "variants": {"off": False,
+                                                      "on": True}},
+        "paymentUnreachable": {"defaultVariant": "off",
+                               "variants": {"off": False, "on": True}},
     }}))
     return tmp_path
 
@@ -85,8 +90,63 @@ def test_new_case_requires_evidence_from_actual_cause(scenario):
         evidence_ids=[evidence.id])
     run = DiagnosisRun(diagnosis=diagnosis, evidence=[evidence], tool_calls={})
     assert evaluate_diagnosis(case, run, elapsed_ms=1).passed
-    evidence.service = "checkout"
+    evidence.service = "frontend"
     assert not evaluate_diagnosis(case, run, elapsed_ms=1).passed
+
+
+@pytest.mark.parametrize("scenario,misdiagnosis", [
+    ("payment_unreachable", "payment rejected the card: Invalid token"),
+    ("payment_unreachable", "checkout failed because payment is unavailable"),
+    ("product_catalog_lock_contention", "product-catalog is slow"),
+])
+def test_new_faults_reject_business_errors_or_latency_without_cause(
+    scenario, misdiagnosis,
+):
+    case = EvaluationCase.load(ROOT / f"evals/cases/{scenario}.json")
+    evidence = Evidence(
+        source=case.ground_truth.required_evidence_source,
+        service=case.ground_truth.root_cause_service,
+        summary="Observed fault", observed_at=datetime.now(UTC))
+    diagnosis = Diagnosis(
+        incident_id=case.incident.id, status="complete", confidence=.8,
+        root_cause=misdiagnosis, evidence_ids=[evidence.id])
+    run = DiagnosisRun(diagnosis=diagnosis, evidence=[evidence], tool_calls={})
+    result = evaluate_diagnosis(case, run, elapsed_ms=1)
+    assert not result.passed
+    assert result.false_completion
+
+
+@pytest.mark.parametrize("scenario", [
+    "product_catalog_lock_contention", "payment_unreachable",
+])
+def test_switch_new_faults_activates_case_and_preserves_previous(
+    demo, monkeypatch, scenario,
+):
+    cli = load_script("demo_scenario")
+    active = demo / "active.flagd.json"
+    backup = demo / "previous.flagd.json"
+    original = b'{"previous":true}\n'
+    active.write_bytes(original)
+    monkeypatch.setattr(cli, "GENERATED_FLAG_PATH", active)
+    monkeypatch.setattr(cli, "BACKUP_FLAG_PATH", backup)
+    monkeypatch.setattr(cli, "verify_demo_commit", lambda path: None)
+    monkeypatch.setattr(cli.shutil, "which", lambda *a, **k: "docker")
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw:
+                        calls.append(cmd))
+    monkeypatch.setattr("sys.argv", [
+        "demo_scenario.py", "switch", "--scenario", scenario,
+        "--demo-path", str(demo)])
+    cli.main()
+    case = EvaluationCase.load(ROOT / f"evals/cases/{scenario}.json")
+    flags = json.loads(active.read_text())["flags"]
+    assert {name for name, flag in flags.items()
+            if flag["defaultVariant"] != "off"} == {case.fault.feature_flag}
+    assert backup.read_bytes() == original
+    assert len(calls) == 1
+    assert calls[0][-6:] == [
+        "up", "--no-build", "--force-recreate", "--detach", "--no-deps",
+        "flagd"]
 
 
 @pytest.mark.parametrize("action", ["status", "stop"])

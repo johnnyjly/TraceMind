@@ -271,12 +271,17 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
     reduced = set()
     eligible = []
     after = before
+    readers = {convert_to_openai_tool(tool)["function"]["name"]
+               for tool in request.tools}
     # Oldest results first; never remove an assistant call or its response.
     for index, message in enumerate(messages):
         if not isinstance(message, ToolMessage):
             continue
         artifact = message.artifact
         if not isinstance(artifact, dict) or "context_index" not in artifact:
+            continue
+        reader = artifact.get("context_reader")
+        if reader is not None and reader not in readers:
             continue
         # A requested detail page must reach the model intact this round.
         if index > last_call and artifact.get("detail_page"):
@@ -295,8 +300,6 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
             )
 
     # Omitted references must remain discoverable through an authorized tool.
-    readers = {convert_to_openai_tool(tool)["function"]["name"]
-               for tool in request.tools}
     omitted = 0
     if readers:
         for index in eligible:

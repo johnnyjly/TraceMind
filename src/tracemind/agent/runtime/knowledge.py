@@ -16,7 +16,7 @@ from tracemind.agent.runtime.recovery import (
 from tracemind.agent.workflow.context import estimate_payload, json_text
 from tracemind.models.knowledge import KnowledgeReference, knowledge_preview
 from tracemind.models.run import RunPurpose, RunState
-from tracemind.rag.model_bridge import Completion
+from tracemind.rag.model_bridge import Completion, completion_text
 from tracemind.rag.models import RetrievalHit
 
 
@@ -129,7 +129,8 @@ def create_knowledge_tools(
 
         return await harness.model_call(
             invoke, model_name=model_name, purpose=purpose, required=False,
-            reserved_calls=policy.reserved_model_calls,
+            reserved_calls=max(policy.reserved_model_calls,
+                               harness.finalization_calls),
         )
 
     @tool(response_format="content_and_artifact")
@@ -142,7 +143,9 @@ def create_knowledge_tools(
         Use an English query with exact service names, error codes and other
         identifiers. Set rewrite=true only when translation or decomposition
         is needed; it consumes model budget. Skip retrieval when existing
-        information is sufficient. Results identify documentation, not current
+        information is sufficient. Do not rephrase a search that returned no
+        useful new references unless new evidence changes the question.
+        Results identify documentation, not current
         fault observations. Cite their knowledge_ref in knowledge_refs, never
         evidence_ids. Read a retained reference only if its preview is missing
         a necessary detail and detail reading is authorized.
@@ -172,7 +175,8 @@ def create_knowledge_tools(
                     ], max_tokens=policy.model_output_tokens,
                         keyword_extraction=False,
                         purpose="knowledge.query_planning")
-                    plan = QueryPlan.model_validate_json(response.content)
+                    plan = QueryPlan.model_validate_json(
+                        completion_text(response))
                     queries = list(dict.fromkeys(
                         q.strip() for q in plan.queries))
                     if (len(queries) > policy.max_queries
@@ -187,14 +191,32 @@ def create_knowledge_tools(
                                     snapshot=policy.snapshot,
                                     completion=complete)
                 harness.check_active()
+                before = {reference.id for reference in state.knowledge}
                 references, omitted = _retain(hits, harness)
+                added = sum(r.id not in before for r in references)
                 harness.emit("knowledge.search.completed", data={
                     "snapshot": policy.snapshot,
                     "reference_ids": [r.id for r in references],
                     "retained_count": len(state.knowledge),
                     "omitted_count": omitted,
+                    "new_references": added,
                 })
                 result = [knowledge_preview(r) for r in references]
+                if (not references and not omitted) or (references
+                                                        and not added):
+                    result.append({
+                        "knowledge_status": (
+                            "no_results" if not references
+                            else "no_new_references"
+                        ),
+                        "guidance": (
+                            "No new reference material was found. Do not "
+                            "repeat this question with synonyms. Use the "
+                            "existing telemetry to report supported findings "
+                            "and missing observations; search again only "
+                            "for a different evidence-driven question."
+                        ),
+                    })
                 if omitted:
                     result.append({"omitted_count": omitted})
                 return result

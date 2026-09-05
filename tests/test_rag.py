@@ -1,4 +1,6 @@
 """Validate RAG boundaries with synthetic references and no model downloads."""
+# Optional dependencies are checked before retrieval imports.
+# flake8: noqa: E402
 
 import asyncio
 import json
@@ -8,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+pytest.importorskip("langchain_classic", reason="requires the rag extra")
+pytest.importorskip("lightrag", reason="requires the rag extra")
 from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
@@ -18,6 +22,8 @@ from tracemind.rag.model_bridge import LightRAGModelBridge
 from tracemind.rag.local_models import LocalModels
 from tracemind.rag.fusion import fuse_candidates
 from tracemind.rag.models import KnowledgeChunk
+
+pytestmark = pytest.mark.rag
 
 
 def chunk(key, text="Inspect connection errors.", **updates):

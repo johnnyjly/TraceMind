@@ -1,0 +1,17 @@
+{
+  "id": "payment_unreachable",
+  "description": "Checkout attempts payment RPCs through an invalid destination address.",
+  "incident": {
+    "title": "Customers cannot complete checkout",
+    "description": "Orders fail during checkout while product browsing still works. Investigate which part of the request path is failing and why.",
+    "severity": "high",
+    "affected_services": ["frontend"]
+  },
+  "fault": {"feature_flag": "paymentUnreachable", "variant": "on"},
+  "ground_truth": {
+    "root_cause_service": "checkout",
+    "root_cause_terms": ["badaddress", "dns", "name resolution", "resolver", "address", "endpoint"],
+    "required_evidence_source": "trace"
+  },
+  "max_tool_calls": 12
+}

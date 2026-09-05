@@ -44,3 +44,4 @@ packages = ["src/tracemind"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = ["rag: requires optional RAG dependencies"]

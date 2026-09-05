@@ -30,7 +30,8 @@ class TelemetryBackend(Protocol):
 
     async def search_traces(
         self, service: str, *, start: datetime, end: datetime,
-    ) -> list[Evidence]:
+        min_duration_ms: float | None = None, errors_only: bool = False,
+    ) -> list[Evidence] | dict:
         """Return trace summaries for one service and investigation window."""
         ...
 
@@ -72,9 +73,20 @@ class DirectTelemetryBackend:
 
     async def search_traces(
         self, service: str, *, start: datetime, end: datetime,
-    ) -> list[Evidence]:
+        min_duration_ms: float | None = None, errors_only: bool = False,
+    ) -> list[Evidence] | dict:
         """Read service traces with the client's existing result limit."""
-        return await self.jaeger.search_traces(service, start=start, end=end)
+        evidence = await self.jaeger.search_traces(
+            service, start=start, end=end,
+            min_duration_ms=min_duration_ms, errors_only=errors_only,
+        )
+        if evidence:
+            return evidence
+        hints = await self.jaeger.service_hints(service)
+        hints["filters"] = {
+            "min_duration_ms": min_duration_ms, "errors_only": errors_only,
+        }
+        return hints
 
     async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
         """Read normalized error and latency spans from a known trace."""

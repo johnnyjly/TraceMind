@@ -87,7 +87,9 @@ def _convert(data: bytes, fmt: str, *, pdf_pipeline: str = "standard",
     from docling.document_converter import (
         DocumentConverter, NativePdfFormatOption, PdfFormatOption,
     )
-    from docling.datamodel.base_models import DocumentStream, InputFormat
+    from docling.datamodel.base_models import (
+        ConversionStatus, DocumentStream, InputFormat,
+    )
     from docling.datamodel.pipeline_options import PdfPipelineOptions
 
     formats = {"markdown": (InputFormat.MD, "md"),
@@ -108,9 +110,12 @@ def _convert(data: bytes, fmt: str, *, pdf_pipeline: str = "standard",
     converter = DocumentConverter(
         allowed_formats=[kind],
         format_options=options)
-    return converter.convert(DocumentStream(
+    result = converter.convert(DocumentStream(
         name="document." + extension, stream=BytesIO(data),
-    )).document
+    ))
+    if result.status is not ConversionStatus.SUCCESS:
+        raise ValueError(f"document conversion is incomplete: {result.status}")
+    return result.document
 
 
 def _sections(structure, title: str) -> tuple[Section, ...]:

@@ -50,4 +50,9 @@ def knowledge_preview(reference: KnowledgeReference) -> dict:
         "source_refs": chunk.source_refs,
         "source_revision": chunk.source_revision,
         "document_sha256": chunk.document_sha256,
+        "rerank_score": reference.hit.rerank_score,
+        "relevance_note": (
+            "Ranking score is not a probability or confirmation of relevance. "
+            "Use only passages that address the diagnostic question."
+        ),
     }

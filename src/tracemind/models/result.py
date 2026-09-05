@@ -31,7 +31,23 @@ class DiagnosisDraft(BaseModel):
     """
 
     status: DiagnosisStatus
-    root_cause: str = Field(min_length=1)
+    root_cause: str = Field(
+        min_length=1,
+        description=(
+            "Explain the diagnosis in three short parts: Observed failure; "
+            "Counterevidence and scope; Unknowns. Identify the operation "
+            "and observed error or latency. Explicitly discuss relevant "
+            "successful operations and other observations that limit the "
+            "claim; if none are available, say so. A single client's failure "
+            "does not prove a shared dependency is down. A recovery claim "
+            "requires earlier failure and later success of the same "
+            "operation/client, not success of a different operation. "
+            "Separate traces "
+            "do not prove one transaction without a linking identifier. "
+            "Distinguish the observed failure from its unverified "
+            "configuration or infrastructure cause."
+        ),
+    )
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)

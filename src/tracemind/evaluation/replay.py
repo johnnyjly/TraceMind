@@ -31,9 +31,16 @@ class ReplayResponse(BaseModel):
     method: Literal[
         "query", "search_traces", "get_trace_detail", "search_logs",
     ]
-    arguments: dict[str, str | None]
+    arguments: dict[str, str | int | float | bool | None]
     evidence: list[Evidence] = Field(default_factory=list)
     error: Literal["transient", "unavailable"] | None = None
+    metadata: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if self.metadata is not None and (self.evidence or self.error):
+            raise ValueError("metadata cannot accompany evidence or error")
+        return self
 
 
 class ReplayFixture(BaseModel):
@@ -73,7 +80,9 @@ class ReplayTelemetry:
         self.responses = list(responses)
         self.calls = 0
 
-    async def _respond(self, method: str, arguments: dict) -> list[Evidence]:
+    async def _respond(
+        self, method: str, arguments: dict,
+    ) -> list[Evidence] | dict:
         """Consume the first matching response, preserving retry order."""
         for index, response in enumerate(self.responses):
             if response.method == method and response.arguments == arguments:
@@ -88,7 +97,8 @@ class ReplayTelemetry:
                         ) from exc
                 if response.error == "unavailable":
                     raise TelemetryClientError("replay unavailable")
-                return response.evidence
+                return (response.metadata if response.metadata is not None
+                        else response.evidence)
         raise AssertionError(f"unrecorded replay request: {method}")
 
     async def discover_tools(self) -> list[Tool]:
@@ -101,8 +111,10 @@ class ReplayTelemetry:
             arguments.setdefault("text", None)
         result = await self._respond(
             "query" if name == "query_metrics" else name, arguments)
-        return CallToolResult(content=[], structuredContent=TelemetryReply(
-            evidence=result).model_dump(mode="json", exclude_none=True))
+        reply = (TelemetryReply(metadata=result) if isinstance(result, dict)
+                 else TelemetryReply(evidence=result))
+        return CallToolResult(content=[], structuredContent=reply.model_dump(
+            mode="json", exclude_none=True))
 
 
 def recorded_tools() -> list[Tool]:

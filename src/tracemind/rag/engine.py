@@ -14,7 +14,7 @@ from math import isfinite
 from time import monotonic
 
 from tracemind.rag.config import RagSettings
-from tracemind.async_utils import run_io
+from tracemind.async_utils import finish_task, run_io
 from tracemind.rag.fusion import fuse_candidates
 from tracemind.rag.ingestion import snapshot_path, verify_snapshot
 from tracemind.rag.keyword import KeywordIndex
@@ -23,8 +23,8 @@ from tracemind.rag.local_models import BgeTokenizer, LocalModels
 from tracemind.rag.models import RetrievalHit
 
 logger = logging.getLogger(__name__)
-# Pinned LightRAG reads Qdrant configuration from process environment at init.
-_qdrant_initialization_lock = asyncio.Lock()
+# LightRAG's process-global KV cache keys omit the working directory.
+_snapshot_workspaces: dict[str, Path] = {}
 
 
 class RagRuntime:
@@ -52,16 +52,20 @@ class RagRuntime:
         self._published = False
         self._building = False
         self._reader_directory = None
+        self._close_task = None
 
     async def initialize(self, *, chunking_func=None) -> None:
         """Open Qdrant, NetworkX and local metadata with pinned models."""
         settings = self.settings
         if self.rag is not None:
             raise RuntimeError("RAG runtime is already initialized")
+        override = os.environ.get("QDRANT_WORKSPACE", "").strip()
+        if override and override != settings.snapshot:
+            raise ValueError("QDRANT_WORKSPACE conflicts with the snapshot ID")
         self._published = snapshot_path(settings.workspace).exists()
         self._building = chunking_func is not None
         if self._published:
-            verify_snapshot(settings.workspace)
+            await run_io(verify_snapshot, settings.workspace)
             if self._building:
                 raise ValueError(
                     "published knowledge snapshot cannot be modified"
@@ -83,7 +87,14 @@ class RagRuntime:
                 "another process owns this RAG workspace"
             ) from None
         self._workspace_lock = handle
+        self._close_task = None
         try:
+            workspace = settings.workspace.resolve()
+            bound = _snapshot_workspaces.setdefault(
+                settings.snapshot, workspace)
+            if bound != workspace:
+                raise ValueError(
+                    "snapshot ID is already bound to another local directory")
             await self._initialize(chunking_func=chunking_func)
         except BaseException:
             await self.close()
@@ -92,6 +103,9 @@ class RagRuntime:
     async def _initialize(self, *, chunking_func=None) -> None:
         from lightrag import LightRAG
         from lightrag.utils import EmbeddingFunc, Tokenizer
+        from tracemind.rag.qdrant import register_storage
+
+        register_storage()
 
         settings = self.settings
         settings.workspace.mkdir(parents=True, exist_ok=True)
@@ -111,7 +125,7 @@ class RagRuntime:
             "corpus_published": False,
         }
         if manifest.exists():
-            previous = json.loads(manifest.read_text())
+            previous = json.loads(await run_io(manifest.read_text))
             immutable = ("snapshot", "lightrag", "qdrant_url", "embedding",
                          "embedding_revision", "dimension", "max_tokens",
                          "chunk_tokens")
@@ -128,114 +142,136 @@ class RagRuntime:
             # point their writable lifetime at immutable publication artifacts.
             self._reader_directory = TemporaryDirectory(prefix="tracemind-rag-")
             reader = Path(self._reader_directory.name) / "lightrag"
-            shutil.copytree(working_dir, reader)
+            await run_io(shutil.copytree, working_dir, reader)
             working_dir = reader
-        async with _qdrant_initialization_lock:
-            previous_url = os.environ.get("QDRANT_URL")
-            os.environ["QDRANT_URL"] = str(settings.qdrant_url)
-            try:
-                special_tokens = (
-                    self.models.embedding.tokenizer.num_special_tokens_to_add(
-                        pair=False
-                    )
+        try:
+            special_tokens = (
+                self.models.embedding.tokenizer.num_special_tokens_to_add(
+                    pair=False
                 )
-                self.rag = LightRAG(
-                    working_dir=str(working_dir),
-                    workspace=settings.snapshot,
-                    vector_storage="QdrantVectorDBStorage",
-                    graph_storage="NetworkXStorage",
-                    kv_storage="JsonKVStorage",
-                    doc_status_storage="JsonDocStatusStorage",
-                    tokenizer=Tokenizer(
-                        settings.embedding_model,
-                        BgeTokenizer(self.models.embedding.tokenizer),
+            )
+            self.rag = LightRAG(
+                working_dir=str(working_dir),
+                workspace=settings.snapshot,
+                vector_storage="AsyncQdrantVectorDBStorage",
+                vector_db_storage_cls_kwargs={
+                    "qdrant_url": str(settings.qdrant_url),
+                    "qdrant_timeout": settings.timeout_seconds,
+                },
+                graph_storage="NetworkXStorage",
+                kv_storage="JsonKVStorage",
+                doc_status_storage="JsonDocStatusStorage",
+                tokenizer=Tokenizer(
+                    settings.embedding_model,
+                    BgeTokenizer(self.models.embedding.tokenizer),
+                ),
+                embedding_func=EmbeddingFunc(
+                    embedding_dim=settings.embedding_dimension,
+                    max_token_size=(
+                        settings.embedding_max_tokens
+                        - special_tokens
                     ),
-                    embedding_func=EmbeddingFunc(
-                        embedding_dim=settings.embedding_dimension,
-                        max_token_size=(
-                            settings.embedding_max_tokens
-                            - special_tokens
-                        ),
-                        model_name=settings.embedding_model,
-                        supports_asymmetric=True,
-                        func=self.models.embed,
-                    ),
-                    llm_model_func=self.model.complete,
-                    role_llm_configs={
-                        "keyword": {"func": partial(
-                            self.model.complete, keyword_extraction=True)},
-                    },
-                    llm_model_name=settings.llm_model or "injected-model",
-                    llm_model_max_async=1,
-                    embedding_func_max_async=1,
-                    embedding_batch_num=settings.batch_size,
-                    chunk_token_size=settings.chunk_tokens,
-                    chunk_overlap_token_size=0,
-                    summary_max_tokens=settings.summary_max_tokens,
-                    summary_length_recommended=(
-                        settings.summary_length_recommended),
-                    max_parallel_insert=1,
-                    enable_llm_cache=not self._published,
-                    **({"chunking_func": chunking_func}
-                       if chunking_func else {}),
-                )
-                await self.rag.initialize_storages()
-                if not manifest.exists():
-                    manifest.write_text(json.dumps(identity, indent=2) + "\n")
-            except BaseException:
-                await self.close()
-                raise
-            finally:
-                if previous_url is None:
-                    os.environ.pop("QDRANT_URL", None)
-                else:
-                    os.environ["QDRANT_URL"] = previous_url
+                    model_name=settings.embedding_model,
+                    supports_asymmetric=True,
+                    func=self.models.embed,
+                ),
+                llm_model_func=self.model.complete,
+                role_llm_configs={
+                    "keyword": {"func": partial(
+                        self.model.complete, keyword_extraction=True)},
+                },
+                llm_model_name=settings.llm_model or "injected-model",
+                llm_model_max_async=1,
+                embedding_func_max_async=1,
+                embedding_batch_num=settings.batch_size,
+                chunk_token_size=settings.chunk_tokens,
+                chunk_overlap_token_size=0,
+                summary_max_tokens=settings.summary_max_tokens,
+                summary_length_recommended=(
+                    settings.summary_length_recommended),
+                max_parallel_insert=1,
+                enable_llm_cache=not self._published,
+                **({"chunking_func": chunking_func}
+                   if chunking_func else {}),
+            )
+            await self.rag.initialize_storages()
+            if not manifest.exists():
+                await run_io(
+                    manifest.write_text,
+                    json.dumps(identity, indent=2) + "\n")
+        except BaseException:
+            await self.close()
+            raise
 
     async def close(self) -> None:
-        """Flush framework stores and release metadata even on errors."""
+        """Finish cancellation-safe cleanup before releasing ownership."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await finish_task(self._close_task)
+
+    async def _close(self) -> None:
+        """Stop background queues before closing their stores and files."""
         try:
             if self.rag is not None:
-                await self.rag.finalize_storages()
+                functions = list(
+                    getattr(self.rag, "role_llm_funcs", {}).values())
+                embedding = getattr(self.rag, "embedding_func", None)
+                if embedding is not None:
+                    functions.append(embedding.func)
+                try:
+                    await asyncio.gather(*[
+                        func.shutdown(graceful=False) for func in functions])
+                finally:
+                    failures = []
+                    try:
+                        # The framework swallows storage errors and skips
+                        # partial initialization. Close our transports first.
+                        if getattr(self.rag, "vector_storage", None) == (
+                                "AsyncQdrantVectorDBStorage"):
+                            for store in (self.rag.chunks_vdb,
+                                          self.rag.entities_vdb,
+                                          self.rag.relationships_vdb):
+                                try:
+                                    await store.finalize()
+                                except Exception as exc:
+                                    failures.append(exc)
+                    finally:
+                        await self.rag.finalize_storages()
+                    if failures:
+                        raise failures[0]
         finally:
             if self.index is not None:
                 self.index.close()
                 self.index = None
             self.rag = None
-            if self._workspace_lock is not None:
-                self._workspace_lock.close()
-                self._workspace_lock = None
-            if self._reader_directory is not None:
-                self._reader_directory.cleanup()
-                self._reader_directory = None
+            try:
+                if self._reader_directory is not None:
+                    await run_io(self._reader_directory.cleanup)
+                    self._reader_directory = None
+            finally:
+                if self._workspace_lock is not None:
+                    self._workspace_lock.close()
+                    self._workspace_lock = None
 
     async def require_empty_vectors(self) -> None:
         """Prevent reuse of a remote namespace from a different local
         checkout.
         """
         from lightrag.kg.qdrant_impl import workspace_filter_condition
-        from qdrant_client import QdrantClient, models
+        from qdrant_client import models
 
-        def check():
-            """Use the public Qdrant API, independent of storage internals."""
-            client = QdrantClient(url=str(self.settings.qdrant_url))
-            try:
-                for store in (self.rag.chunks_vdb, self.rag.entities_vdb,
-                              self.rag.relationships_vdb):
-                    count = client.count(
-                        collection_name=store.final_namespace,
-                        count_filter=models.Filter(must=[
-                            workspace_filter_condition(
-                                store.effective_workspace)]),
-                        exact=True,
-                    )
-                    if count.count:
-                        raise ValueError(
-                            "Qdrant workspace already contains vectors; "
-                            "use a new snapshot ID")
-            finally:
-                client.close()
-
-        await run_io(check)
+        for store in (self.rag.chunks_vdb, self.rag.entities_vdb,
+                      self.rag.relationships_vdb):
+            count = await store._client.count(
+                collection_name=store.final_namespace,
+                count_filter=models.Filter(must=[
+                    workspace_filter_condition(store.effective_workspace)]),
+                exact=True,
+            )
+            if count.count:
+                raise ValueError(
+                    "Qdrant workspace already contains vectors; "
+                    "use a new snapshot ID")
 
     async def search(
         self,
@@ -245,6 +281,7 @@ class RagRuntime:
         high_level_keywords: list[str] | None = None,
         low_level_keywords: list[str] | None = None,
         queries: list[str] | None = None,
+        query_keywords: list[tuple[list[str], list[str]]] | None = None,
     ) -> list[RetrievalHit]:
         """Retrieve structured context, fuse BM25, then rerank references.
 
@@ -270,7 +307,13 @@ class RagRuntime:
                 return []
             started = monotonic()
             branches = {}
+            if (query_keywords is not None
+                    and len(query_keywords) != len(queries or [query])):
+                raise ValueError("keyword plans must match query count")
             for number, planned in enumerate(queries or [query]):
+                high, low = (query_keywords[number] if query_keywords
+                             is not None else (high_level_keywords or [],
+                                               low_level_keywords or []))
                 result = await self.rag.aquery_data(
                     planned, QueryParam(
                         mode=selected_mode,
@@ -278,8 +321,8 @@ class RagRuntime:
                         enable_rerank=False,
                         top_k=self.settings.candidate_limit,
                         chunk_top_k=self.settings.candidate_limit,
-                        hl_keywords=high_level_keywords or [],
-                        ll_keywords=low_level_keywords or [],
+                        hl_keywords=high,
+                        ll_keywords=low,
                         max_total_tokens=(
                             self.settings.retrieval_context_tokens),
                     ),
@@ -305,6 +348,8 @@ class RagRuntime:
             hits = fuse_candidates(
                 branches, limit=self.settings.candidate_limit
             )
+            retrieval_ms = (monotonic() - started) * 1000
+            ranking_started = monotonic()
             scores = await self.models.rank(
                 query, [h.chunk.text for h in hits]
             )
@@ -312,6 +357,11 @@ class RagRuntime:
                 raise ValueError("reranker returned invalid scores")
             for hit, score in zip(hits, scores):
                 hit.rerank_score = score
+            ranking_ms = (monotonic() - ranking_started) * 1000
+            candidate_count = len(hits)
+            threshold = self.settings.rerank_min_score
+            if threshold is not None:
+                hits = [h for h in hits if h.rerank_score >= threshold]
             hits.sort(
                 key=lambda h: (
                     -h.rerank_score,
@@ -325,14 +375,16 @@ class RagRuntime:
             logger.info(
                 "rag.search snapshot=%s mode=%s candidates=%s "
                 "model_calls=%s input_tokens=%s output_tokens=%s "
-                "unreported_calls=%s elapsed_ms=%.1f",
+                "unreported_calls=%s elapsed_ms=%.1f "
+                "retrieval_ms=%.1f ranking_ms=%.1f rejected=%s",
                 self.settings.snapshot,
                 selected_mode,
-                len(hits),
+                candidate_count,
                 self.model.calls,
                 self.model.input_tokens,
                 self.model.output_tokens,
                 self.model.unreported_calls,
                 (monotonic() - started) * 1000,
+                retrieval_ms, ranking_ms, candidate_count - len(hits),
             )
             return hits[: self.settings.result_limit]

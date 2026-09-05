@@ -81,6 +81,46 @@ def test_parent_section_is_paged_losslessly_from_retained_state():
     assert restored.knowledge[0].hit.parent == retrieval.hits[0].parent
 
 
+def test_repeated_or_empty_knowledge_does_not_create_progress():
+    async def exercise():
+        state = run_state()
+        retrieval = Retrieval()
+        _, tools = tools_for(state, retrieval)
+        await tools["search_knowledge"].ainvoke({"query": "RPC"})
+        progress = state.progress_count
+        result = await tools["search_knowledge"].ainvoke(
+            {"query": "RPC error"})
+        assert result[-1]["knowledge_status"] == "no_new_references"
+        assert state.progress_count == progress
+        retrieval.hits = []
+        result = await tools["search_knowledge"].ainvoke(
+            {"query": "unrelated"})
+        assert result[-1]["knowledge_status"] == "no_results"
+        assert state.progress_count == progress
+    asyncio.run(exercise())
+
+
+def test_parallel_auxiliary_calls_cannot_spend_the_output_reserve():
+    async def completion(*args, **kwargs):
+        await asyncio.sleep(0)
+        return AIMessage(content="{}")
+
+    async def exercise():
+        state = run_state(limits=RunLimits(model_calls=4))
+        # The main model requested two parallel searches.
+        state.model_calls = 1
+        _, tools = tools_for(state, Retrieval(keywords=True), completion)
+        results = await asyncio.gather(
+            tools["search_knowledge"].ainvoke({"query": "RPC timeout"}),
+            tools["search_knowledge"].ainvoke({"query": "RPC retries"}),
+            return_exceptions=True,
+        )
+        assert state.model_calls == 2
+        assert sum(isinstance(r, ToolUnavailable) for r in results) == 1
+        assert state.limits.model_calls - state.model_calls == 2
+    asyncio.run(exercise())
+
+
 def test_auxiliary_reservation_preserves_final_synthesis_after_retry():
     attempts = []
 
@@ -93,7 +133,7 @@ def test_auxiliary_reservation_preserves_final_synthesis_after_retry():
         else answer(messages)))
     result = asyncio.run(service(
         model, Retrieval(keywords=True), knowledge_completion=completion,
-        limits=RunLimits(model_calls=3, retry_backoff_seconds=0),
+        limits=RunLimits(model_calls=4, retry_backoff_seconds=0),
     ).diagnose_with_evidence(INCIDENT, start=START, end=END))
     assert len(attempts) == 1
     assert result.state.model_calls == 3
@@ -130,6 +170,47 @@ def test_knowledge_compression_keeps_reader_contract_and_latest_parent_page():
     assert selection.fits
     assert json.loads(selection.request.messages[2].content) == index
     assert selection.request.messages[-1].content == "parent section page"
+
+
+def test_knowledge_text_cannot_be_compressed_away_without_reader_permission():
+    from test_context import request_with_results
+    from tracemind.agent.workflow.context import estimate_input, select_context
+
+    state = run_state()
+    state.allowed_tools = ("search_knowledge",)
+    _, tools = tools_for(state, Retrieval())
+    request, _ = request_with_results()
+    payload = asyncio.run(tools["search_knowledge"].ainvoke({"query": "RPC"}))
+    message = ToolMessage(
+        content=json.dumps(payload), tool_call_id="search",
+        name="search_knowledge",
+        artifact={"context_index": [{
+                      "knowledge_ref": payload[0]["knowledge_ref"]}],
+                  "context_reference_key": "knowledge_ref",
+                  "context_reader": "read_knowledge"})
+    request = request.override(
+        messages=[request.messages[0],
+                  tool_call("search_knowledge", {"query": "RPC"}), message],
+        tools=list(tools.values()))
+    selection = select_context(request, estimate_input(request) - 100)
+    assert not selection.fits
+    assert selection.request.messages[-1].content == message.content
+
+
+def test_query_planning_accepts_responses_api_text_blocks():
+    retrieval = Retrieval()
+
+    async def completion(*args, **kwargs):
+        return AIMessage(
+            content=[{"type": "text", "text": '{"queries":["RPC timeout"]}'}],
+            response_metadata={"status": "completed"})
+
+    state = run_state()
+    _, tools = tools_for(state, retrieval, completion)
+    result = asyncio.run(tools["search_knowledge"].ainvoke({
+        "query": "翻译 RPC 超时", "rewrite": True}))
+    assert retrieval.queries == ["RPC timeout"]
+    assert result[0]["knowledge_ref"] == state.knowledge[0].id
 
 
 def run_state(**kwargs):
@@ -254,7 +335,8 @@ def test_english_search_preserves_provenance_dedup_and_copies():
             "query": "RPC timeout",
         })
         second = await tools["search_knowledge"].ainvoke({"query": "slow RPC"})
-        assert first == second
+        assert first == second[:-1]
+        assert second[-1]["knowledge_status"] == "no_new_references"
         assert first[0]["source_revision"] == "fixture-rev-1"
         assert first[0]["document_sha256"] == "f" * 64
         page = await tools["read_knowledge"].ainvoke({
@@ -292,7 +374,7 @@ def test_planning_and_keyword_calls_share_usage_budget_and_trace():
     result = asyncio.run(service(
         model, retrieval, knowledge_completion=completion,
         knowledge_model_name="fixture-auxiliary",
-        limits=RunLimits(model_calls=4),
+        limits=RunLimits(model_calls=5),
     ).diagnose_with_evidence(INCIDENT, start=START, end=END))
     assert auxiliary_calls == [False, True]
     assert result.state.model_calls == 4

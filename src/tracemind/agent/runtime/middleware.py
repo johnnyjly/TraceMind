@@ -63,9 +63,17 @@ class HarnessMiddleware(AgentMiddleware):
         while True:
             if self._using_fallback:
                 request = request.override(model=self._fallback)
-            prepared = self._prepare_request(request)
             malformed = False
             validation = None
+            prepared = None
+
+            def prepare():
+                """Rebind before each attempt, including transport retries."""
+                nonlocal prepared
+                if (state.limits.model_calls - state.model_calls
+                        <= self.harness.finalization_calls):
+                    self.harness.begin_finalization(StopReason.MODEL_BUDGET)
+                prepared = self._prepare_request(request)
 
             async def invoke():
                 """Retain provider output and usage after schema rejection."""
@@ -78,13 +86,14 @@ class HarnessMiddleware(AgentMiddleware):
                     return ModelResponse(result=[exc.ai_message])
 
             model_name = (
-                getattr(prepared.model, "model_name", None)
-                or getattr(prepared.model, "model",
-                           type(prepared.model).__name__)
+                getattr(request.model, "model_name", None)
+                or getattr(request.model, "model",
+                           type(request.model).__name__)
             )
             try:
                 response = await self.harness.model_call(
                     invoke, model_name=str(model_name),
+                    before_attempt=prepare,
                     allow_fallback=(
                         self._fallback is not None and not self._using_fallback
                     ),
@@ -366,11 +375,31 @@ class HarnessMiddleware(AgentMiddleware):
                 "the final structured diagnosis now using only evidence "
                 "already provided. Cite available evidence IDs within the "
                 "investigation window. Explain the cause and its evidence, "
-                "or return inconclusive and explain what is missing."
+                "or return inconclusive with the observed failure, its "
+                "citations and the specific missing observation. Do not "
+                "discard established findings because the deeper cause "
+                "is unknown. The only permitted output is DiagnosisDraft."
             )
             # The framework still binds the structured diagnosis schema;
             # DiagnosisDraft is an output mechanism, not an investigation tool.
             request = request.override(tools=[], tool_choice=None)
+            # End the investigation exchange explicitly; a system-only budget
+            # update can leave the model continuing the last tool result.
+            request = request.override(messages=[
+                *request.messages,
+                HumanMessage(content=(
+                    "Investigation is now closed. Submit one DiagnosisDraft "
+                    "now, using the evidence already available. No further "
+                    "tool queries are permitted. Keep conclusions scoped to "
+                    "the observed operations and distinguish confirmed "
+                    "failures from unverified underlying causes. In "
+                    "root_cause, explain the supporting evidence AND any "
+                    "relevant contrary evidence (including successful "
+                    "operations), and state what remains unknown. Do not "
+                    "merge events from separate traces into one transaction "
+                    "without a shared business identifier."
+                )),
+            ])
         request = request.override(
             system_message=SystemMessage(content=system + budget)
         )

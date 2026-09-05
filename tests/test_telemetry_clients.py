@@ -293,6 +293,25 @@ def test_jaeger_search_scopes_mixed_age_spans_to_inclusive_window():
     assert "selected span extent" in evidence[0].summary
 
 
+def test_trace_service_names_are_bounded_and_exclude_old_spans():
+    start = datetime(2024, 9, 1, tzinfo=UTC)
+    timestamp = int(start.timestamp() * 1_000_000)
+    processes = {f"p{i}": {"serviceName": f"service-{i:02}"}
+                 for i in range(25)}
+    spans = [{"processID": f"p{i}", "startTime": timestamp,
+              "duration": 1000, "tags": []} for i in range(25)]
+    processes["old"] = {"serviceName": "historical-only"}
+    spans.append({"processID": "old", "startTime": timestamp - 1,
+                  "duration": 1000, "tags": []})
+    evidence = JaegerClient._to_evidence(
+        {"traceID": "abc", "processes": processes, "spans": spans},
+        "service-00", start=start, end=start,
+    )
+    assert evidence.attributes["services"] == [
+        f"service-{i:02}" for i in range(20)]
+    assert evidence.attributes["services_truncated"] is True
+
+
 def test_jaeger_trace_detail_returns_error_span_evidence() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/traces/trace-123"

@@ -94,6 +94,31 @@ def test_cancelled_storage_waits_for_write_before_terminal_cleanup():
     assert order == ['write', 'cleanup']
 
 
+def test_cancelled_storage_failure_preserves_cancellation_and_its_cause():
+    entered, release = threading.Event(), threading.Event()
+
+    def write():
+        entered.set()
+        assert release.wait(3)
+        raise sqlite3.OperationalError('write failed')
+
+    async def exercise():
+        task = asyncio.create_task(run_io(write))
+        await asyncio.to_thread(entered.wait)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+        assert isinstance(caught.value.__cause__, sqlite3.OperationalError)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+
+
 def test_parallel_tools_commit_reserved_budget_before_external_calls(tmp_path):
     repository = RunRepository(tmp_path / 'runs.db')
     queued = state().model_copy(update={'status': RunStatus.QUEUED})

@@ -48,6 +48,8 @@ Use `--demo-repo` if the referenced Demo is not at `../opentelemetry-demo`.
 Docling converts Markdown, HTML, authored JSON text and PDF. Structural parents
 retain full sections; HybridChunker uses the pinned tokenizer with a 320-token
 child cap. Provenance retains hashes/revisions, headings and element pointers.
+Partial conversions are rejected before chunking; missing pages cannot be
+published as a complete document.
 `TRACEMIND_RAG_PDF_PIPELINE=native` selects text-only extraction; standard PDF
 layout processing fails explicitly if cached models are missing.
 
@@ -94,6 +96,12 @@ graph/JSON stores. Local admission/snapshot locks serialize access; this is not 
 distributed retrieval service. Scope metadata is not tenant authorization and
 knowledge citations cannot replace current telemetry.
 
+Qdrant network calls are asynchronous; collection setup and snapshot hashing/copy
+drain their blocking work before cancellation releases ownership. Shutdown stops
+LightRAG's background model/embedding queues before closing stores. Do not reuse
+one snapshot ID for different corpus directories in the same process, and leave
+`QDRANT_WORKSPACE` unset or equal to the selected snapshot ID.
+
 ## Evaluate retrieval
 
 Judgments stay outside the corpus/runtime queries. Create a suite with document
@@ -123,3 +131,25 @@ latency and internal model usage. Duplicate document hits count once; empty
 results remain in the denominator. K must fit the result limit. Compare `mix` and
 `naive` on the same frozen suite. Diagnosis RAG off/on evaluation is separate;
 local smoke checks do not establish corpus-wide quality.
+
+Use `"relevant": {}` for a question with no relevant document in the selected
+snapshot. These questions contribute to the separate abstention counts, not
+positive-query ranking averages. Reports retain rerank scores, the configured
+cutoff and false abstentions so rejecting every question cannot look successful.
+
+`TRACEMIND_RAG_RERANK_MIN_SCORE` optionally removes candidates below a calibrated
+reranker score. It is unset by default: scores are not relevance probabilities
+and a universal 0.5 cutoff is inappropriate. Calibrate against the exact snapshot
+and pinned reranker, then validate on held-out positive and negative questions.
+Clear or recalibrate the cutoff when either changes. This is query policy; it
+does not modify the immutable published snapshot.
+
+Keep corpus-specific development and holdout labels under ignored `artifacts/`.
+The suites must identify the published snapshot and contain document IDs
+from that corpus. Select a cutoff using development questions, then evaluate
+it on separate holdout questions. A small corpus does not establish general
+retrieval quality.
+
+Timing logs separate `rag.ready` lock wait, verification and initialization from
+`rag.search` retrieval and ranking. Retrieval includes embedding and any keyword
+model work; it is not a pure vector-store latency measure.

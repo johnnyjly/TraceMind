@@ -1,6 +1,7 @@
 """Jaeger trace search plus bounded error and latency span evidence."""
 
 from datetime import UTC, datetime
+import json
 from typing import Any
 from urllib.parse import quote
 
@@ -26,6 +27,8 @@ class JaegerClient:
         start: datetime,
         end: datetime,
         limit: int = 20,
+        min_duration_ms: float | None = None,
+        errors_only: bool = False,
     ) -> list[Evidence]:
         """Query service traces within a window and normalize each result.
 
@@ -33,17 +36,22 @@ class JaegerClient:
         result limit. Summarize only spans starting in the inclusive window;
         omit traces with no such spans even if the backend returned them.
         """
+        params = {
+            "service": service,
+            "start": int(start.timestamp() * 1_000_000),
+            "end": int(end.timestamp() * 1_000_000),
+            "limit": limit,
+        }
+        if min_duration_ms is not None:
+            params["minDuration"] = f"{min_duration_ms:.9f}ms"
+        if errors_only:
+            params["tags"] = json.dumps({"error": "true"})
         payload = await request_json(
             self._http_client,
             "GET",
             f"{self._base_url}/api/traces",
             source="Jaeger",
-            params={
-                "service": service,
-                "start": int(start.timestamp() * 1_000_000),
-                "end": int(end.timestamp() * 1_000_000),
-                "limit": limit,
-            },
+            params=params,
         )
 
         traces = payload.get("data")
@@ -55,6 +63,33 @@ class JaegerClient:
         evidence = [self._to_evidence(trace, service, start=start, end=end)
                     for trace in traces]
         return [item for item in evidence if item is not None]
+
+    async def service_hints(self, service: str) -> dict:
+        """Return bounded global names, not time-window observations."""
+        payload = await request_json(
+            self._http_client, "GET", f"{self._base_url}/api/services",
+            source="Jaeger",
+        )
+        services = payload.get("data")
+        if (not isinstance(services, list)
+                or any(not isinstance(name, str) for name in services)):
+            raise TelemetryClientError(
+                "Jaeger returned an invalid catalogue")
+        names = sorted(set(services))
+        available = [name for name in names if len(name) <= 240][:50]
+        return {
+            "kind": "trace_search_hints",
+            "requested_service": service,
+            "service_known": service in names,
+            "available_services": available,
+            "omitted_services": len(names) - len(available),
+            "catalogue_scope": "global_not_incident_window",
+            "guidance": (
+                "No matching traces were returned. "
+                "This does not prove health. "
+                "Catalogue names are lookup hints, not diagnostic evidence."
+            ),
+        }
 
     async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
         """Return error spans and the twenty longest non-error spans.
@@ -134,6 +169,15 @@ class JaegerClient:
         error_span_count = sum(_span_has_error(span) for span in spans)
         duration_ms = (max(ends) - min(starts)) / 1_000
         observed_at = datetime.fromtimestamp(min(starts) / 1_000_000, tz=UTC)
+        processes = trace.get("processes", {})
+        services = sorted({
+            process["serviceName"] for span in spans
+            if isinstance(processes, dict)
+            and isinstance(process := processes.get(span.get("processID")),
+                           dict)
+            and isinstance(process.get("serviceName"), str)
+            and process["serviceName"]
+        })
 
         return Evidence(
             source=EvidenceSource.TRACE,
@@ -152,6 +196,8 @@ class JaegerClient:
                 "duration_ms": duration_ms,
                 "summary_scope": "spans_started_in_window",
                 "excluded_span_count": received - len(spans),
+                "services": services[:20],
+                "services_truncated": len(services) > 20,
             },
         )
 

@@ -54,12 +54,14 @@ class ScriptedModel(BaseChatModel):
     calls: int = 0
     inputs: list[list[BaseMessage]] = Field(default_factory=list)
     bindings: list[list[str]] = Field(default_factory=list)
+    binding_options: list[dict] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
         return "scripted-harness-test"
 
     def bind_tools(self, tools, **kwargs):
+        self.binding_options.append(kwargs)
         self.bindings.append([
             tool.name if hasattr(tool, "name")
             else tool.get("function", tool)["name"]
@@ -193,7 +195,8 @@ def test_real_loop_success_records_usage_evidence_and_terminal_event(tmp_path):
 
 
 @pytest.mark.parametrize("limits, reason, calls, tools, finalizing", [
-    (RunLimits(model_calls=1), StopReason.MODEL_BUDGET, 1, 1, None),
+    (RunLimits(model_calls=1), StopReason.MODEL_BUDGET, 1, 0,
+     StopReason.MODEL_BUDGET),
     (RunLimits(tool_calls=1), StopReason.INVALID_DIAGNOSIS, 3, 1,
      StopReason.TOOL_BUDGET),
     (RunLimits(identical_tool_calls=2), StopReason.INVALID_DIAGNOSIS, 5, 2,
@@ -210,7 +213,7 @@ def test_loop_limits_are_enforced_before_execution(
     assert model.calls == calls
     assert len(telemetry.calls) == run.tool_call_count == tools
     # Identical observations share a citation even across repeated queries.
-    assert len(run.evidence) == 1
+    assert len(run.evidence) == min(1, tools)
     completed = [event for event in run.state.events
                  if event.kind == "tool.completed"]
     assert len(completed) == tools
@@ -329,7 +332,8 @@ def test_parallel_budget_preserves_started_sibling(tmp_path, monkeypatch):
 @pytest.mark.parametrize("limits, reason", [
     (RunLimits(tool_timeout_seconds=0.02, retry_backoff_seconds=0),
      StopReason.INVALID_DIAGNOSIS),
-    (RunLimits(duration_seconds=0.05), StopReason.DEADLINE),
+    # Leave time for graph setup so this exercises in-flight cancellation.
+    (RunLimits(duration_seconds=0.5), StopReason.DEADLINE),
 ])
 def test_tool_timeout_and_run_deadline_cancel_backend(
     tmp_path, limits, reason,
@@ -569,7 +573,8 @@ def test_invalid_tool_arguments_are_traced_and_bounded(tmp_path):
         event.kind == "tool.unavailable" and
         event.data["category"] == "invalid_request"
         for event in run.state.events
-    ) == 2
+    ) == 1  # The final call is output-only; its tool request is rejected.
+    assert model.bindings[-1] == ["DiagnosisDraft"]
 
 
 def test_recursion_limit_has_explicit_terminal_result(tmp_path):
@@ -869,3 +874,72 @@ def test_detail_reads_consume_shared_tool_budget(tmp_path):
                == "tool_budget" for e in run.state.events)
     assert run.tool_calls == {"query_metrics": 1, "read_evidence": 1}
     assert len(run.evidence) == 1
+
+
+@pytest.mark.parametrize("budget", [1, 2, 3, 5])
+def test_model_budget_reserves_output_and_repair(tmp_path, budget):
+    def respond(messages, calls):
+        if model.bindings[-1] != ["DiagnosisDraft"]:
+            return tool_call(arguments={"expression": f"metric_{calls}"})
+        if calls < budget:
+            # A provider can still hallucinate a tool that was not bound.
+            return tool_call("search_logs", {"service": "payment"})
+        if budget == 1:
+            return tool_call("DiagnosisDraft", {
+                "status": "inconclusive", "root_cause": "No observations",
+                "confidence": 0, "evidence_ids": [],
+            })
+        return diagnosis(messages)
+
+    # Cite the last actual observation, excluding rejected tool exchanges.
+    def final_response(messages, calls):
+        if (model.bindings[-1] == ["DiagnosisDraft"] and
+                calls == budget and budget > 1):
+            usable = [m for m in messages if not isinstance(m, ToolMessage)
+                      or m.name == "query_metrics"]
+            return diagnosis(usable)
+        return respond(messages, calls)
+
+    model = ScriptedModel(respond=final_response)
+    telemetry = Telemetry()
+    run = run_service(make_service(
+        model, telemetry, tmp_path,
+        limits=RunLimits(model_calls=budget),
+    ))
+    assert model.calls == run.state.model_calls == budget
+    assert run.diagnosis.status == (
+        DiagnosisStatus.INCONCLUSIVE if budget == 1
+        else DiagnosisStatus.COMPLETE
+    )
+    assert "search_logs" not in run.tool_calls
+    assert model.bindings[-1] == ["DiagnosisDraft"]
+    assert model.binding_options[-1]["tool_choice"] == "any"
+    assert run.state.diagnosis_repairs == (1 if budget >= 3 else 0)
+    assert run.tool_call_count == max(0, budget - (2 if budget >= 3 else 1))
+    assert any(e.kind == "policy.finalizing" and
+               e.data["reason"] == "model_budget" for e in run.state.events)
+
+
+def test_model_retry_rebinds_final_attempt_without_investigation_tools(
+    tmp_path,
+):
+    from test_recovery import http_failure
+
+    def respond(messages, calls):
+        if calls == 1:
+            return tool_call()
+        if calls == 2:
+            assert "query_metrics" in model.bindings[-1]
+            raise http_failure(503)
+        assert model.bindings[-1] == ["DiagnosisDraft"]
+        assert "Investigation is closed (model_budget)" in messages[0].text
+        return diagnosis(messages)
+
+    model = ScriptedModel(respond=respond)
+    run = run_service(make_service(
+        model, Telemetry(), tmp_path,
+        limits=RunLimits(model_calls=4, retry_backoff_seconds=0),
+    ))
+    assert run.state.model_calls == 3
+    assert run.tool_call_count == 1
+    assert run.diagnosis.status is DiagnosisStatus.COMPLETE

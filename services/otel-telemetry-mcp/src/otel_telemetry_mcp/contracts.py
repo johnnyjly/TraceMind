@@ -51,6 +51,9 @@ class TraceSearch(Window):
     """Select one service's trace summaries."""
 
     service: str
+    min_duration_ms: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False)
+    errors_only: bool = False
 
 
 class TraceDetail(Arguments):
@@ -61,9 +64,10 @@ class TraceDetail(Arguments):
     )]
 
 
-class LogSearch(TraceSearch):
+class LogSearch(Window):
     """Select service logs with an optional body-text filter."""
 
+    service: str
     text: str | None = None
 
 
