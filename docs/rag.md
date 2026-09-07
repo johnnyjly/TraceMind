@@ -123,19 +123,23 @@ Save your suite as `artifacts/evaluations/retrieval-suite.json`, then run:
 ```bash
 uv run --extra rag python scripts/rag.py evaluate --snapshot runbooks-v2 \
   --suite artifacts/evaluations/retrieval-suite.json --k 5 --mode mix \
+  --env-file .env --env-file deploy/.env.langfuse --max-model-calls 20 \
   --output artifacts/evaluations/retrieval-mix.json
 ```
 
-`ir-measures` reports document Recall@K, MRR@K and nDCG@K, returned chunk IDs,
-latency and internal model usage. Duplicate document hits count once; empty
-results remain in the denominator. K must fit the result limit. Compare `mix` and
-`naive` on the same frozen suite. Diagnosis RAG off/on evaluation is separate;
-local smoke checks do not establish corpus-wide quality.
+Langfuse stores per-stage document precision, recall, MRR and nDCG, query
+latency, provenance and internal model usage. Duplicate document hits count once;
+empty results remain visible. `--output` writes only the experiment ID,
+publication status and acceptance pointer, rather than a second score report.
+Labels remain outside retrieval inputs. Compare `mix` and `naive` on the same
+frozen suite; diagnosis RAG off/on evaluation is separate. See
+[Evaluation](evaluation.md#rag-retrieval) for publication and threshold gates.
 
 Use `"relevant": {}` for a question with no relevant document in the selected
-snapshot. These questions contribute to the separate abstention counts, not
-positive-query ranking averages. Reports retain rerank scores, the configured
-cutoff and false abstentions so rejecting every question cannot look successful.
+snapshot. Its `expected_empty` score checks abstention separately from ranking
+quality; retain held-out positive questions so rejecting every query cannot
+look successful. The independent RAG query service, shared local model caches,
+query planning, parent expansion and configured reranker cutoff are unchanged.
 
 `TRACEMIND_RAG_RERANK_MIN_SCORE` optionally removes candidates below a calibrated
 reranker score. It is unset by default: scores are not relevance probabilities

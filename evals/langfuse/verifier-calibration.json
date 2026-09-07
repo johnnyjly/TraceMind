@@ -1,0 +1,527 @@
+[
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "Checkout returned HTTP 500; the retained evidence does not identify the underlying failure mechanism.",
+        "confidence": 0.2,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "appropriate_abstention",
+      "category": "supported_abstention",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "complete",
+        "root_cause": "An empty payment log search proves payment was healthy; checkout itself caused the failure.",
+        "confidence": 0.9,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "empty_query_exclusion",
+      "category": "absence_of_evidence",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "complete",
+        "root_cause": "Every payment Charge request failed throughout the entire window.",
+        "confidence": 0.9,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000001",
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "source": "trace",
+          "service": "payment",
+          "summary": "payment Charge returned ERROR, called by checkout on trace abc",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "payment-span",
+            "parent_span_id": "checkout-span",
+            "operation": "Charge",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000003",
+          "source": "trace",
+          "service": "payment",
+          "summary": "A different payment Charge request succeeded in the same investigation window",
+          "observed_at": "2024-09-01T00:06:00Z",
+          "attributes": {
+            "trace_id": "def",
+            "operation": "Charge",
+            "status": "OK"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "contradicted"
+    },
+    "metadata": {
+      "case_id": "ignored_counterevidence",
+      "category": "counterevidence",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "complete",
+        "root_cause": "A payment Charge request failed and propagated an error to checkout; another request succeeded, so failure was intermittent in the retained sample.",
+        "confidence": 0.9,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000001",
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "source": "trace",
+          "service": "payment",
+          "summary": "payment Charge returned ERROR, called by checkout on trace abc",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "payment-span",
+            "parent_span_id": "checkout-span",
+            "operation": "Charge",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000003",
+          "source": "trace",
+          "service": "payment",
+          "summary": "A different payment Charge request succeeded in the same investigation window",
+          "observed_at": "2024-09-01T00:06:00Z",
+          "attributes": {
+            "trace_id": "def",
+            "operation": "Charge",
+            "status": "OK"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "intermittent_failure",
+      "category": "supported_intermittent",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "complete",
+        "root_cause": "The paymentFailure feature flag is enabled now and caused these checkout failures.",
+        "confidence": 0.9,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [
+          "knowledge-d7d7b2f1789d4de215982f347c202b4bb919c3f9f5497e15a49d973b004ce007"
+        ],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "knowledge": [
+        {
+          "snapshot": "training-v1",
+          "hit": {
+            "chunk": {
+              "doc_id": "synthetic.knowledge-payment-flag",
+              "chunk_id": "knowledge-payment-flag",
+              "title": "Payment failure runbook",
+              "section": "synthetic",
+              "text": "Enabling the paymentFailure feature flag can make payment Charge fail and propagate checkout errors. This describes a possible fault, not current deployment state.",
+              "document_path": "synthetic/runbook.md",
+              "document_sha256": "85662761c3e4b8d3bc1def3584c5dd63e7e55f014e290ca3bfc96c9da9cddec2",
+              "source_refs": [
+                "runbooks/payment-failure.md"
+              ],
+              "source_revision": "demo-pinned"
+            },
+            "branches": [
+              "naive"
+            ],
+            "fusion_score": 1
+          },
+          "id": "knowledge-d7d7b2f1789d4de215982f347c202b4bb919c3f9f5497e15a49d973b004ce007"
+        }
+      ]
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "knowledge_as_fact",
+      "category": "knowledge_boundary",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "complete",
+        "root_cause": "Payment Charge failed and the linked checkout request returned HTTP 500.",
+        "confidence": 0.9,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000001",
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "source": "trace",
+          "service": "payment",
+          "summary": "payment Charge returned ERROR, called by checkout on trace abc",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "payment-span",
+            "parent_span_id": "checkout-span",
+            "operation": "Charge",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "supported_payment",
+      "category": "supported",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "complete",
+        "root_cause": "Payment Charge failed because its database connection pool was exhausted.",
+        "confidence": 0.9,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000001",
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "source": "trace",
+          "service": "payment",
+          "summary": "payment Charge returned ERROR, called by checkout on trace abc",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "payment-span",
+            "parent_span_id": "checkout-span",
+            "operation": "Charge",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "unsupported_mechanism",
+      "category": "mechanism_gap",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "complete",
+        "root_cause": "Checkout failed validation before calling payment; no payment Charge failure occurred.",
+        "confidence": 0.9,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000001",
+          "00000000-0000-0000-0000-000000000002"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment Charge failure details."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "source": "trace",
+          "service": "payment",
+          "summary": "payment Charge returned ERROR, called by checkout on trace abc",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "payment-span",
+            "parent_span_id": "checkout-span",
+            "operation": "Charge",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "source": "trace",
+          "service": "checkout",
+          "summary": "checkout received a payment Charge error on trace abc and returned HTTP 500",
+          "observed_at": "2024-09-01T00:05:01Z",
+          "attributes": {
+            "trace_id": "abc",
+            "span_id": "checkout-span",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "contradicted"
+    },
+    "metadata": {
+      "case_id": "upstream_inversion",
+      "category": "propagation",
+      "data_origin": "manufactured"
+    }
+  }
+]

@@ -10,7 +10,8 @@ from tracemind.evaluation.demo import (
     docker_environment,
     prepare_flag_config,
 )
-from tracemind.evaluation.evaluator import evaluate_diagnosis
+from tracemind.evaluation.evaluators import diagnosis_scores
+from tracemind.evaluation.models import ExperimentOutput
 from tracemind.evaluation.models import EvaluationCase
 from tracemind.models import (
     Diagnosis,
@@ -44,11 +45,17 @@ def test_payment_failure_case_accepts_grounded_payment_diagnosis() -> None:
         tool_calls={"search_traces": 1, "get_trace_detail": 1},
     )
 
-    result = evaluate_diagnosis(case, run, elapsed_ms=250)
+    result = {score.name: score.value for score in diagnosis_scores(
+        output=ExperimentOutput(diagnosis=run.diagnosis, evidence=run.evidence,
+                                investigation_start=datetime(
+                                    2024, 9, 1, tzinfo=UTC),
+                                investigation_end=datetime(
+                                    2024, 9, 2, tzinfo=UTC)),
+        expected_output=case.ground_truth.model_dump(mode="json"))}
 
-    assert result.passed is True
-    assert result.required_evidence_match is True
-    assert result.tool_call_count == 2
+    assert result["execution_success"] is True
+    assert result["required_source_citation"] is True
+    assert result["citation_integrity"] is True
 
 
 def test_payment_failure_case_rejects_checkout_only_evidence() -> None:
@@ -71,11 +78,16 @@ def test_payment_failure_case_rejects_checkout_only_evidence() -> None:
         tool_calls={"search_logs": 1},
     )
 
-    result = evaluate_diagnosis(case, run, elapsed_ms=100)
+    result = {score.name: score.value for score in diagnosis_scores(
+        output=ExperimentOutput(diagnosis=run.diagnosis, evidence=run.evidence,
+                                investigation_start=datetime(
+                                    2024, 9, 1, tzinfo=UTC),
+                                investigation_end=datetime(
+                                    2024, 9, 2, tzinfo=UTC)),
+        expected_output=case.ground_truth.model_dump(mode="json"))}
 
-    assert result.passed is False
-    assert result.root_cause_service_match is False
-    assert result.required_evidence_match is False
+    assert result["required_source_citation"] is False
+    assert "root_cause_correctness" not in result
 
 
 def test_prepare_flag_config_changes_only_selected_default(

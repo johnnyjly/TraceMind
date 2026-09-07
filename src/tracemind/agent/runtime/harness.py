@@ -260,7 +260,8 @@ class RunHarness:
         receives the completed tool exchanges and submits a diagnosis.
         """
         self.check_active()
-        if self.state.model_calls >= self.state.limits.model_calls:
+        if self.state.model_calls >= (self.state.limits.model_calls
+                                      - self.verification_calls):
             self.stop(StopReason.MODEL_BUDGET)
         if self.finalization_reason is None:
             self.finalization_reason = reason
@@ -268,13 +269,18 @@ class RunHarness:
                       data={"reason": reason.value})
 
     @property
+    def verification_calls(self) -> int:
+        return int(self.state.verification_policy is not None
+                   and self.state.verification is None)
+
+    @property
     def finalization_calls(self) -> int:
         """Reserve synthesis and remaining repair, leaving a discovery turn."""
         limits = self.state.limits
         return min(
             1 + limits.diagnosis_repairs - self.state.diagnosis_repairs,
-            max(1, limits.model_calls - 1),
-        )
+            max(1, limits.model_calls - 1 - self.verification_calls),
+        ) + self.verification_calls
 
     async def model_call(
         self, call: Callable[[], Awaitable[T]], *, model_name: str,
@@ -282,13 +288,16 @@ class RunHarness:
         purpose: str = "diagnosis", required: bool = True,
         reserved_calls: int = 0,
         before_attempt: Callable[[], None] | None = None,
+        retry_attempts: int | None = None,
     ) -> T:
         """Retry transient calls within the shared call budget and deadline.
 
         Optional calls may return a recoverable failure to their workflow;
         run admission and hard limits apply equally to every call.
         """
-        for attempt in range(self.state.limits.retry_attempts + 1):
+        retries = (self.state.limits.retry_attempts
+                   if retry_attempts is None else retry_attempts)
+        for attempt in range(retries + 1):
             try:
                 if before_attempt is not None:
                     before_attempt()
@@ -299,7 +308,7 @@ class RunHarness:
                 failure = classify_failure(exc)
                 if (
                     failure.retryable
-                    and attempt < self.state.limits.retry_attempts
+                    and attempt < retries
                 ):
                     await self._wait_retry("model", attempt, failure)
                     continue

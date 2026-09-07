@@ -394,7 +394,7 @@ def test_unavailable_discovery_stops_before_model_and_keeps_partial_state():
 
 
 def test_replay_tool_definitions_match_live_discovery():
-    from tracemind.evaluation.replay import recorded_tools
+    from replay_support import recorded_tools
 
     async def exercise():
         async with http_server() as url:
@@ -449,7 +449,7 @@ def test_entrypoints_use_shared_http_service_assembly(
         get_request_settings,
     )
     from tracemind.evaluation.models import EvaluationCase
-    from tracemind.evaluation.runner import run_live_evaluation
+    from tracemind.evaluation.runner import execute_agent
     from tracemind.agent.storage.run_repository import RunRepository
 
     monkeypatch.setattr('tracemind.agent.factory.create_chat_model',
@@ -496,8 +496,8 @@ def test_entrypoints_use_shared_http_service_assembly(
             else:
                 case = EvaluationCase.model_validate_json(
                     Path('evals/cases/payment_failure.json').read_text())
-                report = await run_live_evaluation(
-                    case,
+                report = await execute_agent(
+                    case.incident,
                     settings,
                     start=START,
                     end=END)

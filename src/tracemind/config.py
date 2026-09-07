@@ -21,6 +21,22 @@ class Settings(BaseSettings):
     )
 
     environment: str = "development"
+    langfuse_enabled: bool = False
+    langfuse_base_url: AnyHttpUrl = "http://127.0.0.1:3000"
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    eval_judge_provider: Literal["google", "openai", "deepseek"] = "deepseek"
+    eval_judge_model: str = "deepseek-v4-pro"
+    eval_judge_timeout_seconds: float = Field(default=60, gt=0)
+    eval_judge_input_bytes: int = Field(default=65536, ge=1)
+    eval_judge_output_tokens: int = Field(default=4096, ge=1)
+    verifier_enabled: bool = False
+    verifier_provider: Literal["google", "openai", "deepseek"] = "deepseek"
+    verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
+    verifier_timeout_seconds: float = Field(
+        default=60, gt=0, allow_inf_nan=False)
+    verifier_input_bytes: int = Field(default=65536, ge=1)
+    verifier_output_tokens: int = Field(default=4096, ge=1)
     telemetry_transport: Literal["mcp"] = "mcp"
     telemetry_mcp_url: AnyHttpUrl = "http://127.0.0.1:8012/mcp"
     telemetry_mcp_response_bytes: int = Field(default=16_777_216, ge=1024)
@@ -83,6 +99,18 @@ class Settings(BaseSettings):
     agent_memory_max_records: int = Field(default=3, ge=1, le=10)
     agent_memory_context_bytes: int = Field(default=4096, ge=512, le=16000)
     agent_memory_auto_expiry_days: int = Field(default=30, ge=1, le=365)
+
+    @property
+    def verification_policy(self):
+        from tracemind.models.verification import VerificationPolicy
+        if not self.verifier_enabled:
+            return None
+        return VerificationPolicy(
+            provider=self.verifier_provider, model=self.verifier_model,
+            timeout_seconds=self.verifier_timeout_seconds,
+            input_bytes=self.verifier_input_bytes,
+            output_tokens=self.verifier_output_tokens,
+        )
 
     @model_validator(mode="after")
     def validate_fallback(self) -> "Settings":

@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.incident import Incident
+from tracemind.models.verification import (
+    VerificationPolicy, VerificationRecord,
+)
 from tracemind.models.knowledge import KnowledgePolicy, KnowledgeReference
 from tracemind.models.memory import (
     FeedbackUpdate,
@@ -76,6 +79,8 @@ class StopReason(StrEnum):
     """
 
     COMPLETED = "completed"
+    VERIFICATION_REJECTED = "verification_rejected"
+    VERIFICATION_FAILED = "verification_failed"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     CONTEXT_LIMIT = "context_limit"
     MODEL_BUDGET = "model_budget"
@@ -168,5 +173,7 @@ class RunState(BaseModel):
     last_progress: int | None = None
     evidence_ids: list[UUID] = Field(default_factory=list)
     diagnosis: Diagnosis | None = None
+    verification_policy: VerificationPolicy | None = None
+    verification: VerificationRecord | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
     events: list[RunEvent] = Field(default_factory=list)

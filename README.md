@@ -135,7 +135,6 @@ Request examples and lifecycle details are in [Running TraceMind](docs/operation
 ```bash
 uv run pytest
 uv run --extra rag pytest --require-rag
-uv run python scripts/run_evaluation_suite.py
 ```
 
 The base installation skips optional RAG modules. The full RAG acceptance command
@@ -143,11 +142,19 @@ requires the extra and fails early if its dependencies are missing.
 
 The replay suite needs no Docker or model credentials. Scripted replay measures
 workflow behavior; live diagnosis quality requires separate controlled cases.
-For a scored live payment-failure run:
+Evaluation uses local Langfuse; deployment and dataset setup are described in
+[Evaluation](docs/evaluation.md). For a scored live payment-failure run:
 
 ```bash
-uv run python scripts/run_evaluation.py --lookback-minutes 10
+uv run python scripts/run_experiment.py --task agent --name payment-baseline \
+  --case evals/cases/payment_failure.json --lookback-minutes 10 \
+  --env-file .env --env-file deploy/.env.langfuse --judge --max-model-calls 20
 ```
+
+Online completion verification is opt-in with `TRACEMIND_VERIFIER_ENABLED=true`.
+It reviews a complete candidate once, before acceptance; rejection returns
+inconclusive and review failure fails the run. It never automatically repairs
+the diagnosis. See [verification](docs/evaluation.md#online-completion-verification).
 
 ## Documentation
 

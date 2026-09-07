@@ -1,10 +1,9 @@
 """Fault isolation, restoration and CLI behavior for real Demo scenarios."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import importlib.util
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -15,7 +14,8 @@ from tracemind.evaluation.demo import (
     prepare_flag_config,
     restore_flag_config,
 )
-from tracemind.evaluation.evaluator import evaluate_diagnosis
+from tracemind.evaluation.evaluators import diagnosis_scores
+from tracemind.evaluation.models import ExperimentOutput
 from tracemind.evaluation.models import EvaluationCase
 from tracemind.models import Diagnosis, Evidence
 from tracemind.models.result import DiagnosisRun
@@ -89,9 +89,25 @@ def test_new_case_requires_evidence_from_actual_cause(scenario):
                     f"{case.ground_truth.root_cause_terms[0]}"),
         evidence_ids=[evidence.id])
     run = DiagnosisRun(diagnosis=diagnosis, evidence=[evidence], tool_calls={})
-    assert evaluate_diagnosis(case, run, elapsed_ms=1).passed
+
+    def checks():
+        output = ExperimentOutput(
+            diagnosis=run.diagnosis,
+            evidence=run.evidence,
+            investigation_start=evidence.observed_at -
+            timedelta(
+                seconds=1),
+            investigation_end=evidence.observed_at +
+            timedelta(
+                seconds=1))
+        return {
+            s.name: s.value for s in diagnosis_scores(
+                output=output,
+                expected_output=case.ground_truth.model_dump(
+                    mode="json"))}
+    assert checks()["required_source_citation"]
     evidence.service = "frontend"
-    assert not evaluate_diagnosis(case, run, elapsed_ms=1).passed
+    assert not checks()["required_source_citation"]
 
 
 @pytest.mark.parametrize("scenario,misdiagnosis", [
@@ -99,7 +115,7 @@ def test_new_case_requires_evidence_from_actual_cause(scenario):
     ("payment_unreachable", "checkout failed because payment is unavailable"),
     ("product_catalog_lock_contention", "product-catalog is slow"),
 ])
-def test_new_faults_reject_business_errors_or_latency_without_cause(
+def test_provenance_scores_do_not_certify_new_fault_causes(
     scenario, misdiagnosis,
 ):
     case = EvaluationCase.load(ROOT / f"evals/cases/{scenario}.json")
@@ -111,9 +127,17 @@ def test_new_faults_reject_business_errors_or_latency_without_cause(
         incident_id=case.incident.id, status="complete", confidence=.8,
         root_cause=misdiagnosis, evidence_ids=[evidence.id])
     run = DiagnosisRun(diagnosis=diagnosis, evidence=[evidence], tool_calls={})
-    result = evaluate_diagnosis(case, run, elapsed_ms=1)
-    assert not result.passed
-    assert result.false_completion
+    output = ExperimentOutput(
+        diagnosis=run.diagnosis, evidence=run.evidence,
+        investigation_start=evidence.observed_at - timedelta(seconds=1),
+        investigation_end=evidence.observed_at + timedelta(seconds=1),
+    )
+    result = {s.name: s.value for s in diagnosis_scores(
+        output=output,
+        expected_output=case.ground_truth.model_dump(mode="json"))}
+    assert result["citation_integrity"]
+    assert "root_cause_correctness" not in result
+    assert "false_completion" not in result
 
 
 @pytest.mark.parametrize("scenario", [
@@ -193,22 +217,3 @@ def test_switch_recreates_only_flagd(demo, action):
         "flagd"]
     assert "--remove-orphans" not in cmd
     assert "--volumes" not in cmd
-
-
-@pytest.mark.parametrize("scenario", SCENARIO_NAMES)
-def test_evaluation_default_report_is_specific_to_case(monkeypatch, scenario):
-    cli = load_script("run_evaluation")
-    outputs = []
-
-    async def fake_run(case, minutes, output, memory):
-        """Capture CLI arguments without models or backends."""
-        outputs.append(output)
-        return SimpleNamespace(result=SimpleNamespace(passed=True))
-
-    monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr("sys.argv", [
-        "run_evaluation.py", "--case", f"evals/cases/{scenario}.json"])
-    with pytest.raises(SystemExit) as exc:
-        cli.main()
-    assert exc.value.code == 0
-    assert outputs[0].name == scenario.replace("_", "-") + ".json"

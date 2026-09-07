@@ -179,3 +179,16 @@ Workflow validates source observations/provenance. Stale revisions return 409.
 Correction/revocation/deletion affects future retrieval but keeps copies in prior
 snapshots, receipts, checkpoints and reports. Evaluation uses separate
 [frozen corpora](evaluation.md#memory-evaluation), never the live user library.
+
+## Optional online verifier and Langfuse
+
+Enable `TRACEMIND_VERIFIER_ENABLED=true` consistently in API and worker settings
+for newly created runs. One tool-free completion review consumes the existing
+model-call/time budgets and shared token accounting; it never automatically repairs a diagnosis.
+Semantic rejection returns inconclusive, and review failure fails the run.
+Persisted policy and review state govern resumed runs.
+
+Runtime Langfuse tracing is separately opt-in through `TRACEMIND_LANGFUSE_*`;
+normal operation does not require the evaluation server. For model limits,
+local deployment and scored experiments, see
+[Evaluation](evaluation.md#online-completion-verification).

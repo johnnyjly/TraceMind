@@ -8,7 +8,7 @@ from tracemind.rag.model_bridge import Completion
 
 
 def create_rag_completion(
-    settings: Settings, rag: RagSettings,
+    settings: Settings, rag: RagSettings, *, callbacks=None,
 ) -> Completion:
     """Construct a lazy provider adapter with Harness-owned retries."""
     model = None
@@ -32,6 +32,9 @@ def create_rag_completion(
         if keyword_extraction and configured.llm_provider in {
                 "openai", "deepseek"}:
             target = target.bind(response_format={"type": "json_object"})
-        return await target.ainvoke(messages, max_tokens=max_tokens)
+        return await target.ainvoke(
+            messages, max_tokens=max_tokens,
+            **({"config": {"callbacks": callbacks}} if callbacks else {}),
+        )
 
     return complete

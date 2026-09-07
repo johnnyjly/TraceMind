@@ -32,7 +32,26 @@ def verify_snapshot(workspace: Path) -> dict:
     return manifest
 
 
-async def build_snapshot(
+async def build_snapshot(runtime, corpus, prepared, *, timeout_seconds):
+    from tracemind.observability.langfuse import observation
+
+    with observation(
+        getattr(runtime, "langfuse_client", None),
+        "knowledge.ingestion",
+        input={
+            "snapshot": runtime.settings.snapshot,
+            "documents": len(prepared),
+        },
+    ) as span:
+        manifest = await _build_snapshot(
+            runtime, corpus, prepared, timeout_seconds=timeout_seconds
+        )
+        if span is not None:
+            span.update(output=manifest)
+        return manifest
+
+
+async def _build_snapshot(
     runtime,
     corpus: Corpus,
     prepared: tuple["PreparedDocument", ...],

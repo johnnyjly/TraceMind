@@ -15,9 +15,10 @@ from tracemind.rag.query_contracts import RetrievalRequest, RetrievalResponse
 logger = logging.getLogger(__name__)
 
 
-def create_app(settings: RagSettings | None = None, *, runtime=None):
+def create_app(settings: RagSettings | None = None,
+               *, runtime=None, langfuse_client=None):
     settings = settings or RagSettings()
-    owner = runtime or RagRuntime(settings)
+    owner = runtime or RagRuntime(settings, langfuse_client=langfuse_client)
     admission = asyncio.Lock()
     ready = False
 

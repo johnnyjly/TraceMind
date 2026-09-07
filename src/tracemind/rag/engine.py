@@ -14,6 +14,7 @@ from math import isfinite
 from time import monotonic
 
 from tracemind.rag.config import RagSettings
+from tracemind.observability.langfuse import observation
 from tracemind.async_utils import finish_task, run_io
 from tracemind.rag.fusion import fuse_candidates
 from tracemind.rag.ingestion import snapshot_path, verify_snapshot
@@ -40,8 +41,11 @@ class RagRuntime:
         *,
         completion: Completion | None = None,
         models: LocalModels | None = None,
+        langfuse_client=None,
     ) -> None:
         """Capture a fixed snapshot and defer external initialization."""
+        self.langfuse_client = langfuse_client
+        self.last_retrieval = None
         self.settings = settings
         self.models = models or LocalModels(settings)
         self.model = LightRAGModelBridge(settings, completion)
@@ -173,7 +177,7 @@ class RagRuntime:
                     ),
                     model_name=settings.embedding_model,
                     supports_asymmetric=True,
-                    func=self.models.embed,
+                    func=self._embed,
                 ),
                 llm_model_func=self.model.complete,
                 role_llm_configs={
@@ -273,7 +277,40 @@ class RagRuntime:
                     "Qdrant workspace already contains vectors; "
                     "use a new snapshot ID")
 
-    async def search(
+    async def _embed(self, texts, **kwargs):
+        with observation(
+            self.langfuse_client,
+            "knowledge.embedding",
+            as_type="embedding",
+            input={"texts": texts, "context": kwargs.get("context")},
+            metadata={
+                "model": self.settings.embedding_model,
+                "revision": self.settings.embedding_revision,
+            },
+        ) as span:
+            vectors = await self.models.embed(texts, **kwargs)
+            if span is not None:
+                span.update(output={"vectors": len(vectors)})
+            return vectors
+
+    async def search(self, query, **kwargs):
+        with observation(
+            self.langfuse_client,
+            "knowledge.search",
+            as_type="retriever",
+            input={"query": query, **kwargs},
+            metadata={
+                "snapshot": self.settings.snapshot,
+                "embedding_revision": self.settings.embedding_revision,
+                "reranker_revision": self.settings.reranker_revision,
+            },
+        ) as span:
+            hits = await self._search(query, **kwargs)
+            if span is not None:
+                span.update(output=self.last_retrieval)
+            return hits
+
+    async def _search(
         self,
         query: str,
         *,
@@ -303,6 +340,12 @@ class RagRuntime:
             )
         async with self._lock, asyncio.timeout(self.settings.timeout_seconds):
             self.model.reset()
+            self.last_retrieval = {
+                "query": query,
+                "snapshot": self.settings.snapshot,
+                "k": self.settings.result_limit,
+                "stages": {"final": []},
+            }
             if self.index.count == 0:
                 return []
             started = monotonic()
@@ -314,19 +357,24 @@ class RagRuntime:
                 high, low = (query_keywords[number] if query_keywords
                              is not None else (high_level_keywords or [],
                                                low_level_keywords or []))
-                result = await self.rag.aquery_data(
-                    planned, QueryParam(
-                        mode=selected_mode,
-                        only_need_context=True,
-                        enable_rerank=False,
-                        top_k=self.settings.candidate_limit,
-                        chunk_top_k=self.settings.candidate_limit,
-                        hl_keywords=high,
-                        ll_keywords=low,
-                        max_total_tokens=(
-                            self.settings.retrieval_context_tokens),
-                    ),
-                )
+                with observation(
+                    self.langfuse_client, "knowledge.vector_graph",
+                    as_type="retriever",
+                    input={"query": planned, "mode": selected_mode},
+                ):
+                    result = await self.rag.aquery_data(
+                        planned, QueryParam(
+                            mode=selected_mode,
+                            only_need_context=True,
+                            enable_rerank=False,
+                            top_k=self.settings.candidate_limit,
+                            chunk_top_k=self.settings.candidate_limit,
+                            hl_keywords=high,
+                            ll_keywords=low,
+                            max_total_tokens=(
+                                self.settings.retrieval_context_tokens),
+                        ),
+                    )
                 no_results = (
                     result.get("metadata", {}).get("failure_reason")
                     == "no_results"
@@ -343,16 +391,31 @@ class RagRuntime:
                 suffix = f":{number}" if len(queries or [query]) > 1 else ""
                 branches[selected_mode + suffix] = chunks
                 if self.settings.bm25_enabled:
-                    branches["bm25" + suffix] = self.index.search(
-                        planned, limit=self.settings.candidate_limit)
+                    with observation(
+                        self.langfuse_client, "knowledge.bm25",
+                        as_type="retriever",
+                        input={"query": planned},
+                    ):
+                        branches["bm25" + suffix] = self.index.search(
+                            planned, limit=self.settings.candidate_limit)
             hits = fuse_candidates(
                 branches, limit=self.settings.candidate_limit
             )
             retrieval_ms = (monotonic() - started) * 1000
             ranking_started = monotonic()
-            scores = await self.models.rank(
-                query, [h.chunk.text for h in hits]
-            )
+            stages = {
+                name: [self._reference(c) for c in candidates]
+                for name, candidates in branches.items()
+            }
+            stages["fused"] = [self._reference(h.chunk) for h in hits]
+            with observation(
+                self.langfuse_client, "knowledge.rerank", as_type="retriever",
+                input={"query": query,
+                       "candidate_ids": [h.chunk.chunk_id for h in hits]},
+            ):
+                scores = await self.models.rank(
+                    query, [h.chunk.text for h in hits]
+                )
             if len(scores) != len(hits) or not all(map(isfinite, scores)):
                 raise ValueError("reranker returned invalid scores")
             for hit, score in zip(hits, scores):
@@ -387,4 +450,20 @@ class RagRuntime:
                 (monotonic() - started) * 1000,
                 retrieval_ms, ranking_ms, candidate_count - len(hits),
             )
-            return hits[: self.settings.result_limit]
+            final = hits[: self.settings.result_limit]
+            stages["final"] = [self._reference(h.chunk) for h in final]
+            self.last_retrieval.update(
+                stages=stages,
+                model_calls=self.model.calls,
+                input_tokens=self.model.input_tokens,
+                output_tokens=self.model.output_tokens,
+                unreported_calls=self.model.unreported_calls,
+            )
+            return final
+
+    @staticmethod
+    def _reference(chunk):
+        return {"evaluation_id": chunk.doc_id, "chunk_id": chunk.chunk_id,
+                "section": chunk.section, "text": chunk.text,
+                "source_revision": chunk.source_revision,
+                "document_sha256": chunk.document_sha256}

@@ -206,3 +206,20 @@ ingestion, distributed retrieval and worker ownership guarantees. Before adding
 workers, enforce checkpoint ownership and test process-level takeover/stale-writer
 races. Multi-agent work follows an evaluated single-agent baseline; mutation tools
 and reinforcement learning are outside current scope.
+
+## Online completion verification and evaluation
+
+When enabled, a frozen run policy reserves one existing model-call slot for a
+tool-free review after citation validation and before diagnosis acceptance. All
+retained telemetry, knowledge and execution events enter the review. Rejection
+returns inconclusive; malformed/unavailable review fails the run. No automatic
+repair is performed. Completed reviews survive recovery; ambiguous interrupted
+attempts fail closed. The harness remains responsible for call/time budgets, usage accounting, cancellation,
+checkpoints and termination.
+
+Langfuse stores datasets, experiments, scores and optional runtime tracing.
+Offline Judge and online verifier share review contracts and proof obligations;
+only offline evaluation receives held-out correctness labels. Scripted replay
+lives under tests and measures harness behavior. The independent RAG service
+and its retrieval policies remain owned by the RAG module. See
+[evaluation](docs/evaluation.md) for configuration and calibration limits.

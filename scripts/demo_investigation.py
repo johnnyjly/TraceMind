@@ -11,7 +11,6 @@ from uuid import UUID
 import httpx
 
 from tracemind.evaluation.models import EvaluationCase
-from tracemind.evaluation.evaluator import evaluate_diagnosis
 from tracemind.models.result import DiagnosisRun
 
 
@@ -33,12 +32,9 @@ def log_result(payload: dict, case: EvaluationCase | None = None) -> None:
             run.tool_call_count, state.limits.tool_calls,
         )
     if case is not None:
-        score = evaluate_diagnosis(
-            case, run, elapsed_ms=(state.elapsed_ms or 0) if state else 0,
-        )
-        logger.info("Case %s: %s (case tool budget: %d)", case.id,
-                    "passed" if score.passed else "failed scoring",
-                    case.max_tool_calls)
+        logger.info("Case %s: evaluation pending in Langfuse "
+                    "(case tool budget: %d)",
+                    case.id, case.max_tool_calls)
     logger.info("诊断结果:\n%s", json.dumps(
         run.diagnosis.model_dump(mode="json"), indent=2, ensure_ascii=False,
     ))

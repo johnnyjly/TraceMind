@@ -24,7 +24,9 @@ def test_queue_freezes_knowledge_policy_for_run_and_investigation(tmp_path):
     """Admission saves run policy without granting any new tool access."""
     repository = RunRepository(tmp_path / "knowledge.sqlite3")
     configured = Settings(_env_file=None, agent_knowledge_enabled=True,
-                          agent_knowledge_snapshot="published-v2")
+                          agent_knowledge_snapshot="published-v2",
+                          verifier_enabled=True,
+                          verifier_model="synthetic-review")
 
     async def requests():
         async with AsyncClient(transport=ASGITransport(app=app),
@@ -36,6 +38,8 @@ def test_queue_freezes_knowledge_policy_for_run_and_investigation(tmp_path):
                 run_id = body["run"]["id"] if "run" in body else body["id"]
                 state = repository.get(UUID(run_id)).state
                 assert state.knowledge_policy == configured.knowledge_policy
+                assert (state.verification_policy
+                        == configured.verification_policy)
                 assert "search_knowledge" not in state.allowed_tools
 
     overrides = {get_run_repository: lambda: repository,

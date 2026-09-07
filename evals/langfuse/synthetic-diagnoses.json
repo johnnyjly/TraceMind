@@ -1,0 +1,68 @@
+[
+  {
+    "input": {
+      "diagnosis": {
+        "incident_id": "38d8b5ce-0af9-4613-9fe2-988143200007",
+        "status": "complete",
+        "root_cause": "Payment Charge returned an error during checkout. The underlying mechanism is unknown from these observations.",
+        "confidence": 0.8,
+        "evidence_ids": [
+          "855839b5-6ee7-574c-b7ae-99519fc237ec"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "855839b5-6ee7-574c-b7ae-99519fc237ec",
+          "source": "trace",
+          "service": "payment",
+          "summary": "Synthetic fixture: payment Charge returned an error during checkout. No database observations were collected.",
+          "observed_at": "2024-09-01T00:00:00Z"
+        }
+      ],
+      "investigation_start": "2024-09-01T00:00:00Z",
+      "investigation_end": "2024-09-01T01:00:00Z"
+    },
+    "expected_output": {
+      "reference_answer": "Payment Charge returned an error. The mechanism, database condition and remediation effectiveness are unobserved.",
+      "expected_status": "complete"
+    },
+    "metadata": {
+      "synthetic": true,
+      "case": "supported",
+      "purpose": "Evaluator integration smoke; no real incident or organizational data"
+    }
+  },
+  {
+    "input": {
+      "diagnosis": {
+        "incident_id": "38d8b5ce-0af9-4613-9fe2-988143200007",
+        "status": "complete",
+        "root_cause": "Checkout failed because the payment database connection pool was exhausted. Adding database connections will fix the incident.",
+        "confidence": 0.8,
+        "evidence_ids": [
+          "855839b5-6ee7-574c-b7ae-99519fc237ec"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "855839b5-6ee7-574c-b7ae-99519fc237ec",
+          "source": "trace",
+          "service": "payment",
+          "summary": "Synthetic fixture: payment Charge returned an error during checkout. No database observations were collected.",
+          "observed_at": "2024-09-01T00:00:00Z"
+        }
+      ],
+      "investigation_start": "2024-09-01T00:00:00Z",
+      "investigation_end": "2024-09-01T01:00:00Z"
+    },
+    "expected_output": {
+      "reference_answer": "Payment Charge returned an error. The mechanism, database condition and remediation effectiveness are unobserved.",
+      "expected_status": "complete"
+    },
+    "metadata": {
+      "synthetic": true,
+      "case": "unsupported",
+      "purpose": "Evaluator integration smoke; no real incident or organizational data"
+    }
+  }
+]

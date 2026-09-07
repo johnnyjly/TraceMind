@@ -11,7 +11,7 @@ from otel_telemetry_mcp.contracts import LogSearch, TraceSearch
 from otel_telemetry_mcp.telemetry.errors import TelemetryClientError
 from otel_telemetry_mcp.telemetry.jaeger import JaegerClient
 
-from tracemind.evaluation.replay import ReplayResponse, ReplayTelemetry
+from replay_support import ReplayResponse, ReplayTelemetry
 
 END = datetime(2026, 10, 11, tzinfo=UTC)
 START = END - timedelta(minutes=1)

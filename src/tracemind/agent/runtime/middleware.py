@@ -94,6 +94,7 @@ class HarnessMiddleware(AgentMiddleware):
                 response = await self.harness.model_call(
                     invoke, model_name=str(model_name),
                     before_attempt=prepare,
+                    reserved_calls=self.harness.verification_calls,
                     allow_fallback=(
                         self._fallback is not None and not self._using_fallback
                     ),

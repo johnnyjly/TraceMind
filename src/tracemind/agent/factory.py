@@ -9,7 +9,9 @@ from tracemind.agent.runtime.runner import AgentRunner, LangChainAgentRunner
 from tracemind.agent.runtime.knowledge import KnowledgeSearch
 from tracemind.agent.runtime.rag_model_factory import create_rag_completion
 from tracemind.agent.service import DiagnosisService
+from tracemind.agent.verification import DiagnosisVerifier
 from tracemind.config import Settings
+from tracemind.observability.langfuse import callbacks_for, client_for
 from tracemind.mcp.client import ToolClient
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.run import RunLimits
@@ -23,7 +25,8 @@ def build_runner(settings: Settings, *, checkpointer=None, callbacks=None):
     return LangChainAgentRunner(
         create_chat_model(settings),
         fallback_model=create_fallback_model(settings),
-        checkpointer=checkpointer, callbacks=callbacks,
+        checkpointer=checkpointer,
+        callbacks=[*(callbacks or []), *callbacks_for(settings)],
     )
 
 
@@ -36,8 +39,10 @@ def build_service(
     knowledge_search: KnowledgeSearch | None = None,
     knowledge_completion: Completion | None = None,
     knowledge_model_name: str = "rag-auxiliary",
+    callbacks=None,
 ) -> DiagnosisService:
     """Assemble optional knowledge without extending the caller's grants."""
+    all_callbacks = [*(callbacks or []), *callbacks_for(settings)]
     if settings.agent_knowledge_enabled:
         # Load the optional retrieval stack only when knowledge is enabled.
         rag = RagSettings()
@@ -53,7 +58,9 @@ def build_service(
                 knowledge_search = get_snapshot_retriever(
                     rag.model_dump_json())
         knowledge_completion = (
-            knowledge_completion or create_rag_completion(settings, rag))
+            knowledge_completion or create_rag_completion(
+                settings, rag,
+                **({"callbacks": all_callbacks} if all_callbacks else {})))
         if knowledge_model_name == "rag-auxiliary":
             knowledge_model_name = rag.llm_model or settings.llm_model
     return DiagnosisService(
@@ -70,4 +77,8 @@ def build_service(
         knowledge_search=knowledge_search,
         knowledge_completion=knowledge_completion,
         knowledge_model_name=knowledge_model_name,
+        langfuse_client=client_for(settings),
+        verification_policy=settings.verification_policy,
+        verifier=DiagnosisVerifier(settings, callbacks=all_callbacks,
+                                   client=client_for(settings)),
     )

@@ -324,6 +324,11 @@ def test_retrieval_fuses_bm25_reranks_and_rejects_unregistered_chunks(
             assert [hit.chunk.chunk_id for hit in hits] == ["b", "a"]
             assert hits[0].branches == ["bm25"]
             assert runtime.model.calls == 0
+            stages = runtime.last_retrieval["stages"]
+            assert [hit["evaluation_id"]
+                    for hit in stages["final"]] == [b.doc_id, a.doc_id]
+            assert stages["final"][0]["document_sha256"] == b.document_sha256
+            assert set(stages) == {"naive", "bm25", "fused", "final"}
             runtime.rag.unknown = True
             with pytest.raises(ValueError, match="provenance"):
                 await runtime.search("connection")

@@ -13,9 +13,19 @@ from tracemind.agent.runtime.llm import create_chat_model
 from tracemind.agent.runtime.runner import LangChainAgentRunner
 from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
-from tracemind.evaluation.replay import ReplayTelemetry
+
 from tracemind.models import Evidence
 from tracemind.models.run import RunPurpose, RunState
+
+
+class NoTelemetry:
+    transport = "replay"
+
+    async def discover_tools(self):
+        return []
+
+    async def call(self, name, arguments):
+        raise AssertionError("fixed-evidence review cannot call telemetry")
 
 
 async def evaluate(path: Path, output: Path) -> None:
@@ -32,7 +42,7 @@ async def evaluate(path: Path, output: Path) -> None:
     evidence = [Evidence.model_validate(item) for item in fixture["evidence"]]
     service = DiagnosisService(
         LangChainAgentRunner(create_chat_model(settings)),
-        tool_client=ReplayTelemetry([]), allowed_tools=(),
+        tool_client=NoTelemetry(), allowed_tools=(),
     )
     run = await service.run_persisted(
         state, evidence, persist=lambda *_: None, is_cancelled=lambda: False,

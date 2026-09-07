@@ -34,6 +34,8 @@ from tracemind.mcp.client import ToolClient
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.knowledge import KnowledgePolicy
+from tracemind.models.verification import VerificationPolicy
+from tracemind.agent.verification import DiagnosisVerifier
 from tracemind.rag.model_bridge import Completion
 from tracemind.models.result import DiagnosisDraft, DiagnosisRun
 from tracemind.models.run import (
@@ -72,8 +74,14 @@ class DiagnosisService:
         knowledge_completion: Completion | None = None,
         knowledge_model_name: str = "rag-auxiliary",
         tool_client: ToolClient,
+        langfuse_client=None,
+        verification_policy: VerificationPolicy | None = None,
+        verifier: DiagnosisVerifier | None = None,
     ) -> None:
         """Configure telemetry dependencies, runner, and per-run controls."""
+        self._langfuse = langfuse_client
+        self._verification_policy = verification_policy
+        self._verifier = verifier
         self._runner = runner
         self._recursion_limit = recursion_limit
         self._limits = limits or RunLimits()
@@ -132,6 +140,9 @@ class DiagnosisService:
             investigation_end=end,
             limits=self._limits.model_copy(deep=True),
             allowed_tools=self._allowed_tools,
+            verification_policy=(
+                self._verification_policy.model_copy(deep=True)
+                if self._verification_policy else None),
             knowledge_policy=(self._knowledge_policy.model_copy(deep=True)
                               if self._knowledge_policy else None),
             memory_policy=self._memory_policy,
@@ -156,13 +167,70 @@ class DiagnosisService:
             initial=evidence,
         )
         return await self._execute(
-            state, collector, persist=persist, is_cancelled=is_cancelled,
-            resume=resume, graph_resume=graph_resume,
+            state,
+            collector,
+            persist=persist,
+            is_cancelled=is_cancelled,
+            resume=resume,
+            graph_resume=graph_resume,
             feedback_writer=feedback_writer,
         )
 
-    async def _execute(
-        self, state: RunState, collector: EvidenceCollector, *,
+    async def _execute(self, state, collector, **kwargs):
+        from langfuse import propagate_attributes
+        from tracemind.observability.langfuse import observation
+
+        with propagate_attributes(session_id=str(state.id)):
+            with observation(
+                self._langfuse,
+                "diagnosis",
+                as_type="agent",
+                input={
+                    "incident": state.incident.model_dump(mode="json"),
+                    "start": state.investigation_start.isoformat(),
+                    "end": state.investigation_end.isoformat(),
+                },
+            ) as span:
+                try:
+                    return await self._investigate(state, collector, **kwargs)
+                finally:
+                    if span is not None:
+                        span.update(
+                            output={
+                                "diagnosis": (
+                                    state.diagnosis.model_dump(mode="json")
+                                    if state.diagnosis
+                                    else None
+                                ),
+                                "evidence": [
+                                    e.model_dump(mode="json")
+                                    for e in collector.evidence
+                                ],
+                            },
+                            metadata={
+                                "run_id": str(state.id),
+                                "status": state.status.value,
+                                "stop_reason": (
+                                    state.stop_reason.value
+                                    if state.stop_reason
+                                    else None
+                                ),
+                                "resumed": kwargs.get("resume", False),
+                                "model_calls": state.model_calls,
+                                "tool_calls": state.tool_calls,
+                                "usage": state.usage.model_dump(),
+                                "harness_events": [
+                                    e.model_dump(mode="json")
+                                    for e in state.events
+                                ],
+                            },
+                        )
+
+    async def _investigate(
+        self,
+        state: RunState,
+        collector: EvidenceCollector,
+        *,
         persist: Callable[[RunState, list[Evidence]], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
         resume: bool = False,
@@ -193,32 +261,53 @@ class DiagnosisService:
         reason = StopReason.INTERNAL_ERROR
         try:
             async with asyncio.timeout(harness.remaining_seconds):
-                tools = await create_mcp_tools(
-                    self._tool_client, start=start, end=end,
-                    collector=collector, harness=harness,
-                    local_tools=create_knowledge_tools(
-                        harness, search=self._knowledge_search,
-                        completion=self._knowledge_completion,
-                        model_name=self._knowledge_model_name,
-                    ),
-                )
-                prompt = await prepare_context(
-                    state, collector.evidence, harness,
-                    memory_lookup=self._memory_lookup,
-                    guidance_lookup=self._guidance_lookup,
-                    learning_enabled=feedback_writer is not None,
-                )
-                await harness.checkpoint()
-                draft = await self._runner.run(
-                    prompt, tools,
-                    recursion_limit=self._recursion_limit, harness=harness,
-                )
+                if state.verification is not None:
+                    draft = DiagnosisDraft(
+                        **state.verification.candidate.model_dump(
+                            exclude={"incident_id"}),
+                        feedback_updates=state.feedback_updates,
+                    )
+                else:
+                    tools = await create_mcp_tools(
+                        self._tool_client, start=start, end=end,
+                        collector=collector, harness=harness,
+                        local_tools=create_knowledge_tools(
+                            harness, search=self._knowledge_search,
+                            completion=self._knowledge_completion,
+                            model_name=self._knowledge_model_name,
+                        ),
+                    )
+                    prompt = await prepare_context(
+                        state, collector.evidence, harness,
+                        memory_lookup=self._memory_lookup,
+                        guidance_lookup=self._guidance_lookup,
+                        learning_enabled=feedback_writer is not None,
+                    )
+                    await harness.checkpoint()
+                    draft = await self._runner.run(
+                        prompt, tools,
+                        recursion_limit=self._recursion_limit, harness=harness,
+                    )
                 await harness.checkpoint()
                 validate_draft(
                     draft, collector.evidence, start=start, end=end,
                     knowledge=state.knowledge,
                 )
                 state.feedback_updates = draft.feedback_updates
+                if (state.verification_policy is not None
+                        and draft.status is DiagnosisStatus.COMPLETE):
+                    if self._verifier is None:
+                        harness.stop(StopReason.VERIFICATION_FAILED)
+                    candidate = Diagnosis(
+                        incident_id=incident.id,
+                        **draft.model_dump(exclude={"feedback_updates"}),
+                    )
+                    review = await self._verifier.verify(
+                        state, candidate, collector.evidence, harness,
+                    )
+                    if not review.accepted:
+                        state.feedback_updates = []
+                        harness.stop(StopReason.VERIFICATION_REJECTED)
                 harness.emit(
                     "diagnosis.accepted", parent_span_id=state.id,
                     data={
@@ -267,6 +356,7 @@ class DiagnosisService:
                 StopReason.REPEATED_TOOL_CALL, StopReason.RECURSION_LIMIT,
                 StopReason.CONTEXT_LIMIT,
                 StopReason.NO_PROGRESS, StopReason.INVALID_DIAGNOSIS,
+                StopReason.VERIFICATION_REJECTED,
             }:
                 terminal_status = RunStatus.INCONCLUSIVE
                 draft = DiagnosisDraft(

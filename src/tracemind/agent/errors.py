@@ -75,3 +75,7 @@ class DiagnosisValidationError(DiagnosisError):
                     0, len(self.knowledge_refs) - 20),
             })
         return result
+
+
+class ModelCallBudgetExceeded(RuntimeError):
+    """A shared experiment admission cap denied provider execution."""

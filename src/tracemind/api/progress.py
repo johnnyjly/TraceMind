@@ -24,6 +24,12 @@ TOOLS = {
     "read_knowledge": "saved reference sections",
 }
 MESSAGES = {
+    "verification.started": (
+        "verifying", "Reviewing diagnosis against retained evidence"),
+    "verification.completed": ("verified", "Diagnosis review completed"),
+    "verification.failed": (
+        "error", "Diagnosis review failed; completion blocked"),
+    "verification.cancelled": ("cancelling", "Diagnosis review cancelled"),
     "run.queued": ("queued", "Investigation received, awaiting execution"),
     "run.started": ("started", "Starting investigation"),
     "run.resumed": ("resuming", "Resuming interrupted investigation"),
@@ -61,7 +67,7 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         "tool", "service", "investigation_start", "investigation_end",
         "result_count", "reason", "status", "error_type", "category",
         "added", "received", "duplicates", "record_count",
-        "applied", "skipped", "rejected_count",
+        "applied", "skipped", "rejected_count", "verdict", "accepted", "code",
     } and isinstance(value, (str, int, float, bool))}
     if event.kind.startswith("tool."):
         tool = TOOLS.get(data.get("tool"), "tool")

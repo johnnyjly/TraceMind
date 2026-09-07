@@ -11,11 +11,16 @@ def main():
     import torch
     import uvicorn
     from tracemind.rag.query_service import create_app
+    from tracemind.config import Settings
+    from tracemind.observability.langfuse import client_for
 
     logging.basicConfig(level=logging.INFO)
     torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
-    uvicorn.run(create_app(), host='127.0.0.1', port=8011)
+    uvicorn.run(
+        create_app(langfuse_client=client_for(Settings())),
+        host='127.0.0.1', port=8011,
+    )
 
 
 if __name__ == '__main__':

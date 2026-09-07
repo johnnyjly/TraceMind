@@ -50,7 +50,7 @@ from datetime import UTC, datetime, timedelta
 from tracemind.agent.runtime.harness import RunHarness
 from tracemind.models import Incident
 from tracemind.models.run import RunLimits, RunState
-configure = runpy.run_path('scripts/run_evaluation.py')['configure_logging']
+configure = runpy.run_path('scripts/run_experiment.py')['configure_logging']
 start = datetime(2024, 9, 1, tzinfo=UTC)
 state = RunState(incident=Incident(title='failure', description='test'),
                  investigation_start=start,

@@ -1,0 +1,426 @@
+[
+  {
+    "input": {
+      "incident": {
+        "id": "74f5739c-a873-5444-9436-0833191ebdff",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "inventory"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "74f5739c-a873-5444-9436-0833191ebdff",
+        "status": "complete",
+        "root_cause": "An inventory lookup timed out; its internal failure mechanism remains unknown.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "18620d5a-db9a-52e5-acc0-a0d8f65a2265"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "evidence": [
+        {
+          "id": "18620d5a-db9a-52e5-acc0-a0d8f65a2265",
+          "service": "inventory",
+          "source": "trace",
+          "summary": "Inventory Lookup returned ERROR with deadline exceeded on trace fresh-a.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "fresh-a",
+            "status": "ERROR",
+            "operation": "Lookup"
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "qualified_timeout",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "578fefde-68c0-5585-ac68-55a656658d5a",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "shipping"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "578fefde-68c0-5585-ac68-55a656658d5a",
+        "status": "complete",
+        "root_cause": "Shipping Calculate returned ERROR on trace fresh-b.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "fa79c08f-3f7e-5e40-a79a-b467b09861a6"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect Shipping Calculate exception details."
+        ]
+      },
+      "evidence": [
+        {
+          "id": "fa79c08f-3f7e-5e40-a79a-b467b09861a6",
+          "service": "shipping",
+          "source": "trace",
+          "summary": "Shipping Calculate returned ERROR on trace fresh-b.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "fresh-b",
+            "status": "ERROR",
+            "operation": "Calculate"
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "proposed_check",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "f90910fe-6aaf-562d-9868-72e814504b54",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "shipping"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "f90910fe-6aaf-562d-9868-72e814504b54",
+        "status": "complete",
+        "root_cause": "Shipping Calculate returned ERROR on trace fresh-c.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "7da00811-0027-59a5-9f8e-9a7d409e17ba"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Restarting shipping will eliminate all errors."
+        ]
+      },
+      "evidence": [
+        {
+          "id": "7da00811-0027-59a5-9f8e-9a7d409e17ba",
+          "service": "shipping",
+          "source": "trace",
+          "summary": "Shipping Calculate returned ERROR on trace fresh-c.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "fresh-c",
+            "status": "ERROR",
+            "operation": "Calculate"
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "promised_repair",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "20521d85-6015-54cf-9676-e84e3559bd3f",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "inventory",
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "20521d85-6015-54cf-9676-e84e3559bd3f",
+        "status": "complete",
+        "root_cause": "The inventory timeout caused the checkout failure on the same request.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "73234139-9061-5066-afe1-39ee225211bc",
+          "415c7297-5330-50c8-ac31-23a719b7de64"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "evidence": [
+        {
+          "id": "73234139-9061-5066-afe1-39ee225211bc",
+          "service": "inventory",
+          "source": "trace",
+          "summary": "Inventory Lookup timed out on trace unrelated-a.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "unrelated-a",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "415c7297-5330-50c8-ac31-23a719b7de64",
+          "service": "checkout",
+          "source": "trace",
+          "summary": "Checkout returned HTTP 500 on trace unrelated-b; dependency details were not retained.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "unrelated-b",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "unlinked_failures",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "ea9de9c1-8be4-592c-a6eb-960a41c03368",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "payment"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "ea9de9c1-8be4-592c-a6eb-960a41c03368",
+        "status": "complete",
+        "root_cause": "Payment Charge returned ERROR on trace fresh-d.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "b175df8f-fca1-5056-b3fa-7221d32acae7"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "evidence": [
+        {
+          "id": "b175df8f-fca1-5056-b3fa-7221d32acae7",
+          "service": "payment",
+          "source": "trace",
+          "summary": "Payment Charge returned OK on trace fresh-d.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "fresh-d",
+            "status": "OK",
+            "operation": "Charge"
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "contradicted"
+    },
+    "metadata": {
+      "case_id": "opposite_status",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "3b5ef28a-db47-5053-953b-cfdfe001dc70",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "3b5ef28a-db47-5053-953b-cfdfe001dc70",
+        "status": "complete",
+        "root_cause": "The zero reported errors prove that no orders failed anywhere in the deployment.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "2baf8f37-e062-52e9-84fc-06dd3d2fad2d"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "evidence": [
+        {
+          "id": "2baf8f37-e062-52e9-84fc-06dd3d2fad2d",
+          "service": "checkout",
+          "source": "metric",
+          "summary": "The sampled checkout error counter returned zero; the query supplied no traffic or exporter coverage observations.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "value": 0,
+            "query": "checkout_errors_total",
+            "coverage": "not_observed"
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "unproven_coverage",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "f5f91ca7-f437-5cde-b5b5-03dfb74eb3e1",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "f5f91ca7-f437-5cde-b5b5-03dfb74eb3e1",
+        "status": "complete",
+        "root_cause": "Checkout returned HTTP 500. Payment configuration is a hypothesis, not confirmed by retained evidence.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "dfa2ddea-308a-5870-934c-49ba60b28ca4"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Inspect payment configuration before drawing a causal conclusion."
+        ]
+      },
+      "evidence": [
+        {
+          "id": "dfa2ddea-308a-5870-934c-49ba60b28ca4",
+          "service": "checkout",
+          "source": "log",
+          "summary": "Checkout returned HTTP 500 for request fresh-e; the message contains no dependency or configuration details.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "request_id": "fresh-e",
+            "status_code": 500
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "explicit_hypothesis",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "dca1714f-16c6-5abd-a728-33e8573c3adc",
+        "title": "Synthetic order errors",
+        "description": "Review retained manufactured observations in the fixed window.",
+        "affected_services": [
+          "shipping",
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "dca1714f-16c6-5abd-a728-33e8573c3adc",
+        "status": "complete",
+        "root_cause": "Shipping Calculate failed, and the linked checkout operation received its error on trace fresh-f.",
+        "confidence": 0.7,
+        "evidence_ids": [
+          "c7fe051d-bb4e-56a7-8829-5c11ac8344dd",
+          "6b8ecdf2-1b95-5b26-bbe6-115ef7647b07"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "evidence": [
+        {
+          "id": "c7fe051d-bb4e-56a7-8829-5c11ac8344dd",
+          "service": "shipping",
+          "source": "trace",
+          "summary": "Shipping Calculate returned ERROR on trace fresh-f, span shipping-span.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "fresh-f",
+            "span_id": "shipping-span",
+            "status": "ERROR"
+          }
+        },
+        {
+          "id": "6b8ecdf2-1b95-5b26-bbe6-115ef7647b07",
+          "service": "checkout",
+          "source": "trace",
+          "summary": "Checkout received an error from Shipping Calculate on trace fresh-f, linked to shipping-span.",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "data": {
+            "trace_id": "fresh-f",
+            "span_id": "checkout-span",
+            "dependency_span_id": "shipping-span",
+            "status": "ERROR"
+          }
+        }
+      ],
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "knowledge": [],
+      "execution_events": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "linked_propagation",
+      "data_origin": "manufactured",
+      "dataset_role": "holdout-smoke"
+    }
+  }
+]

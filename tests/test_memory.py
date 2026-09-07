@@ -36,8 +36,8 @@ from tracemind.agent.worker import RunWorker
 from tracemind.api.app import app, get_run_repository
 from tracemind.api.progress import readable_event
 from tracemind.config import Settings
-from tracemind.evaluation.replay import ReplayFixture, run_replay_evaluation
-from tracemind.evaluation.summary import build_batch_report, trace_issues
+from replay_support import ReplayFixture, run_replay_evaluation
+from tracemind.agent.runtime.audit import trace_issues
 from tracemind.models import (
     Diagnosis,
     DiagnosisStatus,
@@ -321,7 +321,7 @@ def test_worker_freezes_before_model_and_reuses_snapshot(tmp_path):
     assert resumed.memory_snapshot.records == [record]
     service = DiagnosisService(
         LangChainAgentRunner(ScriptedModel(respond=lambda m, c: (
-                    tool_call() if c == 1 else diagnosis(m)))),
+            tool_call() if c == 1 else diagnosis(m)))),
         tool_client=FixtureToolClient(Telemetry(), Telemetry(), Telemetry()),
         memory_lookup=forbidden_lookup,
     )
@@ -339,7 +339,7 @@ def test_disabled_and_explanation_do_not_query_memory(tmp_path):
 
     service = DiagnosisService(
         LangChainAgentRunner(ScriptedModel(respond=lambda m, c: (
-                    tool_call() if c == 1 else diagnosis(m)))),
+            tool_call() if c == 1 else diagnosis(m)))),
         tool_client=FixtureToolClient(Telemetry(), Telemetry(), Telemetry()),
         memory_lookup=forbidden_lookup,
     )
@@ -409,16 +409,18 @@ def test_frozen_memory_evaluation_is_paired_and_never_uses_live_db(tmp_path):
     assert on.run_state.limits == off.run_state.limits
     assert on.run_state.tool_calls == off.run_state.tool_calls
     assert not settings.agent_run_database.exists()
-    assert len(build_batch_report([off, on]).groups) == 2
+    assert off.run_state.id != on.run_state.id
     corrupted = on.run_state.model_copy(deep=True)
     corrupted.memory_snapshot.records[0].resolution = "Edited after execution"
     assert "memory_snapshot" in trace_issues(corrupted)
     for path in ("missing_telemetry", "conflicting_evidence"):
+        negative = ReplayFixture.load(Path(f"evals/replays/{path}.json"))
         report = asyncio.run(run_replay_evaluation(
-            ReplayFixture.load(Path(f"evals/replays/{path}.json")), settings,
+            negative, settings,
             memory_snapshot=snapshot))
         assert report.regression_passed
-        assert not report.result.false_completion
+        assert (report.diagnosis.status
+                == negative.case.ground_truth.expected_status)
     with pytest.raises(ValueError, match="before evaluation"):
         evaluation_memory(snapshot.model_copy(update={"selected_at": END}),
                           POLICY, start=START, max_records=3,

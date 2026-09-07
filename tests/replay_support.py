@@ -15,9 +15,10 @@ from tracemind.agent.memory.lookup import evaluation_memory
 from tracemind.agent.runtime.runner import LangChainAgentRunner
 from tracemind.agent.service import DiagnosisService
 from tracemind.config import Settings
-from tracemind.evaluation.models import EvaluationCase, EvaluationReport
-from tracemind.evaluation.runner import run_service_evaluation
-from tracemind.evaluation.summary import trace_issues
+from tracemind.evaluation.models import EvaluationCase, ExperimentOutput
+from tracemind.evaluation.evaluators import diagnosis_scores
+from tracemind.evaluation.runner import execute_service
+from tracemind.agent.runtime.audit import trace_issues
 from tracemind.mcp.contracts import TelemetryReply
 from tracemind.models import Evidence
 from tracemind.models.memory import MemorySnapshot
@@ -171,11 +172,17 @@ class ScriptedReplayModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=response)])
 
 
+class ReplayOutcome(ExperimentOutput):
+    """Scripted harness assertions; these do not measure model quality."""
+    regression_passed: bool = False
+    scores: dict = Field(default_factory=dict)
+
+
 async def run_replay_evaluation(
     fixture: ReplayFixture, settings: Settings, *,
     model: BaseChatModel | None = None,
     memory_snapshot: MemorySnapshot | None = None,
-) -> EvaluationReport:
+) -> ReplayOutcome:
     """Run scripted regression or an explicitly supplied real model offline."""
     policy, lookup = evaluation_memory(
         memory_snapshot, settings.memory_policy, start=fixture.start,
@@ -197,25 +204,30 @@ async def run_replay_evaluation(
         memory_policy=policy,
         memory_lookup=lookup,
     )
-    report = await run_service_evaluation(
-        fixture.case, service, start=fixture.start, end=fixture.end,
+    report = await execute_service(
+        fixture.case.incident, service, start=fixture.start, end=fixture.end,
         model_provider=settings.llm_provider if model else "scripted",
         model_name=settings.llm_model if model else "scripted-replay",
         execution_mode="model_replay" if model else "scripted_replay",
         memory_corpus_id=(memory_snapshot.fingerprint
                           if memory_snapshot else None),
     )
-    outcome = (
-        report.run_state is not None and
-        report.run_state.stop_reason is fixture.expected_stop_reason
-        if fixture.expected_stop_reason is not None else
-        bool(report.result and report.result.passed)
-    )
-    report.regression_passed = bool(
-        outcome and report.run_state is not None
-        and not trace_issues(report.run_state)
-    )
-    if model is None and (telemetry.responses or
-                          selected_model.position != len(fixture.script)):
+    report = ReplayOutcome(**report.model_dump())
+    expected = fixture.case.ground_truth.model_dump(mode="json")
+    scores = diagnosis_scores(
+        output=report.model_dump(),
+        expected_output=expected)
+    report.scores = {score.name: score.value for score in scores}
+    outcome = (report.run_state is not None and
+               report.run_state.stop_reason is fixture.expected_stop_reason
+               if fixture.expected_stop_reason is not None else
+               all(report.scores.get(key) is True for key in
+                   ("execution_success", "citation_integrity",
+                    "expected_status", "tool_budget")))
+    report.regression_passed = bool(outcome and report.run_state is not None
+                                    and not trace_issues(report.run_state))
+    if model is None and (
+            telemetry.responses
+            or selected_model.position != len(fixture.script)):
         report.regression_passed = False
     return report

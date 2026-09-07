@@ -24,5 +24,9 @@ def test_example_covers_all_settings_and_loads_diagnostic_profile():
     assert settings.run_limits.duration_seconds == 300
     assert settings.run_limits.model_calls == 15
     assert settings.run_limits.tool_calls == 25
-    assert settings.agent_fallback_provider is None
-    assert settings.agent_fallback_model is None
+    assert settings.llm_provider == "deepseek"
+    assert settings.llm_model == "deepseek-v4-pro"
+    assert settings.agent_fallback_provider == "deepseek"
+    assert settings.agent_fallback_model == "deepseek-flash"
+    assert settings.eval_judge_provider == "deepseek"
+    assert settings.eval_judge_model == "deepseek-v4-pro"

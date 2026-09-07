@@ -28,17 +28,33 @@ from tracemind.rag.local_models import LocalModels, load_tokenizer
 
 
 def create_completion(
-    settings: RagSettings, *, env_file: Path | None = None
+    settings: RagSettings, *, env_file: Path | list[Path] | None = None,
+    callbacks=None,
 ) -> Completion:
     """Assemble a lazy provider adapter outside the retrieval library."""
     provider_settings = Settings(
         **({"_env_file": env_file} if env_file else {}))
-    return create_rag_completion(provider_settings, settings)
+    return create_rag_completion(
+        provider_settings, settings, callbacks=callbacks)
 
 
 async def run(args) -> None:
+    """Flush short-lived CLI traces on success and failure."""
+    from tracemind.observability.langfuse import client_for
+    client = client_for(Settings(_env_file=args.env_file))
+    try:
+        await _run(args)
+    finally:
+        if client is not None:
+            await asyncio.to_thread(client.flush)
+
+
+async def _run(args) -> None:
     """Execute one explicit setup, readiness, or retrieval operation."""
     settings = RagSettings(_env_file=args.env_file)
+    from tracemind.observability.langfuse import client_for, callbacks_for
+    app_settings = Settings(_env_file=args.env_file)
+    client = client_for(app_settings)
     updates = {
         key: value
         for key, value in {
@@ -112,7 +128,11 @@ async def run(args) -> None:
             return
         runtime = RagRuntime(
             settings,
-            completion=create_completion(settings, env_file=args.env_file),
+            completion=create_completion(
+                settings,
+                env_file=args.env_file,
+                callbacks=callbacks_for(app_settings)),
+            langfuse_client=client,
         )
         manifest = await build_snapshot(
             runtime, corpus, prepared, timeout_seconds=args.build_timeout
@@ -198,9 +218,43 @@ async def run(args) -> None:
             )
         )
         return
+    if args.action == "evaluate":
+        from tracemind.evaluation.budget import ModelCallBudget
+        from tracemind.evaluation.experiments import (
+            accepted, run_experiment, verify_publication,
+        )
+        from tracemind.evaluation.retrieval import RetrievalSuite
+        suite = RetrievalSuite.model_validate_json(args.suite.read_text())
+        if suite.snapshot != settings.snapshot:
+            raise ValueError("evaluation snapshot mismatch")
+        client = client_for(app_settings, required=True)
+        if not client.auth_check():
+            raise ValueError("Langfuse authentication failed")
+        data = [{"input": {"query": q.query, "mode": args.mode},
+                 "expected_output": {"relevance": q.relevant}}
+                for q in suite.questions]
+        # The SDK runner owns its event loop and each item's runtime.
+        result = await asyncio.to_thread(
+            run_experiment, app_settings, client, data,
+            kind="retrieval", name="rag-" + suite.snapshot,
+            budget=ModelCallBudget(args.max_model_calls),
+            rag_settings=settings.model_copy(update={"result_limit": args.k}),
+        )
+        published = await asyncio.to_thread(verify_publication, client, result)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps({
+            "experiment_id": result.experiment_id,
+            "published": published, "accepted": accepted(result),
+        }, indent=2) + "\n")
+        print(result.format())
+        if not accepted(result) or not published:
+            raise SystemExit(1)
+        return
     runtime = RagRuntime(
         settings,
-        completion=create_completion(settings, env_file=args.env_file),
+        completion=create_completion(settings, env_file=args.env_file,
+                                     callbacks=callbacks_for(app_settings)),
+        langfuse_client=client,
     )
     try:
         await runtime.initialize()
@@ -215,16 +269,6 @@ async def run(args) -> None:
                     }
                 )
             )
-        elif args.action == "evaluate":
-            from tracemind.evaluation.retrieval import (
-                RetrievalSuite, evaluate_retrieval,
-            )
-            suite = RetrievalSuite.model_validate_json(args.suite.read_text())
-            report = await evaluate_retrieval(runtime, suite, k=args.k)
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(report, indent=2) + "\n")
-            print(json.dumps({"output": str(args.output),
-                              "metrics": report["metrics"]}))
         else:
             hits = await runtime.search(args.query, mode=args.mode)
             print(json.dumps([hit.model_dump() for hit in hits], indent=2))
@@ -251,7 +295,7 @@ def main() -> None:
     parser.add_argument("--snapshot")
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--model-cache", type=Path)
-    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--env-file", type=Path, action="append")
     parser.add_argument("--corpus", type=Path, default=Path("knowledge"))
     parser.add_argument("--profile", default="core")
     parser.add_argument(
@@ -266,10 +310,15 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--k", type=int, default=5)
     args = parser.parse_args()
+    args.env_file = args.env_file or Path(".env")
     if args.action == "query" and not args.query:
         parser.error("query requires --query")
-    if args.action == "evaluate" and (not args.suite or not args.output):
-        parser.error("evaluate requires --suite and --output")
+    if args.action == "evaluate" and (
+        not args.suite or not args.output or not args.max_model_calls
+        or args.max_model_calls < 1
+    ):
+        parser.error(
+            "evaluate requires --suite, --output and --max-model-calls")
     if args.action == "build" and (
         not args.snapshot
         or args.snapshot == "bootstrap"

@@ -7,7 +7,7 @@ from otel_telemetry_mcp.telemetry.errors import (
 from pydantic import ValidationError
 
 from tracemind.agent.runtime.tools import bind_mcp_tools
-from tracemind.evaluation.replay import recorded_tools
+from replay_support import recorded_tools
 from tracemind.mcp.contracts import TelemetryReply
 from tracemind.models import Evidence
 from tracemind.telemetry.errors import (

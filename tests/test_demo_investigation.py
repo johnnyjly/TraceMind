@@ -6,11 +6,11 @@ import logging
 from pathlib import Path
 
 from tracemind.config import Settings
-from tracemind.evaluation.replay import ReplayFixture, run_replay_evaluation
+from replay_support import ReplayFixture, run_replay_evaluation
 from tracemind.models.result import DiagnosisRun
 
 
-def test_result_reports_actual_budget_and_failed_case_score(tmp_path, caplog):
+def test_result_reports_actual_budget_and_pending_evaluation(tmp_path, caplog):
     spec = importlib.util.spec_from_file_location(
         "demo_investigation", Path("scripts/demo_investigation.py"))
     cli = importlib.util.module_from_spec(spec)
@@ -28,7 +28,8 @@ def test_result_reports_actual_budget_and_failed_case_score(tmp_path, caplog):
         cli.log_result(run.model_dump(mode="json"), fixture.case)
     assert "Execution: succeeded (completed)" in caplog.text
     assert "tool calls 19/25" in caplog.text
-    assert "failed scoring (case tool budget: 12)" in caplog.text
+    assert ("evaluation pending in Langfuse (case tool budget: 12)"
+            in caplog.text)
     caplog.clear()
     with caplog.at_level(logging.INFO):
         cli.log_result(run.model_dump(mode="json"))
