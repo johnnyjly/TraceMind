@@ -6,11 +6,15 @@ Auxiliary retrieval cannot consume this reserve. The main loop checks it before
 every attempt, including retries and resumed runs, and closes investigation tools
 when the reserve is reached. This bounds output attempts; it cannot guarantee a
 valid diagnosis from a failing provider.
+Why: Auxiliary retrieval must leave bounded capacity to synthesize and repair the final
+answer.
 
 Knowledge previews expose reranker scores as ranking signals, not probabilities.
 Empty retrieval and repeated retained references carry explicit guidance to stop
 synonym searches. These metadata messages do not count as investigation progress.
 Changing the query can still be justified by a different unresolved hypothesis.
+Why: Empty or duplicate references cannot justify spending the budget on synonyms
+indefinitely.
 
 ## Module map
 
@@ -47,6 +51,7 @@ import the fusion algorithm or optional retrieval libraries.
 Knowledge is reference material, separate from current observations. Diagnosis
 validation rejects unknown/duplicate knowledge citations and still requires
 telemetry evidence for a complete diagnosis. Search does not create evidence.
+Why: Documents explain mechanisms but cannot replace current in-window observations.
 
 ## Assembly and lifetime
 
@@ -54,12 +59,16 @@ telemetry evidence for a complete diagnosis. Search does not create evidence.
 explicit published snapshot and grants; discovery does not grant local tools.
 Run capture persists the policy. Follow-ups inherit it and copied references.
 An explanation exposes only authorized retained-data readers.
+Why: Saved knowledge policy and explicit grants prevent discovery or follow-up from
+expanding permissions.
 
 The application owns credentials, provider selection and request options.
 When both RAG provider/model overrides are absent, assembly uses the primary
 model. Partial overrides fail. SDK retries stay disabled; Harness owns retries.
 Auxiliary responses accept text content blocks and reject incomplete/refused
 output before it can enter query planning or graph extraction.
+Why: Central provider assembly and bounded admission keep malformed responses and hidden
+retries out of retrieval.
 
 For embedded access, SnapshotRetriever shares local weights and a process admission
 lock. Each search owns a fresh RagRuntime and receives the calling run's
@@ -74,6 +83,8 @@ LightRAG's shared KV cache omits the directory from its key. `QDRANT_WORKSPACE`
 must be absent or equal to the selected snapshot ID.
 An OS file lock protects local snapshots across processes; concurrent
 multi-process retrieval is not supported by this deployment contract.
+Why: Per-search ownership and snapshot locks protect mutable framework stores and
+run-specific callbacks.
 
 ## Injection contract
 
@@ -102,11 +113,14 @@ read_knowledge reader in the existing deterministic compressor. The newest
 requested detail page reaches the model intact. Overflow is reported explicitly.
 Knowledge text is not replaced by a reference-only index when `read_knowledge`
 is unauthorized; the context gate reports overflow if the text cannot fit.
+Why: A reference-only preview is useful only when the model has permission to read its
+source.
 
 Sources retain snapshot, original file hash, source-registry revision, headings,
 Docling element pointers and canonical text. Legacy chunks without parents
 remain readable. New parser versions require a new publication; no automatic
 migration or mutation of old snapshots occurs.
+Why: Retained references must remain attributable to the publication that produced them.
 
 Durable knowledge.search.started/completed/failed events complement tool/model
 spans. Auxiliary purposes distinguish planning, keyword extraction and retrieval.
@@ -118,10 +132,13 @@ RunState retains full source records for auditing and explanations.
 Scripted tests validate control, ownership and contracts. Local Qdrant/model
 smoke checks validate actual storage and inference paths. Neither establishes
 corpus-wide retrieval quality or diagnostic accuracy. The CLI evaluate action
-uses ir-measures with separate snapshot-bound judgments; labels never enter
-runtime prompts. Agent RAG off/on comparisons need the same incident window and
+uses Langfuse stage evaluators with separate snapshot-bound judgments; labels
+never enter runtime prompts. The older ir-measures helper remains exercised by
+regression tests but is no longer the CLI evaluation path. Agent RAG off/on comparisons need the same incident window and
 frozen corpus. Tenant/source authorization and distributed retrieval are later
 work.
+Why: Test doubles and local smoke checks do not establish corpus-wide or incident-level
+quality.
 
 ## Independent query service
 
@@ -131,6 +148,7 @@ PyTorch intra-op/inter-op threads at 2/1. It runs as an independent process;
 deployment on another host requires network access controls.
 It does not install an OS auto-start daemon. Restart the process after changing
 its snapshot or model settings, and wait for `GET /ready` before submitting work.
+Why: Readiness separates expensive startup from the investigation deadline.
 
 Set `TRACEMIND_RAG_SERVICE_URL=http://127.0.0.1:8011` in API/worker configuration.
 Set `TRACEMIND_RAG_SNAPSHOT` to the same **published** snapshot as
@@ -139,6 +157,7 @@ verifies the snapshot, loads weights/stores and performs embedding/rerank warmup
 The immutable publication stays unchanged; LightRAG uses a private working copy.
 The process owns the snapshot lock until shutdown; do not simultaneously run an
 embedded reader of that same snapshot. Offline builds use a different snapshot.
+Why: The service owns the snapshot lock and mutable copy for its whole lifetime.
 
 `query_client.py` checks readiness, extracts keywords using the pinned LightRAG
 prompt and the investigation's existing counted completion callback, then sends
@@ -157,6 +176,8 @@ knowledge unavailability; the client does not silently fall back to local model
 loading. HTTP client cancellation does not itself prove server work has stopped;
 server timeout and serialized local inference bound remaining work. Shutdown
 drains LightRAG workers before closing stores.
+Why: Bounded admission and explicit failure avoid unbounded work or surprise local cold
+starts.
 
 Startup work is outside the investigation deadline. This eliminates per-worker
 weight cold starts and per-query store recreation for the configured HTTP path;

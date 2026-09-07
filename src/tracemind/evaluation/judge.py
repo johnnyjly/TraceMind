@@ -84,12 +84,7 @@ def diagnosis_judge(settings, client, budget):
                     judge_model=settings.eval_judge_model,
                 )
             ]
-        verdicts = {c.verdict for c in review.claims}
-        verdict = (
-            "contradicted"
-            if "contradicted" in verdicts
-            else "insufficient" if "insufficient" in verdicts else "supported"
-        )
+        verdict = review.verdict
         details = {
             "rubric_version": VERSION,
             "judge_provider": settings.eval_judge_provider,

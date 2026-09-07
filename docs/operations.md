@@ -23,6 +23,8 @@ Diagnosis, run and investigation creation share this request shape:
 
 The timestamps above are illustrative. Replace them with your actual fault window. Both require timezones and
 end must follow start.
+Why: Explicit ordered times keep admission and evidence filtering on the same
+investigation window.
 
 | Operation | Route and behavior |
 | --- | --- |
@@ -73,14 +75,19 @@ bounded repair allowance. Tool budget, repetition and no progress close tools,
 allowing final diagnosis within remaining hard limits.
 
 Restart API/worker after changes and create a new run; saved policies and limits
-are retained by existing runs. DeepSeek uses its OpenAI-compatible Chat Completions
+are retained by existing runs.
+Why: Saved policy is an execution contract, so settings changes apply to newly
+admitted work.
+
+DeepSeek uses its OpenAI-compatible Chat Completions
 endpoint with thinking disabled and tool-based structured diagnoses.
 
 ## Persistence and progress
 
 Queued runs use `TRACEMIND_AGENT_RUN_DATABASE` for ledger/evidence and
 `TRACEMIND_AGENT_CHECKPOINT_DATABASE` for checkpoints, defaulting to separate
-SQLite files in `artifacts/`. Back up both together before upgrades. Recovery
+SQLite files in `artifacts/`. Back up both together before upgrades.
+Why: The ledger and graph checkpoints hold different parts of recoverable state. Recovery
 restores evidence, attempts, deadline and graph state. Ambiguous external calls
 may repeat and still consume budget. Deployment supports one local worker.
 
@@ -89,6 +96,8 @@ Subscribe to `GET /api/v1/runs/{id}/events`. Reconnect using `Last-Event-ID:
 Idle heartbeats keep the stream alive. Close on `complete`, emitted after terminal
 commit with status and an optional result URL. Disconnecting does not cancel.
 Synchronous diagnoses/evaluations are not live SSE runs.
+Why: Cursor deduplication and terminal commit boundaries prevent observers from treating
+reconnects as new execution.
 
 Detailed JSONL defaults to `artifacts/runs/<run_id>.jsonl`: durations, call/span
 relationships, evidence IDs and reported usage, without raw prompts, query/result
@@ -142,6 +151,8 @@ Historical diagnosis retrieval requires exact environment/version, service overl
 and unexpired confirmation; same-incident/revoked records are excluded. Runs freeze
 contents before model execution. Explanation loads guidance but retrieves no new
 historical diagnoses. Memory IDs cannot replace current telemetry citations.
+Why: Historical resolutions can guide investigation but cannot establish facts about the
+present incident.
 Inferred confirmations expire after `TRACEMIND_AGENT_MEMORY_AUTO_EXPIRY_DAYS`
 (default 30); preferences/skills have no TTL.
 
@@ -158,6 +169,8 @@ Inferred confirmations expire after `TRACEMIND_AGENT_MEMORY_AUTO_EXPIRY_DAYS`
 
 Manual confirmation uses this shape. Replace placeholders and independently
 verify the source run/resolution before choosing a future expiry:
+Why: Confirmation creates reusable incident memory, so the attestation must come from a
+verified resolution.
 
 ```json
 {
@@ -178,7 +191,7 @@ verify the source run/resolution before choosing a future expiry:
 Workflow validates source observations/provenance. Stale revisions return 409.
 Correction/revocation/deletion affects future retrieval but keeps copies in prior
 snapshots, receipts, checkpoints and reports. Evaluation uses separate
-[frozen corpora](evaluation.md#memory-evaluation), never the live user library.
+[frozen corpora](evaluation.md#runtime-and-regression-boundaries), never the live user library.
 
 ## Optional online verifier and Langfuse
 
@@ -187,6 +200,7 @@ for newly created runs. One tool-free completion review consumes the existing
 model-call/time budgets and shared token accounting; it never automatically repairs a diagnosis.
 Semantic rejection returns inconclusive, and review failure fails the run.
 Persisted policy and review state govern resumed runs.
+Why: Admission freezes the gate so later worker settings cannot silently remove it.
 
 Runtime Langfuse tracing is separately opt-in through `TRACEMIND_LANGFUSE_*`;
 normal operation does not require the evaluation server. For model limits,

@@ -33,10 +33,14 @@ network. Set `OTEL_DEMO_NETWORK` to override the network name. It queries
 `prometheus:9090`, `jaeger:16686` and `opensearch:9200` inside that network.
 The image build context is only this directory, so TraceMind code and credentials
 are not included. Re-run the build command after changing service source.
+Why: The image is built from the independent package, so a running image does not pick
+up source edits.
 
 The service is intended for localhost access. Host/Origin checks are enabled;
 configure their allowlists for another deployment. Remote authentication and
 tenant isolation are not provided by this local Compose setup.
+Why: Host checks are a local access boundary and cannot substitute for remote
+authentication.
 
 ## Tool contract
 
@@ -52,7 +56,7 @@ MCP clients may ignore them and use the standard content/output schema.
 |---|---|---|
 | query_metrics | expression, at | — |
 | discover_metrics | start, end | service, metric, limit |
-| search_traces | service, start, end | — |
+| search_traces | service, start, end | min_duration_ms (> 0), errors_only (default false) |
 | get_trace_detail | trace_id | — |
 | search_logs | service, start, end | text |
 
@@ -60,6 +64,7 @@ All timestamps must include a timezone; windows require end > start. Context
 fields are marked `x-investigation-context: start/end` in the advertised schema.
 Clients may bind these fields from their application context, as TraceMind does,
 or supply them explicitly. Input validation always occurs on the server.
+Why: Timezone-aware ordered windows prevent ambiguous or inverted telemetry queries.
 
 `search_logs` prefers the event timestamp. Missing or zero event times use
 `observedTimestamp`, with provenance preserved in evidence attributes. A valid
@@ -71,18 +76,23 @@ merged into at most 100 observations, newest selected time first.
 spans with service, operation, duration and available parent IDs. This exposes
 slow dependencies without requiring an error. The result is bounded context,
 not a complete span tree; parent and child durations must not be summed.
+Why: Trace details contain overlapping and bounded spans, so summing them misstates
+request latency.
 
 Replies contain exactly one of:
 
 - `evidence`: observations with UUID, source, summary, observed_at, service,
   query and attributes; clients decide how to retain and cite them;
-- `metadata`: metric discovery results, not diagnostic evidence;
+- `metadata`: metric discovery or empty-trace service-catalogue hints, without
+  evidence IDs; these guide queries and do not establish incident facts;
 - `error`: safe category, retryable flag, status and optional Retry-After hint.
 
 Both structuredContent and readable text content are returned. Backend failures
 do not transfer exception text. The server does not retry calls or own agent
 budgets, diagnosis state, checkpoints or memory. Streamable HTTP uses JSON
 responses; it does not require an SSE response stream.
+Why: The telemetry service owns observations while client applications own retries,
+permissions and execution state.
 
 ## Validation
 

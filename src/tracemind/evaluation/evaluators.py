@@ -57,6 +57,7 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
         metric("elapsed_ms", result.elapsed_ms),
     ]
     if state is not None:
+        issues = trace_issues(state)
         retries = sum(
             e.kind == "recovery.retry_scheduled" for e in state.events
         )
@@ -85,8 +86,8 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
                 ),
                 metric(
                     "trace_integrity",
-                    not trace_issues(state),
-                    ",".join(trace_issues(state)),
+                    not issues,
+                    ",".join(issues),
                 ),
                 metric(
                     "tool_budget",

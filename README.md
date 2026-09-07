@@ -46,6 +46,8 @@ Other supported configurations:
 Never commit a populated `.env`. [.env.example](.env.example) lists settings
 and the local diagnostic budget profile. Restart API and worker after changes;
 existing queued runs retain their saved limits and permissions.
+Why: Keep credentials local and make configuration changes explicit without altering
+admitted work.
 
 ### 2. Start the Demo and telemetry service
 
@@ -69,6 +71,7 @@ to the independent [telemetry service](services/otel-telemetry-mcp/README.md).
 
 If online knowledge is enabled and `TRACEMIND_RAG_SERVICE_URL` is set, first
 start the independent retrieval process in its own terminal:
+Why: The configured HTTP path needs a ready owner for its models and stores.
 
 ```bash
 uv run --extra rag python scripts/run_rag_service.py
@@ -79,10 +82,13 @@ curl --fail http://127.0.0.1:8011/ready
 `TRACEMIND_AGENT_KNOWLEDGE_SNAPSHOT`. The process loads and warms the local
 models before accepting queries. It binds localhost, uses two inference threads,
 and retains its model/store lifetime independently of API and worker restarts.
+Why: Matching published snapshots prevents references from silently pointing to another
+corpus.
 Qdrant remains in `deploy/compose.rag.yaml`. See
 [service operation](docs/rag-online-integration.md#independent-query-service).
 
 In separate terminals with the same `.env`:
+Why: API admission and worker execution need consistent provider and policy settings.
 
 ```bash
 uv run uvicorn tracemind.api.app:app --reload
@@ -91,6 +97,10 @@ uv run uvicorn tracemind.api.app:app --reload
 ```bash
 uv run python scripts/run_worker.py
 ```
+
+When online knowledge is enabled, add `--extra rag` to both startup commands.
+The HTTP client also imports the pinned LightRAG keyword prompt, so API and worker
+still need the optional dependencies when using the independent service.
 
 `GET /health` works without a model key. Interactive API schemas are available
 at `http://127.0.0.1:8000/docs`. Queued runs require the worker to execute.
@@ -139,9 +149,11 @@ uv run --extra rag pytest --require-rag
 
 The base installation skips optional RAG modules. The full RAG acceptance command
 requires the extra and fails early if its dependencies are missing.
+Why: A passing base test run must not be mistaken for validation of optional retrieval.
 
 The replay suite needs no Docker or model credentials. Scripted replay measures
 workflow behavior; live diagnosis quality requires separate controlled cases.
+Why: Fixed answers test execution controls without measuring model judgment.
 Evaluation uses local Langfuse; deployment and dataset setup are described in
 [Evaluation](docs/evaluation.md). For a scored live payment-failure run:
 
@@ -155,6 +167,8 @@ Online completion verification is opt-in with `TRACEMIND_VERIFIER_ENABLED=true`.
 It reviews a complete candidate once, before acceptance; rejection returns
 inconclusive and review failure fails the run. It never automatically repairs
 the diagnosis. See [verification](docs/evaluation.md#online-completion-verification).
+Why: Keep review costs and failure outcomes explicit before enabling the saved
+completion gate.
 
 ## Documentation
 

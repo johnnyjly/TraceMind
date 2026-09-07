@@ -13,8 +13,6 @@ from otel_telemetry_mcp.telemetry.prometheus import PrometheusClient
 class TelemetryBackend(Protocol):
     """Supply observations or metadata without owning execution policy."""
 
-    transport: str
-
     async def query_metrics(
         self, expression: str, *, at: datetime,
     ) -> list[Evidence]:
@@ -54,7 +52,6 @@ class DirectTelemetryBackend:
     prometheus: PrometheusClient
     jaeger: JaegerClient
     opensearch: OpenSearchClient
-    transport: str = "direct"
 
     async def query_metrics(
         self, expression: str, *, at: datetime,

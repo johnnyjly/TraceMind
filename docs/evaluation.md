@@ -53,6 +53,8 @@ Diagnosis and Judge use separate instances/configuration even when their model
 name is identical. Agreement between the same model family is not independent
 ground truth; calibrate Judge scores against human-reviewed cases. An additional
 model is optional rather than required to run this system.
+Why: Agreement within one model family must not be treated as independent causal
+validation.
 
 Every experiment requires `--max-model-calls`. A shared callback admits calls
 before provider execution and covers investigator, fallback, retries, RAG
@@ -61,11 +63,14 @@ disabled. Calls admitted but failing before/at the provider still consume the
 cap. The cap is per CLI invocation; sum separate invocations when enforcing a
 campaign limit. Choose a cap explicitly for each authorized campaign. The verifier calibration
 shown below uses at most **8 total calls**.
+Why: An explicit campaign cap accounts for all admitted provider attempts across
+experiment variants.
 
 DeepSeek currently runs with the existing non-thinking configuration. Judge
 has a separate timeout (60 s), input byte limit (65,536) and output token limit
 (4,096). It makes one attempt per item. Oversized evidence fails evaluation;
 observations and counterevidence are never silently dropped to fit the Judge.
+Why: A review of selectively truncated observations could approve an unsupported answer.
 
 Self-hosting keeps Langfuse storage local. Calls to DeepSeek still send the
 selected prompts/evidence to DeepSeek. Synthetic smoke examples contain only
@@ -76,6 +81,7 @@ manufactured data; real incident exports require appropriate authorization.
 Use a JSON list of SDK experiment items, or a dataset already stored in local
 Langfuse. `expected_output` and item metadata never enter the investigator or
 retriever. Labels enter only the evaluators. Do not embed labels inside `input`.
+Why: Held-out answers must not leak into the agent or retriever being measured.
 
 An agent item:
 
@@ -129,6 +135,8 @@ outcome is a completed Judge that accepts the supported example and rejects the
 unsupported one. Overall experiment exit status should be 1 for this mixed set.
 An overall failure alone does not prove the Judge identified the bad answer;
 inspect item scores and claim rationales.
+Why: A mixed dataset can fail for infrastructure or formatting reasons without
+distinguishing supported answers.
 
 For repeatable comparisons in the native dataset experiment UI, create/import
 a versioned dataset in Langfuse and use:
@@ -144,6 +152,8 @@ metadata. SDK run-level summaries for local data have no dataset-run target;
 TraceMind publishes them on the first item trace with the `experiment.` prefix.
 Use hosted datasets for native dataset versioning/comparison, rather than
 expecting local files to be automatically uploaded as datasets.
+Why: Dataset versions are needed for native repeatable comparisons; local trace
+publication has different ownership.
 
 ## RAG retrieval
 
@@ -180,6 +190,8 @@ limit; stages are compared at the same document cutoff. An explicitly empty
 relevance map means no documents are relevant and yields `expected_empty`.
 Absent labels omit quality scores. Missing stages/labels cannot satisfy an
 explicit `--min-score` requirement.
+Why: Missing labels or stages are missing evidence of quality and cannot satisfy a
+required gate.
 
 RAG observations include query, snapshot/model revisions, document hashes,
 chunk provenance and stage rankings; extraction callbacks retain model usage.
@@ -219,6 +231,8 @@ and unlabeled datasets. `--min-score NAME=MIN` configures/overrides thresholds.
 A failed task/evaluator, missing required score/item or unavailable score/trace
 publication fails acceptance. Acceptance is limited to the dataset, evaluator version and
 thresholds; it is not a causal truth certificate.
+Why: Acceptance is meaningful only for the measured dataset, rubric and required score
+coverage.
 
 Judge claim rationales, supporting/conflicting evidence IDs and process event
 sequences, missing observations,
@@ -256,7 +270,11 @@ review instead of being used to judge the answer. Proposals to inspect/query are
 excluded from factual claims; explicit promised remediation effects still need
 support. Two generic contrast examples illustrate that distinction without
 using calibration item labels. Runtime and offline Judge share these rules.
+Why: Review must assess assertions actually made, preserving qualifications and
+excluding proposed checks.
 Completed reviews from another rubric version cannot be reused on resume.
+Why: A saved result from another rubric cannot establish compliance with the current
+review contract.
 
 | Review outcome | Runtime outcome |
 | --- | --- |
@@ -276,6 +294,8 @@ follow-ups, so worker configuration changes do not silently bypass a saved gate.
 A persisted completed review is reused after checking its subject fingerprint;
 an interrupted/ambiguous attempt fails closed instead of issuing another paid
 call. Full evidence is never truncated to fit the reviewer.
+Why: Recovery must not duplicate an ambiguous paid attempt or silently weaken the
+evidence reviewed.
 
 The review record lives in RunState/checkpoints. Langfuse records the review
 input/output and model usage when tracing is enabled; a Langfuse outage is not a
@@ -293,7 +313,7 @@ uv run python scripts/run_experiment.py --task verification \
 
 This task makes one reviewer attempt per item, with no investigator or extra
 Judge call. `expected_output` stays outside the model input. Scores include
-`review_completed`, `verdict`, `would_accept`, `expected_verdict`,
+`review_completed`, `support_verdict`, `would_accept`, `expected_verdict`,
 `expected_decision`, `false_acceptance` and `false_rejection`. A correct rejection
 passes the classification experiment. This differs from judging a set of
 answers, where an unsupported answer appropriately fails answer acceptance.
@@ -313,6 +333,8 @@ Frozen memory evaluation defaults to off and never reads the live memory DB.
 `--memory-snapshot FILE --compare-memory` executes independent off/on variants
 with a shared total call cap. Corpus hash and memory mode are retained in
 experiment metadata/output. The corpus must predate held-out incident windows.
+Why: Frozen pre-incident memory prevents future resolutions and live user data from
+leaking into evaluation.
 
 ```bash
 uv run pytest
@@ -391,6 +413,7 @@ longest successful spans, not a full span tree; corroborate timing with logs.
 Each switch starts from pristine flags, saves one previous configuration and
 recreates only flagd. Old telemetry remains: **wait at least two minutes for fresh
 traffic/export before the one-minute evaluation window** to exclude the old fault.
+Why: Old telemetry can otherwise make a new fault appear to have the previous cause.
 
 For catalog lock contention, the Demo periodically holds an ACCESS EXCLUSIVE
 lock on PostgreSQL's `catalog.products` for 30 seconds. Browse product pages to
