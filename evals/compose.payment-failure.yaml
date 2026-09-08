@@ -32,5 +32,46 @@ services:
     ports:
       - "16686:16686"
   opensearch:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    environment:
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
     ports:
       - "9200:9200"
+  grafana:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  prometheus:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  frontend-proxy:
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+  shipping:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+  quote:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+  currency:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+  valkey-cart:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
