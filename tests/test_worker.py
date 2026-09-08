@@ -1,5 +1,7 @@
 """Exercise the real LangGraph loop through the persistent local worker."""
 
+from proposal_fixtures import proposal_payload
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 import json
@@ -71,12 +73,12 @@ class ScriptedModel(BaseChatModel):
         else:
             evidence_id = json.loads(tool_messages[-1].content)[0]["id"]
             response = AIMessage(content="", tool_calls=[{
-                "name": "DiagnosisDraft",
-                "args": {
+                "name": "DiagnosisProposal",
+                "args": proposal_payload({
                     "status": "complete", "root_cause": "Payment failed",
                     "confidence": 0.8, "evidence_ids": [evidence_id],
                     "remediation": [],
-                },
+                }),
                 "id": "diagnosis-1",
             }])
         response.usage_metadata = {
@@ -247,7 +249,7 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
     assert completed.result is not None
     assert completed.result.diagnosis.evidence_ids == [halfway.evidence[0].id]
     if finalizing or model_budget == 2:
-        assert resumed_model.bindings == [["DiagnosisDraft"]]
+        assert resumed_model.bindings == [["DiagnosisProposal"]]
         phases = [e for e in completed.state.events
                   if e.kind == "policy.finalizing"]
         assert len(phases) == 1

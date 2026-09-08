@@ -57,7 +57,7 @@
       }
     },
     {
-      "name": "DiagnosisDraft",
+      "name": "DiagnosisProposal",
       "args": {
         "status": "complete",
         "root_cause": "product-catalog logs explicitly identify lock contention holding ACCESS EXCLUSIVE on catalog.products; verify affected queries and the blocking transaction before remediation.",

@@ -66,6 +66,7 @@ class RunHarness:
         """Start a run timer and optionally open an exclusive JSONL trace
         file.
         """
+        self.evidence = lambda: []
         self.state = state
         state.allowed_tools = resolve_tool_policy(
             state.allowed_tools, purpose=state.purpose,
@@ -270,8 +271,8 @@ class RunHarness:
 
     @property
     def verification_calls(self) -> int:
-        return int(self.state.verification_policy is not None
-                   and self.state.verification is None)
+        return 2 * int(self.state.verification_policy is not None
+                       and self.state.verification is None)
 
     @property
     def finalization_calls(self) -> int:

@@ -210,7 +210,8 @@ def test_query_planning_accepts_responses_api_text_blocks():
     result = asyncio.run(tools["search_knowledge"].ainvoke({
         "query": "翻译 RPC 超时", "rewrite": True}))
     assert retrieval.queries == ["RPC timeout"]
-    assert result[0]["knowledge_ref"] == state.knowledge[0].id
+    assert state.reference_map[result[0]["knowledge_ref"]] == (
+        state.knowledge[0].id)
 
 
 def run_state(**kwargs):
@@ -262,6 +263,46 @@ def tools_for(state, search=None, completion=None):
     return harness, {t.name: t for t in tools}
 
 
+def test_disabled_knowledge_is_absent_from_the_real_model_tool_schema():
+    from tracemind.agent.factory import build_service
+    from tracemind.config import Settings
+
+    model = ScriptedModel(respond=lambda messages, calls: answer(messages))
+    settings = Settings(_env_file=None, agent_allowed_tools=GRANTS,
+                        agent_trace_directory=None)
+    selected = build_service(
+        settings, LangChainAgentRunner(model), NoRemoteTools())
+    result = asyncio.run(selected.diagnose_with_evidence(
+        INCIDENT, start=START, end=END))
+    assert model.bindings
+    assert all(not set(GRANTS).intersection(names) for names in model.bindings)
+    assert result.state.allowed_tools == GRANTS
+    assert result.tool_calls == {}
+
+
+def test_missing_search_backend_is_not_exposed_as_an_available_tool():
+    _, tools = tools_for(run_state())
+    assert set(tools) == {"read_knowledge"}
+
+
+def test_disabled_retrieval_keeps_saved_knowledge_readable_without_mcp():
+    reference = KnowledgeReference(snapshot=POLICY.snapshot, hit=parent_hit())
+    state = run_state(knowledge_policy=None, knowledge=[reference])
+    harness, local = tools_for(state)
+
+    async def exercise():
+        tools = await create_mcp_tools(
+            NoRemoteTools(), start=START, end=END,
+            collector=EvidenceCollector(), harness=harness,
+            local_tools=list(local.values()))
+        assert [t.name for t in tools] == ["read_knowledge"]
+        page = await tools[0].ainvoke({"reference_id": reference.id})
+        assert page[0]["content"] == reference.hit.parent.text[:2048]
+
+    asyncio.run(exercise())
+    assert state.model_calls == 0 and state.backend_attempts == 0
+
+
 def answer(messages, *, complete=False, references=None):
     """Construct a proposal from references the model actually received."""
     refs = references
@@ -272,7 +313,7 @@ def answer(messages, *, complete=False, references=None):
                 payload = json.loads(message.content)
                 refs.extend(item["knowledge_ref"] for item in payload
                             if "knowledge_ref" in item)
-    return tool_call("DiagnosisDraft", {
+    return tool_call("DiagnosisProposal", {
         "status": "complete" if complete else "inconclusive",
         "root_cause": "Documentation suggests a check; no fault is confirmed.",
         "confidence": .1, "knowledge_refs": list(dict.fromkeys(refs)),
@@ -719,7 +760,7 @@ def test_knowledge_and_observations_can_be_cited_together_in_the_graph():
                         observations.append(item["id"])
                     if "knowledge_ref" in item:
                         refs.append(item["knowledge_ref"])
-        return tool_call("DiagnosisDraft", {
+        return tool_call("DiagnosisProposal", {
             "status": "complete", "confidence": .8,
             "root_cause": (
                 "Observed payment errors; documentation informs checks"),

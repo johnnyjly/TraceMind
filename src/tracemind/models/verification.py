@@ -10,27 +10,22 @@ from tracemind.models.evidence import Evidence
 from tracemind.models.incident import Incident
 
 
+class ReviewItem(BaseModel):
+    """Application-numbered text; model classifications are not trusted."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    section: Literal["finding", "hypothesis", "limitation", "proposed_check"]
+    text: str = Field(min_length=1)
+    evidence_ids: list[UUID] = Field(default_factory=list)
+    knowledge_refs: list[str] = Field(default_factory=list)
+
+
 class Claim(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    text: str = Field(
-        min_length=1,
-        description=(
-            "A verbatim contiguous excerpt from diagnosis.root_cause or "
-            "one diagnosis.remediation string, retaining qualifications "
-            "and negation. Never invent or paraphrase an assertion."
-        ),
-    )
-    kind: Literal["diagnostic", "uncertainty", "process"] = Field(
-        default="diagnostic",
-        description=(
-            "diagnostic: incident facts/causal or efficacy claims, "
-            "supported by telemetry IDs. "
-            "process: an assertion of what a query/tool already returned, "
-            "never a proposed check or imperative, supported by execution "
-            "event sequences. "
-            "uncertainty: explicit original abstention or evidential limits."
-        ),
-    )
+    item_id: str = ""
+    text: str = Field(min_length=1)
+    kind: Literal["diagnostic", "uncertainty", "process", "proposal"]
     verdict: Literal["supported", "insufficient", "contradicted"]
     supporting_ids: list[UUID] = Field(
         default_factory=list,
@@ -68,15 +63,18 @@ class Claim(BaseModel):
 class DiagnosisReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     claims: list[Claim] = Field(
-        min_length=1, max_length=16,
+        min_length=1, max_length=32,
         description=(
-            "Original assertions only. Exclude proposed checks, requests "
-            "and imperatives entirely, including under kind=process. "
-            "Include promised remediation effects as diagnostic assertions."
+            "Exactly one assessment per application-numbered item, including "
+            "hypotheses, limitations and proposed checks."
         ),
     )
     uncertainty_appropriate: bool
-    root_cause_correctness: bool | None
+    root_cause_correctness: bool | None = Field(description=(
+        "Null unless an explicit held-out reference_answer or "
+        "root_cause_service is supplied in reference. Observations and "
+        "the original diagnosis are not held-out references."
+    ))
     process_quality: float | None = Field(default=None, ge=0, le=1)
     rationale: str = Field(min_length=1)
 
@@ -98,6 +96,7 @@ class ReviewSubject(BaseModel):
     incident: Incident | None = None
     diagnosis: Diagnosis
     evidence: list[Evidence]
+    items: list[ReviewItem] = Field(default_factory=list)
     start: AwareDatetime
     end: AwareDatetime
     knowledge: list[dict] = Field(default_factory=list)
@@ -108,7 +107,7 @@ class VerificationPolicy(BaseModel):
     provider: Literal["google", "openai", "deepseek"] = "deepseek"
     model: str = Field(default="deepseek-v4-pro", min_length=1)
     timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
-    input_bytes: int = Field(default=65536, ge=1)
+    input_bytes: int = Field(default=131072, ge=1)
     output_tokens: int = Field(default=4096, ge=1)
 
 
@@ -116,6 +115,9 @@ class VerificationRecord(BaseModel):
     """A saved candidate plus a single review attempt's durable outcome."""
 
     candidate: Diagnosis
+    items: list[ReviewItem] = Field(default_factory=list)
+    attempts: int = 0
+    validation_errors: list[str] = Field(default_factory=list)
     input_sha256: str
     rubric_version: str
     status: Literal["running", "completed", "failed"] = "running"

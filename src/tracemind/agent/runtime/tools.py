@@ -12,6 +12,9 @@ from mcp.types import Tool
 from pydantic import Field
 
 from tracemind.agent.workflow.context import json_text
+from tracemind.agent.workflow.references import (
+    model_references, original_reference, register_references,
+)
 from tracemind.agent.runtime.harness import RunHarness
 from tracemind.mcp.client import ToolClient
 from tracemind.mcp.contracts import TelemetryReply
@@ -23,10 +26,10 @@ from tracemind.models.run import StopReason, ToolName
 from tracemind.telemetry.errors import RemoteTelemetryError
 
 
-LOCAL_TOOL_NAMES = frozenset({"read_evidence"})
-RESERVED_TOOL_NAMES = LOCAL_TOOL_NAMES | {
-    "DiagnosisDraft", "search_knowledge", "read_knowledge",
-}
+LOCAL_TOOL_NAMES = frozenset({
+    "read_evidence", "search_knowledge", "read_knowledge",
+})
+RESERVED_TOOL_NAMES = LOCAL_TOOL_NAMES | {"DiagnosisProposal"}
 EVIDENCE_PAGE_SIZE = 20
 MAX_EVIDENCE_PREVIEWS = 100
 
@@ -172,6 +175,8 @@ def _query_executor(
     collector: EvidenceCollector, harness: RunHarness,
 ):
     """Reuse evidence retention and preview policy for every transport."""
+    harness.evidence = lambda: collector.evidence
+
     async def execute(
         name: ToolName,
         arguments: dict[str, object],
@@ -213,6 +218,7 @@ def _query_executor(
                 harness.stop(StopReason.CONTEXT_LIMIT)
             finally:
                 harness.state.evidence_ids = [e.id for e in collector.evidence]
+                register_references(harness.state)
             result = previews[:max_results]
             omitted = len(previews) - len(result)
             if omitted:
@@ -261,6 +267,7 @@ def _query_executor(
                     "An empty result does not establish service health."
                 ),
             })
+        result = model_references(result, harness.state)
         return result, (context_index(result) if evidence_result else {})
 
     return execute
@@ -280,7 +287,7 @@ def create_local_tools(
     ) -> tuple[list[dict], dict]:
         """List stored previews, or page evidence JSON by ID.
 
-        Prefer a known evidence_id for missing details. Otherwise filter the
+        Pass a known E handle as evidence_id for missing details. Filter the
         catalogue by service and/or source. Follow next_offset only when more
         entries are needed to answer the question.
 
@@ -290,14 +297,16 @@ def create_local_tools(
         """
         async def read() -> list[dict]:
             """Read a page from this run's evidence collector."""
-            return collector.read(evidence_id, offset,
-                                  service=service, source=source)
+            return collector.read(
+                original_reference(evidence_id, harness.state),
+                offset, service=service, source=source)
 
         result = await harness.tool_call(
             "read_evidence",
             {"evidence_id": evidence_id, "offset": offset,
              "service": service, "source": source}, read, remote=False,
         )
+        result = model_references(result, harness.state)
         artifact = context_index(result)
         artifact["detail_page"] = evidence_id is not None
         return result, artifact
@@ -320,7 +329,9 @@ async def create_mcp_tools(
     expand the local allowlist or replace a local tool.
     """
     local = create_local_tools(collector, harness, local_tools)
-    allowed = set(harness.state.allowed_tools) - {t.name for t in local}
+    # Disabled local capabilities are never remote discovery requirements.
+    allowed = (set(harness.state.allowed_tools) - LOCAL_TOOL_NAMES
+               - {t.name for t in local})
     if not allowed or harness.finalization_reason is not None:
         return local
     started = monotonic()
@@ -352,7 +363,7 @@ def bind_mcp_tools(
     """Bind discovered or recorded definitions using identical run policy."""
     local = create_local_tools(collector, harness, local_tools)
     local_names = {t.name for t in local}
-    allowed = set(harness.state.allowed_tools) - local_names
+    allowed = set(harness.state.allowed_tools) - LOCAL_TOOL_NAMES - local_names
     names = [t.name for t in definitions]
     if (len(names) != len(set(names))
             or (RESERVED_TOOL_NAMES | local_names).intersection(names)):

@@ -276,7 +276,8 @@ def test_http_retry_counts_attempts_and_cannot_override_window():
                     client, start=START, end=END, collector=store, harness=h)}
                 result = await tools["query_metrics"].ainvoke(
                     {"expression": "retry"})
-                assert result[0]["id"] == str(UUID(int=1))
+                assert h.state.reference_map[result[0]["id"]] == (
+                    str(UUID(int=1)))
                 assert h.state.backend_attempts == 2
                 assert h.state.tool_calls == {"query_metrics": 2}
                 with pytest.raises(ToolUnavailable):

@@ -25,6 +25,7 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 from tracemind.agent.workflow.context import json_text, select_context
+from tracemind.agent.workflow.validation import resolve_proposal
 from tracemind.agent.errors import DiagnosisError, DiagnosisValidationError
 from tracemind.agent.runtime.harness import InvestigationClosed, RunHarness
 from tracemind.agent.runtime.recovery import ModelCallFailed, ToolUnavailable
@@ -116,9 +117,11 @@ class HarnessMiddleware(AgentMiddleware):
             if response.structured_response is not None:
                 if self.harness.validate_draft is not None:
                     try:
-                        self.harness.validate_draft(
-                            response.structured_response
+                        draft = resolve_proposal(
+                            response.structured_response, state,
+                            self.harness.evidence(),
                         )
+                        self.harness.validate_draft(draft)
                     except DiagnosisValidationError as exc:
                         malformed = True
                         validation = exc.details()
@@ -131,7 +134,7 @@ class HarnessMiddleware(AgentMiddleware):
             elif request.response_format is not None and any(
                 isinstance(item, AIMessage) and (
                     not item.tool_calls or item.invalid_tool_calls or any(
-                        call["name"] == "DiagnosisDraft"
+                        call["name"] == "DiagnosisProposal"
                         for call in item.tool_calls
                     )
                 ) for item in response.result
@@ -145,7 +148,7 @@ class HarnessMiddleware(AgentMiddleware):
                 response.structured_response is None or any(
                     isinstance(item, AIMessage) and (
                         item.invalid_tool_calls or any(
-                            call["name"] != "DiagnosisDraft"
+                            call["name"] != "DiagnosisProposal"
                             for call in item.tool_calls
                         )
                     ) for item in response.result
@@ -156,7 +159,7 @@ class HarnessMiddleware(AgentMiddleware):
                     "code": "finalization_output",
                     "message": (
                         "Investigation tools are disabled; return only one "
-                        "valid DiagnosisDraft using existing evidence."
+                        "valid DiagnosisProposal using existing evidence."
                     ),
                 }
             if malformed:
@@ -170,7 +173,7 @@ class HarnessMiddleware(AgentMiddleware):
                 )
                 if not finalizing and any(
                     isinstance(item, AIMessage) and any(
-                        call["name"] != "DiagnosisDraft"
+                        call["name"] != "DiagnosisProposal"
                         for call in item.tool_calls
                     ) for item in response.result
                 ):
@@ -196,7 +199,7 @@ class HarnessMiddleware(AgentMiddleware):
         if isinstance(error, MultipleStructuredOutputsError):
             return {
                 "code": "multiple_diagnoses",
-                "message": "Submit exactly one DiagnosisDraft per response.",
+                "message": "Submit exactly one proposal per response.",
             }
         source = getattr(error, "source", error)
         seen = set()
@@ -207,7 +210,7 @@ class HarnessMiddleware(AgentMiddleware):
                                        include_context=False)
                 return {
                     "code": "schema_validation",
-                    "message": "Correct the listed DiagnosisDraft fields.",
+                    "message": "Correct the listed DiagnosisProposal fields.",
                     "fields": [
                         ".".join(str(p) for p in e["loc"])[:160]
                         + ": " + e["type"] for e in errors[:20]
@@ -217,12 +220,12 @@ class HarnessMiddleware(AgentMiddleware):
             if isinstance(source, json.JSONDecodeError):
                 return {
                     "code": "invalid_json",
-                    "message": "Return valid JSON matching DiagnosisDraft.",
+                    "message": "Return valid JSON matching DiagnosisProposal.",
                 }
             source = source.__cause__ or source.__context__
         return {
             "code": "schema_validation",
-            "message": "Return one valid DiagnosisDraft matching its schema.",
+            "message": "Return one valid proposal matching its schema.",
         }
 
     @staticmethod
@@ -234,11 +237,11 @@ class HarnessMiddleware(AgentMiddleware):
         """
         calls = [call for item in response.result
                  if isinstance(item, AIMessage) for call in item.tool_calls
-                 if call["name"] == "DiagnosisDraft"]
+                 if call["name"] == "DiagnosisProposal"]
         if len(calls) > 1:
             return {
                 "code": "multiple_diagnoses",
-                "message": "Submit exactly one DiagnosisDraft per response.",
+                "message": "Submit exactly one proposal per response.",
             }
         if any(item.invalid_tool_calls for item in response.result
                if isinstance(item, AIMessage)):
@@ -254,7 +257,7 @@ class HarnessMiddleware(AgentMiddleware):
                 return HarnessMiddleware._schema_failure(exc)
         return {
             "code": "missing_structured_output",
-            "message": "Return a single valid DiagnosisDraft.",
+            "message": "Return a single valid DiagnosisProposal.",
         }
 
     @staticmethod
@@ -268,7 +271,7 @@ class HarnessMiddleware(AgentMiddleware):
                 call.get("args")
                 for item in response.result if isinstance(item, AIMessage)
                 for call in [*item.tool_calls, *item.invalid_tool_calls]
-                if call.get("name") == "DiagnosisDraft"
+                if call.get("name") == "DiagnosisProposal"
             ]
             if not candidate:
                 candidate = []
@@ -302,7 +305,7 @@ class HarnessMiddleware(AgentMiddleware):
         """Keep message pairing and send bounded schema/citation feedback."""
         feedback = (
             "Diagnosis rejected by schema or evidence validation. Return one "
-            "valid DiagnosisDraft. Cite only unique evidence IDs available "
+            "valid DiagnosisProposal. Cite unique E handles available "
             "in this run within the investigation window, including retained "
             "observations. Include a "
             "nonblank explanation, and use inconclusive if unsupported."
@@ -318,15 +321,16 @@ class HarnessMiddleware(AgentMiddleware):
             )
         messages = []
         for item in response.result:
-            if isinstance(item, ToolMessage) and item.name == "DiagnosisDraft":
+            if isinstance(item, ToolMessage) and (
+                    item.name == "DiagnosisProposal"):
                 continue
             if not isinstance(item, AIMessage):
                 messages.append(item)
                 continue
             calls = [c for c in item.tool_calls
-                     if c["name"] == "DiagnosisDraft"]
+                     if c["name"] == "DiagnosisProposal"]
             pending = [c for c in item.tool_calls
-                       if c["name"] != "DiagnosisDraft"]
+                       if c["name"] != "DiagnosisProposal"]
             if finalizing:
                 calls.extend(pending)
                 pending = []
@@ -379,23 +383,24 @@ class HarnessMiddleware(AgentMiddleware):
                 "or return inconclusive with the observed failure, its "
                 "citations and the specific missing observation. Do not "
                 "discard established findings because the deeper cause "
-                "is unknown. The only permitted output is DiagnosisDraft."
+                "is unknown. Return only DiagnosisProposal."
             )
             # The framework still binds the structured diagnosis schema;
-            # DiagnosisDraft is an output mechanism, not an investigation tool.
+            # DiagnosisProposal only submits the final result.
             request = request.override(tools=[], tool_choice=None)
             # End the investigation exchange explicitly; a system-only budget
             # update can leave the model continuing the last tool result.
             request = request.override(messages=[
                 *request.messages,
                 HumanMessage(content=(
-                    "Investigation is now closed. Submit one DiagnosisDraft "
+                    "Investigation is now closed. Submit DiagnosisProposal "
                     "now, using the evidence already available. No further "
                     "tool queries are permitted. Keep conclusions scoped to "
                     "the observed operations and distinguish confirmed "
                     "failures from unverified underlying causes. In "
-                    "root_cause, explain the supporting evidence AND any "
-                    "relevant contrary evidence (including successful "
+                    "findings and limitations, discuss supporting and "
+                    "contrary "
+                    "evidence (including successful "
                     "operations), and state what remains unknown. Do not "
                     "merge events from separate traces into one transaction "
                     "without a shared business identifier."

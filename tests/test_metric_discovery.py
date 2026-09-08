@@ -115,7 +115,7 @@ def test_real_loop_can_discover_query_and_return_grounded_uncertainty(
         assert empty[0]["kind"] == "query_feedback"
         assert empty[0]["new_evidence"] == 0
         assert "id" not in empty[0]
-        return tool_call("DiagnosisDraft", {
+        return tool_call("DiagnosisProposal", {
             "status": "inconclusive", "confidence": 0,
             "root_cause": "No matching metric samples; cause remains unknown",
             "evidence_ids": [], "remediation": ["Check metric availability"],
@@ -153,8 +153,8 @@ def test_metadata_reads_trigger_existing_closure_limits(
     def respond(messages, calls):
         if "Investigation is closed" not in messages[0].text:
             return tool_call("discover_metrics", {"limit": calls})
-        assert model.bindings[-1] == ["DiagnosisDraft"]
-        return tool_call("DiagnosisDraft", {
+        assert model.bindings[-1] == ["DiagnosisProposal"]
+        return tool_call("DiagnosisProposal", {
             "status": "inconclusive", "confidence": 0,
             "root_cause": "Metadata alone cannot establish a root cause",
         })
@@ -186,7 +186,7 @@ def test_metadata_cannot_be_used_as_citation_in_real_loop(tmp_path):
     def respond(messages, calls):
         if calls == 1:
             return tool_call("discover_metrics", {"service": "payment"})
-        return tool_call("DiagnosisDraft", {
+        return tool_call("DiagnosisProposal", {
             "status": "complete", "confidence": .9,
             "root_cause": "Metadata proves a failure",
             "evidence_ids": [str(uuid4())],
@@ -256,7 +256,7 @@ def test_omitted_evidence_guidance_respects_local_tool_permission(can_read):
         if can_read:
             assert 'read_evidence' in guidance
             page = await tools['read_evidence'].ainvoke({'offset': 50})
-            assert page[0]['id'] == str(records[-1].id)
+            assert state.reference_map[page[0]['id']] == str(records[-1].id)
         else:
             assert 'read_evidence' not in tools
             assert 'read_evidence' not in guidance

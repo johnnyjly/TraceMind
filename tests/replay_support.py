@@ -11,6 +11,8 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from mcp.types import CallToolResult, Tool
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
+from proposal_fixtures import proposal_payload
+
 from tracemind.agent.memory.lookup import evaluation_memory
 from tracemind.agent.runtime.runner import LangChainAgentRunner
 from tracemind.agent.service import DiagnosisService
@@ -149,7 +151,7 @@ class ScriptedReplayModel(BaseChatModel):
             raise AssertionError("script exhausted")
         action = dict(self.script[self.position])
         self.position += 1
-        if action["name"] == "DiagnosisDraft":
+        if action["name"] == "DiagnosisProposal":
             arguments = dict(action["args"])
             indices = arguments.pop("cite_indices", [])
             observed = []
@@ -165,7 +167,7 @@ class ScriptedReplayModel(BaseChatModel):
                                 if item["id"] not in observed:
                                     observed.append(item["id"])
             arguments["evidence_ids"] = [observed[i] for i in indices]
-            action["args"] = arguments
+            action["args"] = proposal_payload(arguments)
         response = AIMessage(content="", tool_calls=[{
             **action, "id": f"replay-{self.position}",
         }])

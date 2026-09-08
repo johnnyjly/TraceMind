@@ -64,7 +64,7 @@
       }
     },
     {
-      "name": "DiagnosisDraft",
+      "name": "DiagnosisProposal",
       "args": {
         "status": "complete",
         "root_cause": "cart EmptyCart fails because it cannot connect to Redis-compatible storage. The precise address or server-side cause remains unverified.",

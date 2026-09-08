@@ -1,3 +1,4 @@
+from proposal_fixtures import proposal_payload
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -80,6 +81,15 @@ class ScriptedModel(BaseChatModel):
         response = self.respond(messages, self.calls)
         if inspect.isawaitable(response):
             response = await response
+        if response.content and isinstance(response.content, str):
+            try:
+                payload = json.loads(response.content)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(payload, dict) and "root_cause" in payload:
+                    response = response.model_copy(update={
+                        "content": json.dumps(proposal_payload(payload))})
         return ChatResult(generations=[ChatGeneration(message=response)])
 
 
@@ -88,7 +98,9 @@ def tool_call(name="query_metrics", arguments=None) -> AIMessage:
         content="",
         tool_calls=[{
             "name": name,
-            "args": arguments or {"expression": "up"},
+            "args": (proposal_payload(arguments or {})
+                     if name == "DiagnosisProposal" else
+                     arguments or {"expression": "up"}),
             "id": str(uuid4()),
         }],
         usage_metadata={
@@ -100,14 +112,14 @@ def tool_call(name="query_metrics", arguments=None) -> AIMessage:
 def diagnosis(messages, *, override=None) -> AIMessage:
     observation = next(message for message in reversed(messages)
                        if isinstance(message, ToolMessage)
-                       and message.name != "DiagnosisDraft")
+                       and message.name != "DiagnosisProposal")
     evidence_id = json.loads(observation.content)[0]["id"]
     fields = {
         "status": "complete", "root_cause": "Payment Charge failed",
         "confidence": 0.8, "evidence_ids": [evidence_id], "remediation": [],
     }
     fields.update(override or {})
-    return tool_call("DiagnosisDraft", fields)
+    return tool_call("DiagnosisProposal", fields)
 
 
 def normal_response(messages, calls):
@@ -225,7 +237,7 @@ def test_loop_limits_are_enforced_before_execution(
     assert phases == ([finalizing.value] if finalizing else [])
     if finalizing:
         # A model ignoring closed tools gets only the bounded repair allowance.
-        assert model.bindings[-1] == ["DiagnosisDraft"]
+        assert model.bindings[-1] == ["DiagnosisProposal"]
         assert run.state.diagnosis_repairs == limits.diagnosis_repairs
 
 
@@ -292,7 +304,7 @@ def test_parallel_budget_preserves_started_sibling(tmp_path, monkeypatch):
             results = [json.loads(m.content) for m in messages
                        if isinstance(m, ToolMessage)]
             item = next(r[0] for r in results if isinstance(r, list))
-            return tool_call("DiagnosisDraft", {
+            return tool_call("DiagnosisProposal", {
                 "status": "complete", "root_cause": "Payment Charge failed",
                 "confidence": .8, "evidence_ids": [item["id"]],
             })
@@ -451,7 +463,7 @@ def test_old_only_tool_result_is_metadata_not_citable_evidence(tmp_path):
         records = json.loads(messages[-1].content)
         assert all("id" not in r for r in records)
         assert records[0]["excluded_outside_window"] == 1
-        return tool_call("DiagnosisDraft", {
+        return tool_call("DiagnosisProposal", {
             "status": "inconclusive", "root_cause": "No current observations",
             "confidence": 0, "evidence_ids": [],
         })
@@ -550,7 +562,8 @@ def test_concurrent_runs_do_not_share_evidence_or_budgets(tmp_path):
 
 def test_framework_schema_repairs_cannot_bypass_model_budget(tmp_path):
     model = ScriptedModel(respond=lambda messages, calls:
-                          tool_call("DiagnosisDraft", {"status": "invalid"}))
+                          tool_call("DiagnosisProposal",
+                                    {"status": "invalid"}))
     run = run_service(make_service(
         model, Telemetry(), tmp_path,
         limits=RunLimits(model_calls=2, diagnosis_repairs=2),
@@ -574,7 +587,7 @@ def test_invalid_tool_arguments_are_traced_and_bounded(tmp_path):
         event.data["category"] == "invalid_request"
         for event in run.state.events
     ) == 1  # The final call is output-only; its tool request is rejected.
-    assert model.bindings[-1] == ["DiagnosisDraft"]
+    assert model.bindings[-1] == ["DiagnosisProposal"]
 
 
 def test_recursion_limit_has_explicit_terminal_result(tmp_path):
@@ -746,9 +759,9 @@ def test_large_results_compress_and_omitted_counterevidence_is_retrievable(
             assert content[0]["truncated"] is True
             return tool_call("read_evidence", {"offset": 40})
         if calls == 3:
-            assert any(x.get("id") == str(counterevidence.id) for x in content)
+            assert any(x.get("id") == "E60" for x in content)
             return tool_call("read_evidence", {
-                "evidence_id": str(counterevidence.id), "offset": 0,
+                "evidence_id": "E60", "offset": 0,
             })
         assert "SUCCESS" in content[0]["content"]
         return diagnosis(messages)
@@ -795,7 +808,7 @@ def test_accumulating_logs_continue_after_bounded_index_compression(tmp_path):
                        for item in json.loads(m.content))
             return tool_call("read_evidence", {"offset": 280})
         if calls == 5:
-            assert str(records[-1].id) in {p.get("id") for p in content}
+            assert f"E{len(records)}" in {p.get("id") for p in content}
             return tool_call("read_evidence", {
                 "evidence_id": str(records[-1].id), "offset": 0,
             })
@@ -879,13 +892,13 @@ def test_detail_reads_consume_shared_tool_budget(tmp_path):
 @pytest.mark.parametrize("budget", [1, 2, 3, 5])
 def test_model_budget_reserves_output_and_repair(tmp_path, budget):
     def respond(messages, calls):
-        if model.bindings[-1] != ["DiagnosisDraft"]:
+        if model.bindings[-1] != ["DiagnosisProposal"]:
             return tool_call(arguments={"expression": f"metric_{calls}"})
         if calls < budget:
             # A provider can still hallucinate a tool that was not bound.
             return tool_call("search_logs", {"service": "payment"})
         if budget == 1:
-            return tool_call("DiagnosisDraft", {
+            return tool_call("DiagnosisProposal", {
                 "status": "inconclusive", "root_cause": "No observations",
                 "confidence": 0, "evidence_ids": [],
             })
@@ -893,7 +906,7 @@ def test_model_budget_reserves_output_and_repair(tmp_path, budget):
 
     # Cite the last actual observation, excluding rejected tool exchanges.
     def final_response(messages, calls):
-        if (model.bindings[-1] == ["DiagnosisDraft"] and
+        if (model.bindings[-1] == ["DiagnosisProposal"] and
                 calls == budget and budget > 1):
             usable = [m for m in messages if not isinstance(m, ToolMessage)
                       or m.name == "query_metrics"]
@@ -912,7 +925,7 @@ def test_model_budget_reserves_output_and_repair(tmp_path, budget):
         else DiagnosisStatus.COMPLETE
     )
     assert "search_logs" not in run.tool_calls
-    assert model.bindings[-1] == ["DiagnosisDraft"]
+    assert model.bindings[-1] == ["DiagnosisProposal"]
     assert model.binding_options[-1]["tool_choice"] == "any"
     assert run.state.diagnosis_repairs == (1 if budget >= 3 else 0)
     assert run.tool_call_count == max(0, budget - (2 if budget >= 3 else 1))
@@ -931,7 +944,7 @@ def test_model_retry_rebinds_final_attempt_without_investigation_tools(
         if calls == 2:
             assert "query_metrics" in model.bindings[-1]
             raise http_failure(503)
-        assert model.bindings[-1] == ["DiagnosisDraft"]
+        assert model.bindings[-1] == ["DiagnosisProposal"]
         assert "Investigation is closed (model_budget)" in messages[0].text
         return diagnosis(messages)
 

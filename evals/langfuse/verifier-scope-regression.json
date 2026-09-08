@@ -1,0 +1,598 @@
+[
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "All three sampled requests (alpha, beta, gamma) completed inventory Reserve without error.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065",
+          "00000000-0000-0000-0000-000000000066",
+          "00000000-0000-0000-0000-000000000067"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000066",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request beta",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "beta",
+            "span_id": "0000000000000066",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000067",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Request gamma: inventory and tax services, 20 spans",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "gamma",
+            "span_count": 20,
+            "error_span_count": 0,
+            "services": [
+              "inventory",
+              "tax"
+            ],
+            "summary_scope": "spans_started_in_window"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "all_sampled_missing_member",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "Inventory Reserve succeeded in the two inspected requests alpha and beta; its outcome in gamma remains unverified.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065",
+          "00000000-0000-0000-0000-000000000066",
+          "00000000-0000-0000-0000-000000000067"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000066",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request beta",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "beta",
+            "span_id": "0000000000000066",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000067",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Request gamma: inventory and tax services, 20 spans",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "gamma",
+            "span_count": 20,
+            "error_span_count": 0,
+            "services": [
+              "inventory",
+              "tax"
+            ],
+            "summary_scope": "spans_started_in_window"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "inspected_subset_supported",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "All three sampled requests (alpha, beta, gamma) completed inventory Reserve without error.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065",
+          "00000000-0000-0000-0000-000000000066",
+          "00000000-0000-0000-0000-000000000067",
+          "00000000-0000-0000-0000-000000000068"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000066",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request beta",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "beta",
+            "span_id": "0000000000000066",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000067",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Request gamma: inventory and tax services, 20 spans",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "gamma",
+            "span_count": 20,
+            "error_span_count": 0,
+            "services": [
+              "inventory",
+              "tax"
+            ],
+            "summary_scope": "spans_started_in_window"
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000068",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request gamma",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "gamma",
+            "span_id": "0000000000000068",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "all_members_covered_supported",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "Three requests were sampled: alpha, beta and gamma. Within each request, inventory Reserve completed without error.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065",
+          "00000000-0000-0000-0000-000000000066",
+          "00000000-0000-0000-0000-000000000067"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000066",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request beta",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "beta",
+            "span_id": "0000000000000066",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000067",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Request gamma: inventory and tax services, 20 spans",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "gamma",
+            "span_count": 20,
+            "error_span_count": 0,
+            "services": [
+              "inventory",
+              "tax"
+            ],
+            "summary_scope": "spans_started_in_window"
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "each_inherits_preceding_population",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "Both inspected requests alpha and beta completed inventory Reserve and tax Compute without error.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065",
+          "00000000-0000-0000-0000-000000000066",
+          "00000000-0000-0000-0000-000000000069"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000066",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request beta",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "beta",
+            "span_id": "0000000000000066",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000069",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Compute succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000069",
+            "operation": "Compute",
+            "is_error": false
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "all_operations_missing_one",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "All three sampled requests (alpha, beta, gamma) completed inventory Reserve without error.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065",
+          "00000000-0000-0000-0000-000000000066",
+          "00000000-0000-0000-0000-00000000006a"
+        ],
+        "knowledge_refs": [],
+        "remediation": []
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000066",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request beta",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "beta",
+            "span_id": "0000000000000066",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        },
+        {
+          "id": "00000000-0000-0000-0000-00000000006a",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve failed in request gamma",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "gamma",
+            "span_id": "000000000000006a",
+            "operation": "Reserve",
+            "is_error": true
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "contradicted"
+    },
+    "metadata": {
+      "case_id": "one_member_contradicts_universal",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "Inventory Reserve succeeded in alpha. Next, inspect beta and compare its configuration with alpha.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Check configuration and confirm whether a default credential was used.",
+          "Investigate the deployment history before deciding on a rollback."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "supported"
+    },
+    "metadata": {
+      "case_id": "proposed_checks_in_root_and_remediation",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  },
+  {
+    "input": {
+      "incident": {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "title": "Checkout failures",
+        "description": "Investigate checkout HTTP 500 responses",
+        "affected_services": [
+          "checkout"
+        ]
+      },
+      "diagnosis": {
+        "incident_id": "00000000-0000-0000-0000-000000000010",
+        "status": "inconclusive",
+        "root_cause": "Inventory Reserve succeeded in alpha.",
+        "confidence": 0.4,
+        "evidence_ids": [
+          "00000000-0000-0000-0000-000000000065"
+        ],
+        "knowledge_refs": [],
+        "remediation": [
+          "Configuration was inspected and the default credential was confirmed.",
+          "Replacing the credential will restore every request."
+        ]
+      },
+      "start": "2024-09-01T00:00:00Z",
+      "end": "2024-09-01T00:10:00Z",
+      "evidence": [
+        {
+          "id": "00000000-0000-0000-0000-000000000065",
+          "source": "trace",
+          "service": "inventory",
+          "summary": "Reserve succeeded in request alpha",
+          "observed_at": "2024-09-01T00:05:00Z",
+          "attributes": {
+            "trace_id": "alpha",
+            "span_id": "0000000000000065",
+            "operation": "Reserve",
+            "is_error": false
+          }
+        }
+      ],
+      "knowledge": []
+    },
+    "expected_output": {
+      "verdict": "insufficient"
+    },
+    "metadata": {
+      "case_id": "executed_check_and_promise_are_assertions",
+      "category": "scope_and_speech_act",
+      "data_origin": "manufactured"
+    }
+  }
+]

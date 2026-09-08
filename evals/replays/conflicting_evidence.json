@@ -54,7 +54,7 @@
       }
     },
     {
-      "name": "DiagnosisDraft",
+      "name": "DiagnosisProposal",
       "args": {
         "status": "inconclusive",
         "root_cause": "Conflicting Charge evidence requires further investigation",

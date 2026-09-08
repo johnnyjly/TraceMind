@@ -35,7 +35,7 @@ from tracemind.evaluation.models import ExperimentOutput
 from tracemind.evaluation.runner import execute_service, execute_agent
 from tracemind.agent.errors import ModelConfigurationError
 from tracemind.agent.service import DiagnosisService
-from tracemind.models import Diagnosis, Evidence, Incident
+from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
 from tracemind.models.run import RunStatus
 from tracemind.observability.langfuse import client_for
 from replay_support import ReplayFixture, ReplayTelemetry
@@ -212,18 +212,14 @@ class FakeModel(BaseChatModel):
 
 def valid_review(observed, **updates):
     result = {
-        "claims": [
-            {
-                "text": "Charge failed",
-                "verdict": "supported",
-                "supporting_ids": [str(observed.evidence[0].id)],
-                "rationale": "error span",
-            }
-        ],
-        "uncertainty_appropriate": True,
+        "assessments": [{"item_id": "F1", "kind": "diagnostic",
+                         "verdict": "supported", "supporting_refs": ["E1"],
+                         "rationale": "error span"}, *[
+            {"item_id": f"P{i}", "kind": "proposal", "verdict": "supported",
+             "rationale": "Proposed check"}
+            for i, _ in enumerate(observed.diagnosis.remediation, 1)]],
         "root_cause_correctness": None,
-        "process_quality": None,
-        "rationale": "Observed error supports the claim",
+        "rationale": "Observed error supports the whole item",
     }
     result.update(updates)
     return result
@@ -232,10 +228,11 @@ def valid_review(observed, **updates):
 def test_judge_validates_references_and_does_not_retry(monkeypatch, sdk):
     observed = saved()
     body = valid_review(observed)
-    body["claims"][0]["supporting_ids"] = [str(uuid4())]
+    body["assessments"][0]["supporting_refs"] = [str(uuid4())]
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
-        "tracemind.evaluation.judge.create_chat_model", lambda settings: model
+        "tracemind.evaluation.judge.create_review_model",
+        lambda settings: model
     )
     budget = ModelCallBudget(2)
     evaluate = diagnosis_judge(Settings(_env_file=None), sdk[0], budget)
@@ -250,7 +247,8 @@ def test_judge_keeps_unknown_correctness_unknown_and_rejects_oversized_input(
     observed = saved()
     model = FakeModel(response=json.dumps(valid_review(observed)))
     monkeypatch.setattr(
-        "tracemind.evaluation.judge.create_chat_model", lambda settings: model
+        "tracemind.evaluation.judge.create_review_model",
+        lambda settings: model
     )
     budget = ModelCallBudget(2)
     evaluate = diagnosis_judge(Settings(_env_file=None), sdk[0], budget)
@@ -395,19 +393,10 @@ def test_qualified_answer_can_support_uncertainty_without_inventing_a_cause(
         "Charge failed; the underlying mechanism is unknown."
     )
     body = valid_review(observed)
-    body["claims"].append(
-        {
-            "text": "the underlying mechanism is unknown",
-            "kind": "uncertainty",
-            "verdict": "supported",
-            "supporting_ids": [],
-            "missing_observations": ["Database observations"],
-            "rationale": "Answer explicitly qualifies the mechanism",
-        }
-    )
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
-        "tracemind.evaluation.judge.create_chat_model", lambda settings: model
+        "tracemind.evaluation.judge.create_review_model",
+        lambda settings: model
     )
     result = scores(
         asyncio.run(
@@ -437,6 +426,99 @@ def test_mixed_label_dataset_still_enforces_each_labeled_status(sdk):
         budget=ModelCallBudget(1),
     )
     assert not accepted(result)
+
+
+@pytest.mark.parametrize('reference,passes', [
+    ({}, True),
+    ({'root_cause_service': 'payment', 'required_evidence_source': 'trace'},
+     True),
+    ({'expected_status': 'complete'}, False),
+    ({'root_cause_service': 'checkout', 'required_evidence_source': 'trace'},
+     False),
+])
+def test_reviewed_partial_findings_can_pass_without_claiming_completion(
+        monkeypatch, sdk, reference, passes):
+    from test_verifier import make_service, diagnose, ReviewModel, review
+
+    from test_verifier import FIXTURE
+    script = json.loads(json.dumps(FIXTURE.script))
+    script[-1]["args"]["remediation"] = [
+        "Restarting payment will restore every request."]
+    body = review()
+    body["assessments"].append({
+        "item_id": "P1", "kind": "diagnostic", "verdict": "insufficient",
+        "missing_observations": ["Post-restart recovery observations"],
+        "rationale": "Unverified repair promise",
+    })
+    service, _ = make_service(
+        monkeypatch, ReviewModel(body=body), script=script)
+    run = diagnose(service)
+    observed = ExperimentOutput(
+        diagnosis=run.diagnosis, evidence=run.evidence, run_state=run.state,
+        investigation_start=run.state.investigation_start,
+        investigation_end=run.state.investigation_end)
+    result = run_experiment(
+        Settings(_env_file=None), sdk[0],
+        [{'input': observed.model_dump(mode='json'),
+          'expected_output': reference}],
+        kind='saved', name='partial-findings', budget=ModelCallBudget(1))
+    metrics = scores(result.item_results[0].evaluations)
+    assert metrics['grounded_findings']
+    assert metrics['supported_finding_count'] == 1
+    assert metrics['diagnosis_status'] == 'inconclusive'
+    assert 'runtime_verification' not in metrics
+    assert accepted(result) is passes
+
+
+def test_rejected_candidate_without_supported_findings_cannot_pass(
+        monkeypatch, sdk):
+    from test_verifier import make_service, diagnose, ReviewModel, review
+
+    service, _ = make_service(
+        monkeypatch, ReviewModel(body=review('insufficient')))
+    run = diagnose(service)
+    observed = ExperimentOutput(
+        diagnosis=run.diagnosis, evidence=run.evidence, run_state=run.state,
+        investigation_start=run.state.investigation_start,
+        investigation_end=run.state.investigation_end)
+    result = run_experiment(
+        Settings(_env_file=None), sdk[0],
+        [{'input': observed.model_dump(mode='json')}],
+        kind='saved', name='no-findings', budget=ModelCallBudget(1))
+    metrics = scores(result.item_results[0].evaluations)
+    assert metrics['execution_success']
+    assert metrics['grounded_findings'] is False
+    assert metrics['supported_finding_count'] == 0
+    assert not accepted(result)
+
+
+@pytest.mark.parametrize('has_finding', [True, False])
+def test_judge_separates_partial_usefulness_from_root_cause_correctness(
+        monkeypatch, sdk, has_finding):
+    observed = saved()
+    observed.diagnosis.status = DiagnosisStatus.INCONCLUSIVE
+    body = valid_review(observed, root_cause_correctness=False)
+    if not has_finding:
+        observed.diagnosis.root_cause = 'The internal mechanism is unknown'
+        body['assessments'][0].update(
+            kind='uncertainty',
+            supporting_refs=[], missing_observations=['Mechanism telemetry'])
+    model = FakeModel(response=json.dumps(body))
+    monkeypatch.setattr(
+        'tracemind.evaluation.judge.create_review_model',
+        lambda settings: model)
+    result = run_experiment(
+        Settings(_env_file=None), sdk[0],
+        [{'input': observed.model_dump(mode='json'),
+          'expected_output': {'root_cause_service': 'payment'}}],
+        kind='saved', name='judge-partial', judge=True,
+        budget=ModelCallBudget(1))
+    metrics = scores(result.item_results[0].evaluations)
+    assert metrics['judge_completed'] and metrics['evidence_support'] == 1
+    assert metrics['root_cause_correctness'] is False
+    assert metrics['false_completion'] is False
+    assert metrics['grounded_findings'] is has_finding
+    assert accepted(result) is has_finding
 
 
 def test_publication_requires_matching_scores_and_an_observation():
@@ -503,7 +585,8 @@ def test_judge_timeout_does_not_retry_or_pass(monkeypatch, sdk):
 
     model = SlowModel()
     monkeypatch.setattr(
-        "tracemind.evaluation.judge.create_chat_model", lambda settings: model
+        "tracemind.evaluation.judge.create_review_model",
+        lambda settings: model
     )
     budget = ModelCallBudget(2)
     evaluate = diagnosis_judge(
@@ -582,25 +665,18 @@ def test_process_claim_uses_execution_events_without_claiming_incident_support(
     observed.diagnosis.root_cause += (
         "; The trace query returned an observation")
     body = valid_review(observed)
-    body["claims"].append(
-        {
-            "text": "The trace query returned an observation",
-            "kind": "process",
-            "verdict": "supported",
-            "supporting_event_sequences": [sequence],
-            "rationale": "Tool completion records this operation",
-        }
-    )
-    body["process_quality"] = 0.9
+    body["assessments"][0].update(
+        kind="process", supporting_event_sequences=[sequence])
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
-        "tracemind.evaluation.judge.create_chat_model", lambda settings: model
+        "tracemind.evaluation.judge.create_review_model",
+        lambda settings: model
     )
     evaluate = diagnosis_judge(
         Settings(_env_file=None), sdk[0], ModelCallBudget(2)
     )
     assert scores(asyncio.run(evaluate(output=observed)))["judge_completed"]
-    body["claims"][-1]["supporting_event_sequences"] = [999999]
+    body["assessments"][0]["supporting_event_sequences"] = [999999]
     model.response = json.dumps(body)
     assert not scores(asyncio.run(evaluate(output=observed)))[
         "judge_completed"
@@ -718,11 +794,11 @@ def test_verification_accepts_correct_rejection_with_held_out_labels(
         title="synthetic",
         description="synthetic")
     body = valid_review(observed)
-    body["claims"][0].update(verdict="insufficient", supporting_ids=[],
-                             missing_observations=["A linked operation"])
+    body["assessments"][0].update(verdict="insufficient", supporting_refs=[],
+                                  missing_observations=["A linked operation"])
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
-        "tracemind.agent.verification.create_chat_model",
+        "tracemind.agent.verification.create_review_model",
         lambda settings: model)
     supplied = {"incident": incident.model_dump(mode="json"),
                 "diagnosis": observed.diagnosis.model_dump(mode="json"),

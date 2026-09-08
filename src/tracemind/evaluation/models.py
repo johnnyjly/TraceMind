@@ -24,7 +24,7 @@ class FaultInjection(BaseModel):
 
 
 class GroundTruth(BaseModel):
-    """Held-out expected status and checks for complete root-cause answers."""
+    """Held-out localization checks and explicit diagnostic status targets."""
 
     root_cause_service: str = Field(min_length=1)
     root_cause_terms: list[str] = Field(min_length=1)

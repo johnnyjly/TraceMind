@@ -1,4 +1,4 @@
-"""Online verification, shared admission and durable recovery boundaries."""
+"""Item review, reference integrity, budget and recovery regressions."""
 
 import asyncio
 import json
@@ -15,10 +15,13 @@ from tracemind.agent.errors import DiagnosisCancelled, DiagnosisError
 from tracemind.agent.runtime.audit import trace_issues
 from tracemind.agent.runtime.runner import LangChainAgentRunner
 from tracemind.agent.service import DiagnosisService
-from tracemind.agent.verification import DiagnosisVerifier
+from tracemind.agent.verification import (
+    DiagnosisVerifier, parse_review, review_input_bytes, review_messages,
+    review_packet, subject_hash,
+)
 from tracemind.config import Settings
 from tracemind.models.run import RunStatus, StopReason
-from tracemind.models.verification import VerificationPolicy
+from tracemind.models.verification import ReviewSubject, VerificationPolicy
 from replay_support import ReplayFixture, ReplayTelemetry, ScriptedReplayModel
 
 FIXTURE = ReplayFixture.load(Path('evals/replays/payment_failure.json'))
@@ -26,16 +29,16 @@ EVIDENCE = FIXTURE.responses[0].evidence[0]
 
 
 def review(verdict='supported', **updates):
-    claim = {'text': 'Payment Charge failed', 'verdict': verdict,
+    claim = {'item_id': 'F1', 'kind': 'diagnostic', 'verdict': verdict,
              'rationale': 'Retained payment observation'}
     if verdict == 'supported':
-        claim['supporting_ids'] = [str(EVIDENCE.id)]
+        claim['supporting_refs'] = ['E1']
     elif verdict == 'contradicted':
-        claim['conflicting_ids'] = [str(EVIDENCE.id)]
+        claim['conflicting_refs'] = ['E1']
     else:
         claim['missing_observations'] = ['A linked failing operation']
-    result = {'claims': [claim], 'uncertainty_appropriate': True,
-              'root_cause_correctness': None, 'process_quality': None,
+    result = {'assessments': [claim],
+              'root_cause_correctness': None,
               'rationale': 'Review of retained observations'}
     result.update(updates)
     return result
@@ -61,16 +64,25 @@ class ReviewModel(BaseChatModel):
             await asyncio.Future()
         if self.mode == 'unavailable':
             raise httpx.ConnectError('synthetic provider outage')
-        metadata = {
-            'finish_reason': 'length'} if self.mode == 'truncated' else {}
+        metadata = ({'finish_reason': 'length'}
+                    if self.mode == 'truncated' else {})
+        packet = json.loads(messages[1].content)
+        body = json.loads(json.dumps(self.body))
+        # Assess proposal-only items in the scripted fixture too.
+        present = {a['item_id'] for a in body.get('assessments', [])}
+        if self.mode != 'missing':
+            body.setdefault('assessments', []).extend(
+                {'item_id': item['id'], 'kind': 'proposal',
+                 'verdict': 'supported', 'rationale': 'Proposed check only'}
+                for item in packet['items'] if item['id'].startswith('P')
+                and item['id'] not in present)
+        invalid = self.mode == 'invalid' or (
+            self.mode == 'repair' and self.calls == 1)
         message = AIMessage(
-            content='invalid json' if self.mode == 'invalid' else json.dumps(
-                self.body),
+            content='invalid json' if invalid else json.dumps(body),
             response_metadata=metadata,
-            usage_metadata={
-                'input_tokens': 20,
-                'output_tokens': 10,
-                'total_tokens': 30},
+            usage_metadata={'input_tokens': 20, 'output_tokens': 10,
+                            'total_tokens': 30},
             tool_calls=([{'id': 'bad', 'name': 'search_logs', 'args': {}}]
                         if self.mode == 'tool' else []),
         )
@@ -78,9 +90,8 @@ class ReviewModel(BaseChatModel):
 
 
 def make_service(monkeypatch, model, *, policy=None, calls=8, script=None):
-    monkeypatch.setattr(
-        'tracemind.agent.verification.create_chat_model',
-        lambda settings: model)
+    monkeypatch.setattr('tracemind.agent.verification.create_review_model',
+                        lambda settings: model)
     settings = Settings(_env_file=None, agent_trace_directory=None,
                         agent_max_model_calls=calls,
                         agent_retry_backoff_seconds=0)
@@ -100,114 +111,180 @@ def diagnose(service):
         FIXTURE.case.incident, start=FIXTURE.start, end=FIXTURE.end))
 
 
+def seed():
+    return ReviewSubject.model_validate(json.loads(Path(
+        'evals/langfuse/verifier-calibration.json').read_text())[0]['input'])
+
+
 def test_supported_review_precedes_acceptance_and_shares_usage(monkeypatch):
     model = ReviewModel(body=review())
     service, investigator = make_service(monkeypatch, model)
     run = diagnose(service)
     assert run.diagnosis.status.value == 'complete'
-    assert run.state.status is RunStatus.SUCCEEDED
     assert run.state.model_calls == investigator.position + model.calls == 3
     assert run.state.usage.reported_total_tokens == 30
-    assert run.state.usage.unreported_model_calls == 2
     assert trace_issues(run.state) == []
+    assert run.state.candidate_items
+    assert run.state.reference_map['E1'] == str(run.evidence[0].id)
     events = [e.kind for e in run.state.events]
     assert events.index('verification.completed') < events.index(
         'diagnosis.accepted')
     assert run.state.verification.review.accepted
-    assert model.captured[0][1]['max_tokens'] == 4096
-    assert model.captured[0][1]['response_format'] == {'type': 'json_object'}
+    assert model.captured[0][1]['response_format']['type'] == 'json_schema'
+    assert model.captured[0][1]['reasoning'] == {'effort': 'none'}
+    packet = json.loads(model.captured[0][0][1].content)
+    assert packet['items'][0]['id'] == 'F1'
+    assert 'quote_sources' not in packet
 
 
 @pytest.mark.parametrize('verdict', ['insufficient', 'contradicted'])
-def test_unsupported_review_blocks_complete_without_repair(
-        monkeypatch, verdict):
+def test_semantic_rejection_does_not_retry_or_accept(monkeypatch, verdict):
     model = ReviewModel(body=review(verdict))
     service, investigator = make_service(monkeypatch, model)
     run = diagnose(service)
-    assert run.state.status is RunStatus.INCONCLUSIVE
     assert run.state.stop_reason is StopReason.VERIFICATION_REJECTED
     assert run.diagnosis.status.value == 'inconclusive'
-    assert run.diagnosis.confidence == 0
     assert run.state.verification.candidate.status.value == 'complete'
-    assert run.state.verification.review.verdict == verdict
-    assert run.state.diagnosis_repairs == 0
     assert investigator.position == 2 and model.calls == 1
-    assert 'diagnosis.accepted' not in [e.kind for e in run.state.events]
     assert trace_issues(run.state) == []
 
 
-@pytest.mark.parametrize('mode', ['invalid',
-                         'truncated', 'tool', 'timeout', 'unavailable'])
-def test_review_failure_has_no_complete_result_or_retry(monkeypatch, mode):
+def test_exactly_one_format_repair_is_accounted(monkeypatch):
+    model = ReviewModel(body=review(), mode='repair')
+    service, _ = make_service(monkeypatch, model)
+    run = diagnose(service)
+    assert run.state.verification.review.accepted
+    assert run.state.verification.attempts == 2
+    assert len(run.state.verification.validation_errors) == 1
+    assert run.state.model_calls == 4 and model.calls == 2
+    assert len(model.captured[1][0]) == 4
+    assert trace_issues(run.state) == []
+
+
+@pytest.mark.parametrize('mode,attempts,code', [
+    ('invalid', 2, 'invalid_output'), ('truncated', 2, 'invalid_output'),
+    ('tool', 2, 'invalid_output'), ('timeout', 1, 'timeout'),
+    ('unavailable', 1, 'model_unavailable'),
+])
+def test_failure_is_bounded_and_never_accepted(
+        monkeypatch, mode, attempts, code):
     model = ReviewModel(body=review(), mode=mode)
-    service, investigator = make_service(
-        monkeypatch, model, policy=VerificationPolicy(timeout_seconds=.01))
+    service, _ = make_service(monkeypatch, model, policy=VerificationPolicy(
+        timeout_seconds=.05))
     with pytest.raises(DiagnosisError) as caught:
         diagnose(service)
     state = caught.value.state
-    assert state.status is RunStatus.FAILED
-    assert state.stop_reason is StopReason.VERIFICATION_FAILED
+    assert state.verification.error_code == code
+    assert state.verification.attempts == model.calls == attempts
     assert state.diagnosis is None
-    assert state.verification.status == 'failed'
-    assert state.model_calls == 3
-    assert model.calls == 1 and investigator.position == 2
-    assert not any(e.kind == 'recovery.retry_scheduled' for e in state.events)
     assert trace_issues(state) == []
 
 
-@pytest.mark.parametrize('problem',
-                         ['unknown', 'duplicate', 'gaps', 'reference'])
-def test_invalid_proof_obligations_fail_closed(monkeypatch, problem):
+@pytest.mark.parametrize(
+    'problem', ['unknown', 'duplicate', 'gaps', 'reference'])
+def test_proof_obligations_are_still_strict(monkeypatch, problem):
     body = review()
-    claim = body['claims'][0]
+    claim = body['assessments'][0]
     if problem == 'unknown':
-        claim['supporting_ids'] = [str(uuid4())]
+        claim['supporting_refs'] = [str(uuid4())]
     elif problem == 'duplicate':
-        claim['supporting_ids'] *= 2
+        claim['supporting_refs'] *= 2
     elif problem == 'gaps':
-        claim['missing_observations'] = ['Unresolved telemetry']
+        claim['missing_observations'] = ['Missing mechanism']
     else:
         body['root_cause_correctness'] = True
     model = ReviewModel(body=body)
     service, _ = make_service(monkeypatch, model)
     with pytest.raises(DiagnosisError) as caught:
         diagnose(service)
-    assert caught.value.state.verification.error_code == 'invalid_review'
-    assert caught.value.state.stop_reason is StopReason.VERIFICATION_FAILED
+    assert caught.value.state.verification.error_code == 'invalid_output'
+    assert model.calls == 2
 
 
-def test_oversized_subject_fails_before_call_without_dropping_evidence(
-        monkeypatch):
+def test_oversize_does_not_drop_evidence_or_call_model(monkeypatch):
     model = ReviewModel(body=review())
-    service, _ = make_service(
-        monkeypatch, model, policy=VerificationPolicy(
-            input_bytes=1))
+    service, _ = make_service(monkeypatch, model, policy=VerificationPolicy(
+        input_bytes=1))
     with pytest.raises(DiagnosisError) as caught:
         diagnose(service)
-    state = caught.value.state
-    assert state.verification.error_code == 'input_limit'
-    assert state.model_calls == 2 and model.calls == 0
+    assert caught.value.state.verification.error_code == 'input_limit'
+    assert model.calls == 0
     assert len(caught.value.evidence) == 1
 
 
-def test_budget_is_not_extended_to_pay_for_verification(monkeypatch):
+def test_budget_reserves_two_calls_without_extending_limit(monkeypatch):
     model = ReviewModel(body=review())
     service, _ = make_service(monkeypatch, model, calls=2)
     run = diagnose(service)
     assert run.diagnosis.status.value == 'inconclusive'
-    assert run.state.model_calls <= 2
-    assert model.calls == 0
+    assert run.state.model_calls <= 2 and model.calls == 0
 
 
-def test_inconclusive_answer_does_not_spend_a_verifier_call(monkeypatch):
-    model = ReviewModel(body=review())
-    script = [{'name': 'DiagnosisDraft', 'args': {
-        'status': 'inconclusive', 'root_cause': 'No fault observations',
-        'confidence': 0, 'cite_indices': []}}]
-    service, _ = make_service(monkeypatch, model, script=script)
-    run = diagnose(service)
-    assert run.diagnosis.status.value == 'inconclusive'
-    assert run.state.verification is None and model.calls == 0
+@pytest.mark.parametrize('change', ['missing', 'duplicate', 'unknown'])
+def test_item_coverage_rejects_omission_duplication_and_invention(change):
+    subject = seed()
+    body = review()
+    if change == 'missing':
+        body['assessments'] = []
+    elif change == 'duplicate':
+        body['assessments'] *= 2
+    else:
+        body['assessments'][0]['item_id'] = 'F999'
+    with pytest.raises(ValueError):
+        parse_review(AIMessage(content=json.dumps(body)), subject)
+
+
+def test_whole_text_is_bound_by_program_including_synthetic_traffic():
+    subject = seed()
+    subject.diagnosis.root_cause += (
+        '; the sampled failures are synthetic traffic')
+    subject.diagnosis.remediation = []
+    parsed = parse_review(AIMessage(content=json.dumps(review())), subject)
+    assert parsed.claims[0].text == subject.diagnosis.root_cause
+    assert 'synthetic traffic' in parsed.claims[0].text
+    assert 'text' not in review()['assessments'][0]
+
+
+def test_packet_preserves_uncited_counterevidence_and_all_attributes():
+    subject = seed()
+    extra = subject.evidence[0].model_copy(deep=True)
+    extra.id = uuid4()
+    extra.attributes['unusual_detail'] = 'x' * 70000
+    subject.evidence.append(extra)
+    packet = review_packet(subject)
+    assert len(packet['evidence']) == len(subject.evidence)
+    for row, original in zip(packet['evidence'], subject.evidence):
+        assert row['attributes'] == original.attributes
+        assert row['summary'] == original.summary
+        if original.query is not None:
+            assert packet['queries'][row['query_index']] == original.query
+    assert packet['coverage']['all_retained_observations_included']
+
+
+def test_hash_tracks_query_events_but_ignores_review_and_recovery_noise():
+    subject = seed()
+    before = subject_hash(subject)
+    subject.execution_events.append({'sequence': 99, 'kind': 'run.resumed',
+                                     'data': {}})
+    assert subject_hash(subject) == before
+    subject.execution_events.append({'sequence': 100, 'kind': 'tool.completed',
+                                     'data': {'tool': 'search_logs'}})
+    assert subject_hash(subject) != before
+
+
+def test_schema_is_counted_once_and_provider_finish_reason_checked():
+    subject = seed()
+    messages = review_messages(subject, provider='deepseek')
+    from tracemind.agent.verification import review_schema
+    schema_size = len(json.dumps(review_schema(review_packet(subject)),
+                                 ensure_ascii=False,
+                                 separators=(',', ':')).encode())
+    assert review_input_bytes(messages, 'deepseek') == (
+        sum(len(m['content'].encode()) for m in messages) + schema_size)
+    with pytest.raises(ValueError, match='incomplete_response'):
+        parse_review(AIMessage(content=json.dumps(review()),
+                               response_metadata={'finish_reason': 'length'}),
+                     subject)
 
 
 class ForbiddenRunner:
@@ -223,9 +300,10 @@ def persisted_run(service, state, evidence, snapshots, *, resume=False):
 
 
 @pytest.mark.parametrize("rubric_changed", [False, True])
+@pytest.mark.parametrize("verdict", ["supported", "insufficient"])
 def test_completed_verification_resumes_without_model_or_tool_calls(
-        monkeypatch, rubric_changed):
-    model = ReviewModel(body=review())
+        monkeypatch, rubric_changed, verdict):
+    model = ReviewModel(body=review(verdict))
     service, _ = make_service(monkeypatch, model)
     # Use a fresh durable state identical to the API's queued record.
     from tracemind.models.run import RunState
@@ -256,7 +334,8 @@ def test_completed_verification_resumes_without_model_or_tool_calls(
     else:
         result = asyncio.run(persisted_run(
             service, restored, evidence, [], resume=True))
-        assert result.diagnosis.status.value == 'complete'
+        expected = 'complete' if verdict == 'supported' else 'inconclusive'
+        assert result.diagnosis.status.value == expected
     assert restored.model_calls == 3 and model.calls == 1
     assert trace_issues(restored) == []
 
@@ -308,188 +387,99 @@ def test_cancel_during_review_preserves_cancelled_state(monkeypatch):
     assert trace_issues(state) == []
 
 
-@pytest.mark.parametrize("entrypoint", ["api", "worker", "evaluation"])
-@pytest.mark.parametrize("verdict", ["supported", "insufficient"])
-def test_online_gate_through_real_http_entrypoints(
-        tmp_path, monkeypatch, entrypoint, verdict):
-    from uuid import UUID
-    from test_mcp_http import (
-        http_server, ScriptedModel, START, END, INCIDENT, harness,
+def test_no_global_boolean_can_veto_supported_items():
+    subject = seed()
+    subject.diagnosis.remediation = []
+    result = parse_review(AIMessage(content=json.dumps(review())), subject)
+    assert result.accepted and result.uncertainty_appropriate
+    bad = review(uncertainty_appropriate=False)
+    with pytest.raises(ValueError):
+        parse_review(AIMessage(content=json.dumps(bad)), subject)
+
+
+def test_partial_result_keeps_only_retained_items_knowledge_citations():
+    from tracemind.agent.verification import partial_draft
+    from tracemind.models.verification import (
+        Claim, DiagnosisReview, ReviewItem,
     )
-    from tracemind.api.app import create_app, get_request_settings
-    from tracemind.agent.storage.run_repository import RunRepository
-    from tracemind.agent.worker import RunWorker
-    from tracemind.evaluation.runner import execute_agent
 
-    body = review(verdict)
-    body["claims"][0]["text"] = "Payment failed"
-    if verdict == "supported":
-        body["claims"][0]["supporting_ids"] = [str(UUID(int=1))]
-    model = ReviewModel(body=body)
-    monkeypatch.setattr(
-        "tracemind.agent.verification.create_chat_model",
-        lambda settings: model)
-    monkeypatch.setattr(
-        "tracemind.agent.factory.create_chat_model",
-        lambda settings: ScriptedModel())
-
-    async def exercise():
-        expected = "complete" if verdict == "supported" else "inconclusive"
-        async with http_server() as url:
-            settings = Settings(_env_file=None, verifier_enabled=True,
-                                telemetry_mcp_url=url,
-                                agent_run_database=tmp_path / "runs.db",
-                                agent_checkpoint_database=(
-                                    tmp_path / "checkpoints.db"),
-                                agent_trace_directory=tmp_path / "traces")
-            if entrypoint == "api":
-                app = create_app()
-                app.dependency_overrides[get_request_settings] = (
-                    lambda: settings)
-                async with httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=app),
-                    base_url="http://test",
-                ) as client:
-                    response = await client.post("/api/v1/diagnoses", json={
-                        "incident": INCIDENT.model_dump(mode="json"),
-                        "investigation_start": START.isoformat(),
-                        "investigation_end": END.isoformat()})
-                assert response.status_code == 200
-                assert response.json()["status"] == expected
-            elif entrypoint == "worker":
-                repository = RunRepository(settings.agent_run_database)
-                state = harness().state.model_copy(update={
-                    "status": RunStatus.QUEUED,
-                    "verification_policy": settings.verification_policy})
-                repository.create(state, request_hash="verifier-http")
-                worker = RunWorker(settings, repository=repository)
-                assert await worker.run_once()
-                stored = repository.get(state.id)
-                assert stored.result.diagnosis.status.value == expected
-                assert stored.state.verification.status == "completed"
-                assert stored.state.model_calls == 3
-                assert trace_issues(stored.state) == []
-            else:
-                result = await execute_agent(
-                    INCIDENT, settings, start=START, end=END)
-                assert result.error_type is None
-                assert result.diagnosis.status.value == expected
-                assert result.run_state.verification.status == "completed"
-                assert trace_issues(result.run_state) == []
-        assert model.calls == 1
-
-    asyncio.run(exercise())
+    items = [ReviewItem(id='F1', section='finding', text='Observed failure',
+                        knowledge_refs=['knowledge-kept']),
+             ReviewItem(id='F2', section='finding', text='Unsupported cause',
+                        knowledge_refs=['knowledge-rejected'])]
+    result = partial_draft(items, DiagnosisReview(
+        claims=[Claim(item_id='F1', text=items[0].text, kind='diagnostic',
+                      verdict='supported', supporting_ids=[EVIDENCE.id],
+                      rationale='Observed'),
+                Claim(item_id='F2', text=items[1].text, kind='diagnostic',
+                      verdict='insufficient', missing_observations=['Cause'],
+                      rationale='Not established')],
+        uncertainty_appropriate=True, root_cause_correctness=None,
+        rationale='Retain supported finding'))
+    assert result.knowledge_refs == ['knowledge-kept']
+    assert result.evidence_ids == [EVIDENCE.id]
+    assert 'Unsupported cause' not in result.root_cause
 
 
-def test_experiment_cap_denies_verifier_before_provider_execution(monkeypatch):
-    from tracemind.evaluation.budget import ModelCallBudget
-    budget = ModelCallBudget(2)
+def test_legacy_checkpoint_is_readable_but_cannot_resume(monkeypatch):
     model = ReviewModel(body=review())
-    service, investigator = make_service(monkeypatch, model)
-    service._runner = LangChainAgentRunner(investigator, callbacks=[budget])
-    service._verifier.callbacks = [budget]
-    with pytest.raises(DiagnosisError) as caught:
-        diagnose(service)
-    assert budget.calls == 2 and model.calls == 0
-    assert caught.value.state.stop_reason is StopReason.VERIFICATION_FAILED
-    assert caught.value.state.verification.error_code == "model_unavailable"
-
-
-def test_review_rejects_a_known_but_out_of_window_observation():
-    from datetime import timedelta
-    from tracemind.agent.verification import validate_review
-    from tracemind.models.verification import DiagnosisReview, ReviewSubject
-    subject = ReviewSubject.model_validate(json.loads(
-        Path("evals/langfuse/verifier-calibration.json").read_text()
-    )[0]["input"])
-    claim = DiagnosisReview.model_validate({
-        **review(), "claims": [{
-            **review()["claims"][0],
-            "text": subject.diagnosis.root_cause,
-            "supporting_ids": [str(subject.evidence[0].id)],
-        }],
-    })
-    subject.evidence[0].observed_at = subject.start - timedelta(seconds=1)
-    with pytest.raises(ValueError, match="out-of-window"):
-        validate_review(claim, subject)
-
-
-def test_saved_and_live_review_preserve_knowledge_and_counterevidence():
-    from tracemind.agent.verification import subject_for
-    from tracemind.evaluation.models import ExperimentOutput
-    from tracemind.models.run import RunState
-    from tracemind.models.verification import ReviewSubject
-    item = next(item for item in json.loads(
-        Path("evals/langfuse/verifier-calibration.json").read_text())
-        if item["input"]["knowledge"])
-    subject = ReviewSubject.model_validate(item["input"])
-    state = RunState(incident=subject.incident,
-                     limits=Settings(_env_file=None).run_limits,
-                     allowed_tools=(),
-                     investigation_start=subject.start,
-                     investigation_end=subject.end,
-                     knowledge=subject.knowledge)
-    saved = ExperimentOutput.from_saved({
-        "diagnosis": subject.diagnosis.model_dump(mode="json"),
-        "evidence": [e.model_dump(mode="json") for e in subject.evidence],
-        "run_state": state.model_dump(mode="json"),
-    })
-    canonical = [item.model_dump(mode="json") for item in state.knowledge]
-    assert saved.knowledge == canonical
-    assert saved.knowledge[0]["hit"]["chunk"]["text"] == (
-        subject.knowledge[0]["hit"]["chunk"]["text"])
-    reviewed = subject_for(state, subject.diagnosis, subject.evidence)
-    assert reviewed.knowledge == canonical
-    assert reviewed.evidence == subject.evidence
-
-
-@pytest.mark.parametrize("invented", [
-    "Payment's database pool was exhausted",
-    "Inspection will restore all requests",
-    "No payment failure occurred",
-    "   ",
-])
-def test_reviewer_cannot_add_assertions_absent_from_the_answer(
-        monkeypatch, invented):
-    body = review()
-    body["claims"][0]["text"] = invented
-    model = ReviewModel(body=body)
     service, _ = make_service(monkeypatch, model)
+    run = diagnose(service)
+    raw = run.state.model_dump(mode='json')
+    raw.pop('contract_version')
+    for claim in raw['verification']['review']['claims']:
+        claim.pop('item_id')
+    restored = type(run.state).model_validate(raw)
+    assert restored.contract_version == 'legacy'
+    # Workers resume active checkpoints; terminal records remain immutable.
+    restored.status = RunStatus.RUNNING
+    restored.stop_reason = None
+    calls = model.calls
     with pytest.raises(DiagnosisError) as caught:
-        diagnose(service)
-    assert caught.value.state.verification.error_code == "invalid_review"
-    assert caught.value.state.diagnosis is None
-    assert model.calls == 1
+        asyncio.run(persisted_run(service, restored, run.evidence, [],
+                                  resume=True))
+    assert caught.value.state.stop_reason is StopReason.CONTRACT_CHANGED
+    assert model.calls == calls
 
 
-def test_explicit_abstention_with_gaps_is_not_an_asserted_mechanism():
-    from tracemind.agent.verification import validate_review
-    from tracemind.models.verification import DiagnosisReview, ReviewSubject
-    item = next(item for item in json.loads(
-        Path("evals/langfuse/verifier-calibration.json").read_text())
-        if item["metadata"]["case_id"] == "appropriate_abstention")
-    subject = ReviewSubject.model_validate(item["input"])
-    body = review()
-    body["claims"] = [{
-        "text": subject.diagnosis.root_cause,
-        "kind": "uncertainty", "verdict": "supported",
-        "missing_observations": ["Underlying failure mechanism"],
-        "rationale": "The original answer explicitly abstains",
-    }]
-    result = DiagnosisReview.model_validate(body)
-    validate_review(result, subject)
-    assert result.accepted
+def test_reference_handles_survive_persistence_and_append():
+    from tracemind.agent.workflow.references import register_references
+    from tracemind.models.run import RunState
+    state = RunState(incident=FIXTURE.case.incident,
+                     investigation_start=FIXTURE.start,
+                     investigation_end=FIXTURE.end, limits=Settings(
+                         _env_file=None).run_limits, allowed_tools=(),
+                     evidence_ids=[EVIDENCE.id])
+    register_references(state)
+    restored = RunState.model_validate_json(state.model_dump_json())
+    extra = uuid4()
+    restored.evidence_ids.append(extra)
+    register_references(restored)
+    assert restored.reference_map == {'E1': str(EVIDENCE.id), 'E2': str(extra)}
 
 
-def test_deepseek_review_sets_json_mode_on_the_actual_provider_payload():
-    from tracemind.agent.runtime.llm import create_chat_model
-    from tracemind.agent.verification import review_options
-    settings = Settings(_env_file=None, llm_provider="deepseek",
-                        deepseek_api_key="synthetic-placeholder")
-    model = create_chat_model(settings)
-    payload = model._get_request_payload(
-        [{"role": "user", "content": "Return JSON"}],
-        **review_options(model, "deepseek", 4096))
-    assert payload["response_format"] == {"type": "json_object"}
-    assert payload["max_tokens"] == 4096
-    assert payload["extra_body"]["thinking"] == {"type": "disabled"}
+def test_structured_rendering_binds_all_items_and_rejects_added_prose():
+    from tracemind.agent.workflow.validation import resolve_proposal
+    from tracemind.models import Diagnosis
+    from tracemind.models.result import DiagnosisProposal
+    from tracemind.models.run import RunState
+    from tracemind.agent.verification import subject_for
+    state = RunState(incident=FIXTURE.case.incident,
+                     investigation_start=FIXTURE.start,
+                     investigation_end=FIXTURE.end, limits=Settings(
+                         _env_file=None).run_limits, allowed_tools=(),
+                     evidence_ids=[EVIDENCE.id])
+    proposal = DiagnosisProposal(
+        status='inconclusive', confidence=.4,
+        findings=[{'text': 'Payment Charge failed', 'evidence_refs': ['E1']}],
+        hypotheses=[], limitations=[{'text': 'Token mechanism is unverified'}],
+        proposed_checks=[{'text': 'Inspect validation configuration'}])
+    draft = resolve_proposal(proposal, state, [EVIDENCE])
+    candidate = Diagnosis(incident_id=state.incident.id,
+                          **draft.model_dump(exclude={'feedback_updates'}))
+    subject = subject_for(state, candidate, [EVIDENCE])
+    packet = review_packet(subject)
+    assert [i['id'] for i in packet['items']] == ['F1', 'L1', 'P1']
+    candidate.root_cause += ' A hidden unsupported claim.'
+    with pytest.raises(ValueError, match='candidate_items_mismatch'):
+        review_packet(subject)

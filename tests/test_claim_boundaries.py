@@ -22,12 +22,13 @@ def test_fixed_evidence_evaluation_holds_out_rubric(tmp_path, monkeypatch):
         content = "\n".join(m.text for m in messages)
         assert all(item not in content for item in fixture["rubric"])
         assert fixture["provenance"] not in content
-        assert all(item["id"] in content for item in fixture["evidence"])
-        assert model.bindings[-1] == ["DiagnosisDraft"]
-        return tool_call("DiagnosisDraft", {
+        assert all(f"E{i}" in content
+                   for i in range(1, len(fixture["evidence"]) + 1))
+        assert model.bindings[-1] == ["DiagnosisProposal"]
+        return tool_call("DiagnosisProposal", {
             "status": "inconclusive", "root_cause": "Unknown endpoint cause",
             "confidence": .3,
-            "evidence_ids": [fixture["evidence"][0]["id"]],
+            "evidence_ids": ["E1"],
         })
 
     model = ScriptedModel(respond=respond)

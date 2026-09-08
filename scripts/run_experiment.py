@@ -120,7 +120,8 @@ def main():
                     ).isoformat(),
                     "end": end.isoformat(),
                 },
-                "expected_output": case.ground_truth.model_dump(mode="json"),
+                "expected_output": case.ground_truth.model_dump(
+                    mode="json", exclude_unset=True),
             }
         ]
         settings = settings.model_copy(

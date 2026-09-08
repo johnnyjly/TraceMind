@@ -7,7 +7,7 @@ from tracemind.agent.runtime.audit import trace_issues
 from tracemind.evaluation.models import ExperimentOutput
 from tracemind.models import DiagnosisStatus
 
-VERSION = "tracemind-code-v1"
+VERSION = "tracemind-code-v2"
 
 
 def metric(name, value, comment=None, **metadata):
@@ -22,6 +22,27 @@ def metric(name, value, comment=None, **metadata):
         ),
         metadata={"evaluator_version": VERSION, **metadata},
     )
+
+
+def finding_scores(diagnosis, review):
+    """Count reviewed incident findings actually retained in the answer."""
+    findings = []
+    if diagnosis is not None and review is not None:
+        final_text = " ".join(diagnosis.root_cause.split())
+        citations = set(diagnosis.evidence_ids)
+        findings = [c for c in review.claims
+                    if c.kind == "diagnostic" and c.verdict == "supported"
+                    and c.supporting_ids and not c.missing_observations
+                    and not c.conflicting_ids
+                    and not c.conflicting_event_sequences
+                    and set(c.supporting_ids) <= citations
+                    and " ".join(c.text.split()) in final_text]
+    return [
+        metric("grounded_findings", bool(findings),
+               "Reviewed diagnostic excerpts retained with their cited "
+               "telemetry; not independent root-cause correctness."),
+        metric("supported_finding_count", len(findings)),
+    ]
 
 
 def diagnosis_scores(*, output, expected_output=None, **kwargs):
@@ -55,6 +76,8 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
             "Checks reference identity/window only, not semantic support.",
         ),
         metric("elapsed_ms", result.elapsed_ms),
+        metric("diagnosis_status", diagnosis.status.value
+               if diagnosis else "none"),
     ]
     if state is not None:
         issues = trace_issues(state)
@@ -104,12 +127,23 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
         )
     if state is not None and state.verification_policy is not None:
         record = state.verification
+        review = (record.review if record and record.status == "completed"
+                  and citation_valid else None)
+        scores.extend(finding_scores(diagnosis, review))
         if diagnosis and diagnosis.status is DiagnosisStatus.COMPLETE:
             scores.append(metric("runtime_verification", bool(
                 record and record.status == "completed" and record.review
                 and record.review.accepted)))
         if record is not None:
-            scores.append(metric("verification_status", record.status))
+            scores.extend([
+                metric("verification_status", record.status),
+                metric("verification_completed", record.status == "completed"),
+                metric("verification_attempts", record.attempts),
+                metric("verification_format_repairs",
+                       max(0, record.attempts - 1)),
+            ])
+            if record.error_code:
+                scores.append(metric("verification_error", record.error_code))
             if record.review is not None:
                 scores.append(
                     metric(
@@ -242,10 +276,14 @@ def acceptance_evaluator(
             ) or {}
             if "expected_status" in reference:
                 required.setdefault("expected_status", 1.0)
+            elif "grounded_findings" in scores:
+                required.setdefault("grounded_findings", 1.0)
+                if "required_source_citation" in scores:
+                    required.setdefault("required_source_citation", 1.0)
             if judge and any(
                 key in reference
                 for key in ("reference_answer", "root_cause_service")
-            ):
+            ) and scores.get("diagnosis_status") == "complete":
                 required.setdefault("root_cause_correctness", 1.0)
             supplied = item.get("input") if isinstance(
                 item, dict) else item.input

@@ -87,9 +87,9 @@ def worker(tmp_path, runs, model):
 def feedback_model(evidence_id, updates):
     """Return a valid explanation and independent proposed learning."""
     return ScriptedModel(respond=lambda messages, calls: tool_call(
-        "DiagnosisDraft", {
+        "DiagnosisProposal", {
             "status": "complete", "root_cause": "Observed charge failure",
-            "confidence": .8, "evidence_ids": [str(evidence_id)],
+            "confidence": .8, "evidence_ids": ["E1"],
             "feedback_updates": [u.model_dump() for u in updates],
         },
     ))
@@ -366,7 +366,7 @@ def test_inconclusive_source_can_receive_a_human_correction(tmp_path):
 
 def test_rejected_diagnosis_preview_does_not_log_feedback_quotes():
     message = "私人反馈内容仅保留在受控记忆存储"
-    response = ModelResponse(result=[tool_call("DiagnosisDraft", {
+    response = ModelResponse(result=[tool_call("DiagnosisProposal", {
         "status": "complete", "root_cause": "Observed failure",
         "confidence": .9, "evidence_ids": [],
         "feedback_updates": [proposal(message).model_dump()],

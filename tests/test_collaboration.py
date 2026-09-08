@@ -13,6 +13,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 import pytest
 from test_harness import ScriptedModel, tool_call
+from proposal_fixtures import proposal_payload
 from tool_fixtures import FixtureToolClient
 
 from tracemind.agent.storage.run_repository import RunRepository
@@ -64,11 +65,13 @@ class CollaborationModel(BaseChatModel):
                 evidence_id = context["evidence_previews"][0]["id"]
             else:
                 evidence_id = json.loads(results[-1].content)[0]["id"]
-            action = {"name": "DiagnosisDraft", "args": {
+            action = {"name": "DiagnosisProposal", "args": {
                 "status": "complete", "root_cause": "Payment Charge failed",
                 "confidence": .8, "evidence_ids": [evidence_id],
                 "remediation": [],
             }}
+        if action["name"] == "DiagnosisProposal":
+            action["args"] = proposal_payload(action["args"])
         response = AIMessage(content="", tool_calls=[{
             **action, "id": f"model-{len(self.prompts)}",
         }])
@@ -340,7 +343,7 @@ def test_explanation_uses_cited_details_without_scanning_large_catalogue(
             if not traces:
                 return tool_call("search_traces", {"service": "checkout"})
             ids = [r["id"] for r in json.loads(traces[0].content)[:14]]
-            return tool_call("DiagnosisDraft", {
+            return tool_call("DiagnosisProposal", {
                 "status": "complete", "confidence": .8,
                 "root_cause": "Payment failed due to JWT validation",
                 "evidence_ids": ids,
@@ -376,7 +379,7 @@ def test_explanation_uses_cited_details_without_scanning_large_catalogue(
         else:
             assert "请用一句中文解释" in prompt
             answer = "payment 的 Charge 报错并传递到 checkout，底层原因尚未确认。"
-        return tool_call("DiagnosisDraft", {
+        return tool_call("DiagnosisProposal", {
             "status": "complete", "confidence": .7,
             "root_cause": answer, "evidence_ids": [span["id"]],
             "remediation": [],

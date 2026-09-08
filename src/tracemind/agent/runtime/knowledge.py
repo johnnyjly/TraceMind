@@ -7,6 +7,10 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from tracemind.agent.workflow.references import (
+    model_references, original_reference,
+)
+
 from tracemind.agent.runtime.harness import (
     InvestigationClosed, RunHarness, RunStopped,
 )
@@ -57,7 +61,7 @@ def knowledge_context(state: RunState) -> str:
         if len(json_text(candidate).encode()) > allowance:
             continue
         pack = candidate
-    return json_text(pack)
+    return json_text(model_references(pack, state))
 
 
 def _retain(
@@ -146,8 +150,8 @@ def create_knowledge_tools(
         information is sufficient. Do not rephrase a search that returned no
         useful new references unless new evidence changes the question.
         Results identify documentation, not current
-        fault observations. Cite their knowledge_ref in knowledge_refs, never
-        evidence_ids. Read a retained reference only if its preview is missing
+        fault observations. Cite their K handle in knowledge_refs, never
+        evidence_refs. Read a retained reference only if its preview is missing
         a necessary detail and detail reading is authorized.
         """
         async def retrieve():
@@ -234,7 +238,8 @@ def create_knowledge_tools(
             "search_knowledge", {"query": query, "rewrite": rewrite},
             retrieve, evidence_result=False, retry_safe=False,
         )
-        return result, _context_artifact(state, result)
+        return (model_references(result, state),
+                model_references(_context_artifact(state, result), state))
 
     @tool(response_format="content_and_artifact")
     async def read_knowledge(
@@ -246,7 +251,7 @@ def create_knowledge_tools(
         With an ID, read the saved parent section when available, otherwise
         the matched chunk. Offset counts text characters. Without an ID, page
         the retained catalogue by entry
-        offset. Reference IDs belong in knowledge_refs, not evidence_ids.
+        offset. K handles belong in knowledge_refs, not evidence_refs.
         """
         async def read():
             """Read only copied state; never access a snapshot or model."""
@@ -258,7 +263,8 @@ def create_knowledge_tools(
                     "next_offset": end if end < len(state.knowledge) else None,
                 }]
             reference = next((r for r in state.knowledge
-                              if r.id == reference_id), None)
+                              if r.id == original_reference(
+                                  reference_id, state)), None)
             if reference is None:
                 return [{"error": "unknown_knowledge_ref"}]
             source = reference.hit.parent or reference.hit.chunk
@@ -282,13 +288,16 @@ def create_knowledge_tools(
         )
         artifact = _context_artifact(state, result)
         artifact["detail_page"] = reference_id is not None
-        return result, artifact
+        return (model_references(result, state),
+                model_references(artifact, state))
 
     tools = []
-    if "search_knowledge" in state.allowed_tools:
-        if state.purpose is not RunPurpose.EXPLAIN:
-            tools.append(search_knowledge)
-    if "read_knowledge" in state.allowed_tools:
+    if ("search_knowledge" in state.allowed_tools
+            and state.purpose is not RunPurpose.EXPLAIN
+            and policy is not None and search is not None):
+        tools.append(search_knowledge)
+    if ("read_knowledge" in state.allowed_tools
+            and (policy is not None or state.knowledge)):
         tools.append(read_knowledge)
     return tools
 

@@ -72,7 +72,7 @@ class EvidenceUsingRunner:
             status=DiagnosisStatus.COMPLETE,
             root_cause="Checkout error rate increased",
             confidence=0.85,
-            evidence_ids=[evidence[0]["id"]],
+            evidence_ids=[harness.state.reference_map[evidence[0]["id"]]],
             remediation=["Inspect the checkout deployment"],
         )
 
@@ -178,7 +178,7 @@ def test_deepseek_agent_sends_compatible_structured_tool_request(monkeypatch):
         assert "max_completion_tokens" not in payload
         assert payload["thinking"] == {"type": "disabled"}
         assert "response_format" not in payload
-        assert any(tool["function"]["name"] == "DiagnosisDraft"
+        assert any(tool["function"]["name"] == "DiagnosisProposal"
                    for tool in payload["tools"])
         return httpx.Response(200, json={
             "id": "deepseek-test", "object": "chat.completion", "created": 0,
@@ -188,13 +188,15 @@ def test_deepseek_agent_sends_compatible_structured_tool_request(monkeypatch):
                                      "tool_calls": [{
                                          "id": "draft-1", "type": "function",
                                          "function": {
-                                             "name": "DiagnosisDraft",
+                                             "name": "DiagnosisProposal",
                                              "arguments": json.dumps({
                                                  "status": "inconclusive",
-                                                 "root_cause": "No evidence",
+                                                 "findings": [],
+                                                 "hypotheses": [],
+                                                 "limitations": [
+                                                     {"text": "No evidence"}],
+                                                 "proposed_checks": [],
                                                  "confidence": 0,
-                                                 "evidence_ids": [],
-                                                 "remediation": [],
                                              }),
                                          },
                                      }]}}],

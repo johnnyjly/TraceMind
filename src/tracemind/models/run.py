@@ -5,12 +5,12 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.incident import Incident
 from tracemind.models.verification import (
-    VerificationPolicy, VerificationRecord,
+    VerificationPolicy, VerificationRecord, ReviewItem,
 )
 from tracemind.models.knowledge import KnowledgePolicy, KnowledgeReference
 from tracemind.models.memory import (
@@ -74,6 +74,7 @@ class RunPurpose(StrEnum):
 
 
 class StopReason(StrEnum):
+    CONTRACT_CHANGED = "contract_changed"
     """Machine-readable reason why an investigation reached a terminal
     state.
     """
@@ -130,6 +131,14 @@ class RunState(BaseModel):
     """Mutable investigation state, counters, evidence IDs, and events.
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def mark_legacy_checkpoint(cls, value):
+        if (isinstance(value, dict) and "events" in value
+                and "contract_version" not in value):
+            value = {**value, "contract_version": "legacy"}
+        return value
+
     id: UUID = Field(default_factory=uuid4)
     investigation_id: UUID | None = None
     parent_run_id: UUID | None = None
@@ -152,7 +161,7 @@ class RunState(BaseModel):
     allowed_tools: tuple[ToolName, ...]
     knowledge_policy: KnowledgePolicy | None = None
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
-    prompt_version: str = "single-agent-v7"
+    prompt_version: str = "single-agent-v8"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
@@ -174,6 +183,9 @@ class RunState(BaseModel):
     evidence_ids: list[UUID] = Field(default_factory=list)
     diagnosis: Diagnosis | None = None
     verification_policy: VerificationPolicy | None = None
+    contract_version: str = "diagnosis-items-v1"
+    reference_map: dict[str, str] = Field(default_factory=dict)
+    candidate_items: list[ReviewItem] = Field(default_factory=list)
     verification: VerificationRecord | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
     events: list[RunEvent] = Field(default_factory=list)

@@ -39,7 +39,7 @@
       }
     },
     {
-      "name": "DiagnosisDraft",
+      "name": "DiagnosisProposal",
       "args": {
         "status": "inconclusive",
         "root_cause": "No telemetry confirms a cause",

@@ -35,7 +35,7 @@ from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.knowledge import KnowledgePolicy
 from tracemind.models.verification import VerificationPolicy
-from tracemind.agent.verification import DiagnosisVerifier
+from tracemind.agent.verification import DiagnosisVerifier, partial_draft
 from tracemind.rag.model_bridge import Completion
 from tracemind.models.result import DiagnosisDraft, DiagnosisRun
 from tracemind.models.run import (
@@ -253,6 +253,8 @@ class DiagnosisService:
             is_cancelled=is_cancelled, resume=resume,
             graph_resume=graph_resume,
         )
+        state.evidence_ids = [item.id for item in collector.evidence]
+        harness.evidence = lambda: collector.evidence
         harness.validate_draft = lambda draft: validate_draft(
             draft, collector.evidence, start=start, end=end,
             knowledge=state.knowledge,
@@ -261,6 +263,8 @@ class DiagnosisService:
         reason = StopReason.INTERNAL_ERROR
         try:
             async with asyncio.timeout(harness.remaining_seconds):
+                if state.contract_version != "diagnosis-items-v1":
+                    harness.stop(StopReason.CONTRACT_CHANGED)
                 if state.verification is not None:
                     draft = DiagnosisDraft(
                         **state.verification.candidate.model_dump(
@@ -294,8 +298,7 @@ class DiagnosisService:
                     knowledge=state.knowledge,
                 )
                 state.feedback_updates = draft.feedback_updates
-                if (state.verification_policy is not None
-                        and draft.status is DiagnosisStatus.COMPLETE):
+                if state.verification_policy is not None:
                     if self._verifier is None:
                         harness.stop(StopReason.VERIFICATION_FAILED)
                     candidate = Diagnosis(
@@ -351,12 +354,20 @@ class DiagnosisService:
                 reason = StopReason.RECURSION_LIMIT
             if reason is StopReason.CANCELLED:
                 terminal_status = RunStatus.CANCELLED
-            if reason in {
+            if reason is StopReason.VERIFICATION_REJECTED:
+                terminal_status = RunStatus.INCONCLUSIVE
+                draft = partial_draft(
+                    state.verification.items, state.verification.review)
+                harness.emit(
+                    "diagnosis.partial", parent_span_id=state.id,
+                    data={"evidence_ids": [
+                        str(i) for i in draft.evidence_ids]},
+                )
+            elif reason in {
                 StopReason.MODEL_BUDGET, StopReason.TOOL_BUDGET,
                 StopReason.REPEATED_TOOL_CALL, StopReason.RECURSION_LIMIT,
                 StopReason.CONTEXT_LIMIT,
                 StopReason.NO_PROGRESS, StopReason.INVALID_DIAGNOSIS,
-                StopReason.VERIFICATION_REJECTED,
             }:
                 terminal_status = RunStatus.INCONCLUSIVE
                 draft = DiagnosisDraft(

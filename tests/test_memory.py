@@ -368,7 +368,7 @@ def test_disabled_and_explanation_do_not_query_memory(tmp_path):
 def test_memory_only_citation_cannot_complete():
     snapshot = corpus()
     record = snapshot.records[0]
-    model = ScriptedModel(respond=lambda m, c: tool_call("DiagnosisDraft", {
+    model = ScriptedModel(respond=lambda m, c: tool_call("DiagnosisProposal", {
         "status": "complete", "root_cause": "Network timeout",
         "confidence": .99, "evidence_ids": [str(record.id)],
     }))

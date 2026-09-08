@@ -65,7 +65,7 @@
       }
     },
     {
-      "name": "DiagnosisDraft",
+      "name": "DiagnosisProposal",
       "args": {
         "status": "complete",
         "root_cause": "checkout cannot call payment: the gRPC name resolver produced zero addresses. The configured target and DNS records require verification.",

@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence
 from tracemind.models.memory import FeedbackUpdate
@@ -26,32 +26,38 @@ class DiagnosisRun(BaseModel):
 
 
 class DiagnosisDraft(BaseModel):
-    """Diagnostic proposal with status, confidence, citations, and
-    remediation.
-    """
+    """Resolved internal result with original public citation identifiers."""
 
     status: DiagnosisStatus
-    root_cause: str = Field(
-        min_length=1,
-        description=(
-            "Explain the diagnosis in three short parts: Observed failure; "
-            "Counterevidence and scope; Unknowns. Identify the operation "
-            "and observed error or latency. Explicitly discuss relevant "
-            "successful operations and other observations that limit the "
-            "claim; if none are available, say so. A single client's failure "
-            "does not prove a shared dependency is down. A recovery claim "
-            "requires earlier failure and later success of the same "
-            "operation/client, not success of a different operation. "
-            "Separate traces "
-            "do not prove one transaction without a linking identifier. "
-            "Distinguish the observed failure from its unverified "
-            "configuration or infrastructure cause."
-        ),
-    )
+    root_cause: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
+    feedback_updates: list[FeedbackUpdate] = Field(
+        default_factory=list, max_length=3,
+    )
+
+
+class ProposalStatement(BaseModel):
+    """One scoped statement with model-facing run-local references."""
+
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=1400)
+    evidence_refs: list[str] = Field(default_factory=list)
+    knowledge_refs: list[str] = Field(default_factory=list)
+
+
+class DiagnosisProposal(BaseModel):
+    """Model output; application code numbers, resolves and renders it."""
+
+    model_config = ConfigDict(extra="forbid")
+    status: DiagnosisStatus
+    confidence: float = Field(ge=0, le=1)
+    findings: list[ProposalStatement] = Field(max_length=6)
+    hypotheses: list[ProposalStatement] = Field(max_length=3)
+    limitations: list[ProposalStatement] = Field(max_length=3)
+    proposed_checks: list[ProposalStatement] = Field(max_length=3)
     feedback_updates: list[FeedbackUpdate] = Field(
         default_factory=list, max_length=3,
     )

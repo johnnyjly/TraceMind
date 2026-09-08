@@ -55,6 +55,7 @@ def make_task(
                 incident=subject.incident, investigation_start=subject.start,
                 investigation_end=subject.end, limits=settings.run_limits,
                 allowed_tools=(), knowledge=subject.knowledge,
+                candidate_items=subject.items,
                 verification_policy=policy,
             )
             harness = RunHarness(state)

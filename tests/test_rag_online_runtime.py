@@ -25,6 +25,57 @@ from test_rag import chunk, settings
 pytestmark = pytest.mark.rag
 
 
+def test_real_framework_embedding_keeps_the_open_runtime_owner(
+    tmp_path, monkeypatch,
+):
+    from lightrag import LightRAG
+    import numpy as np
+    from unittest.mock import AsyncMock
+
+    class Tokens:
+        def num_special_tokens_to_add(self, **kwargs):
+            return 2
+
+        def encode(self, text, **kwargs):
+            return list(text.encode())
+
+        def decode(self, tokens, **kwargs):
+            return bytes(tokens).decode()
+
+    received = []
+
+    async def embed(texts, **kwargs):
+        received.append((texts, kwargs))
+        return np.zeros((len(texts), 2))
+
+    # Keep the real constructor/config copying, without weights or Qdrant IO.
+    monkeypatch.setattr(LightRAG, "initialize_storages", AsyncMock())
+    monkeypatch.setattr(LightRAG, "finalize_storages", AsyncMock())
+    models = SimpleNamespace(
+        load=lambda: None, embedding=SimpleNamespace(tokenizer=Tokens()),
+        embed=embed,
+    )
+    runtime = RagRuntime(settings(
+        directory=tmp_path, snapshot="embedding-owner", embedding_dimension=2,
+    ), models=models)
+
+    async def exercise():
+        try:
+            await runtime.initialize()
+            assert runtime.index.count == 0
+            vectors = await runtime.rag.embedding_func(
+                ["request timeout"], context="query")
+            assert vectors.shape == (1, 2)
+            assert received == [(["request timeout"], {"context": "query"})]
+            assert runtime.index.count == 0
+        finally:
+            await runtime.close()
+        assert runtime.index is None
+        assert runtime.rag is None
+
+    asyncio.run(exercise())
+
+
 def test_planned_queries_fuse_before_exactly_one_rerank(tmp_path):
     runtime = RagRuntime(settings(result_limit=2))
     runtime._published = True

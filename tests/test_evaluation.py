@@ -25,6 +25,46 @@ from tracemind.models.result import DiagnosisRun
 CASE_PATH = Path("evals/cases/payment_failure.json")
 
 
+@pytest.mark.parametrize('explicit_status', [False, True])
+def test_case_cli_does_not_add_an_implicit_completion_requirement(
+        monkeypatch, tmp_path, explicit_status):
+    import runpy
+    import sys
+    from types import SimpleNamespace
+    from tracemind.config import Settings
+
+    payload = json.loads(CASE_PATH.read_text())
+    if explicit_status:
+        payload['ground_truth']['expected_status'] = 'complete'
+    case_path = tmp_path / 'case.json'
+    case_path.write_text(json.dumps(payload))
+    main = runpy.run_path('scripts/run_experiment.py')['main']
+    captured = []
+    client = SimpleNamespace(auth_check=lambda: True, flush=lambda: None)
+
+    def experiment(*args, **kwargs):
+        captured.append(args[2])
+        return SimpleNamespace(format=lambda: 'offline', experiment_id='local')
+
+    monkeypatch.setattr(sys, 'argv', [
+        'run_experiment.py', '--task', 'agent', '--name', 'offline',
+        '--case', str(case_path), '--max-model-calls', '1'])
+    monkeypatch.setitem(main.__globals__, 'Settings',
+                        lambda **kwargs: Settings(_env_file=None))
+    monkeypatch.setitem(main.__globals__, 'client_for',
+                        lambda *args, **kwargs: client)
+    monkeypatch.setitem(main.__globals__, 'run_experiment', experiment)
+    monkeypatch.setitem(main.__globals__, 'accepted', lambda result: True)
+    monkeypatch.setitem(main.__globals__, 'verify_publication',
+                        lambda *args, **kwargs: True)
+    with pytest.raises(SystemExit) as caught:
+        main()
+    assert caught.value.code == 0
+    expected = captured[0][0]['expected_output']
+    assert ('expected_status' in expected) is explicit_status
+    assert expected['root_cause_service'] == 'payment'
+
+
 def test_payment_failure_case_accepts_grounded_payment_diagnosis() -> None:
     case = EvaluationCase.load(CASE_PATH)
     evidence = Evidence(

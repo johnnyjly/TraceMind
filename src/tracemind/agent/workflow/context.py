@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from tracemind.models import Evidence
 from tracemind.models.run import RunState
+from tracemind.agent.workflow.references import model_references
 
 
 def guidance_context(state: RunState) -> str:
@@ -174,7 +175,7 @@ def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
             payload["prior_conclusion"] = None
         else:
             break  # The existing context gate rejects oversized user input.
-    return json_text(payload)
+    return json_text(model_references(payload, state))
 
 
 def json_text(value: object) -> str:

@@ -1,5 +1,7 @@
 """Exercise tool closure and evidence-grounded output in the real loop."""
 
+from proposal_fixtures import proposal_payload
+
 import asyncio
 import json
 from uuid import uuid4
@@ -48,7 +50,7 @@ def test_soft_limits_close_tools_and_accept_valid_final_diagnosis(
         assert_tool_pairs(messages)
         if "Investigation is closed" not in messages[0].text:
             return tool_call()
-        assert set(model.bindings[-1]) <= {"DiagnosisDraft"}
+        assert set(model.bindings[-1]) <= {"DiagnosisProposal"}
         fields = {
             "status": "complete" if complete else "inconclusive",
             "root_cause": ("Payment Charge failed" if complete else
@@ -59,7 +61,7 @@ def test_soft_limits_close_tools_and_accept_valid_final_diagnosis(
         }
         return (AIMessage(content=json.dumps(fields), usage_metadata={
             "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
-        }) if native else tool_call("DiagnosisDraft", fields))
+        }) if native else tool_call("DiagnosisProposal", fields))
 
     model = ScriptedModel(respond=respond, profile={
         "structured_output": native, "tool_calling": True,
@@ -88,8 +90,8 @@ def test_finalization_repairs_fake_citation_without_tools(tmp_path):
         assert_tool_pairs(messages)
         if calls == 1:
             return tool_call()
-        assert model.bindings[-1] == ["DiagnosisDraft"]
-        return tool_call("DiagnosisDraft", {
+        assert model.bindings[-1] == ["DiagnosisProposal"]
+        return tool_call("DiagnosisProposal", {
             "status": "complete", "root_cause": "Payment Charge failed",
             "confidence": .8,
             "evidence_ids": [
@@ -117,7 +119,7 @@ def test_finalization_cannot_exceed_remaining_model_attempts(tmp_path):
     ))
     assert model.calls == 1
     assert telemetry.calls == []
-    assert model.bindings == [["DiagnosisDraft"]]
+    assert model.bindings == [["DiagnosisProposal"]]
     assert run.state.stop_reason is StopReason.MODEL_BUDGET
     assert [e.data["reason"] for e in run.state.events
             if e.kind == "policy.finalizing"] == ["model_budget"]
@@ -215,7 +217,7 @@ def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(
         else:
             observation = next(m for m in payload["messages"]
                                if m.get("tool_call_id") == "call-1")
-            name, args = "DiagnosisDraft", {
+            name, args = "DiagnosisProposal", {
                 "status": "complete", "root_cause": "Payment Charge failed",
                 "confidence": .8,
                 "evidence_ids": [json.loads(observation["content"])[0]["id"]],
@@ -225,7 +227,7 @@ def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(
             assert "Investigation is now closed" in (
                 payload["messages"][-1]["content"])
             assert [t["function"]["name"] for t in payload["tools"]] == [
-                "DiagnosisDraft",
+                "DiagnosisProposal",
             ]
             assert payload["tool_choice"] == "required"
         return httpx.Response(200, json={
@@ -237,7 +239,10 @@ def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(
                                          "id": f"call-{len(requests)}",
                                          "type": "function", "function": {
                                              "name": name,
-                                             "arguments": json.dumps(args),
+                                             "arguments": json.dumps(
+                                                 proposal_payload(args)
+                                                 if name == "DiagnosisProposal"
+                                                 else args),
                                          },
                                      }]}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5,

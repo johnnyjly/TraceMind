@@ -247,19 +247,28 @@ execution ownership.
 
 ## Online completion verification and evaluation
 
-When enabled, a frozen run policy reserves one existing model-call slot for a
-tool-free review after citation validation and before diagnosis acceptance. All
-retained telemetry, knowledge and execution events enter the review. Rejection
-returns inconclusive; malformed/unavailable review fails the run. No automatic
-repair is performed. Completed reviews survive recovery; ambiguous interrupted
-attempts fail closed. The harness remains responsible for call/time budgets, usage accounting, cancellation,
-checkpoints and termination.
-Why: A reviewer must not bypass harness controls or repeat an ambiguous paid attempt
-after restart.
+The investigator returns structured findings, hypotheses, limitations and
+proposed checks with stable run-local reference handles. Application code numbers
+all statements, resolves original evidence IDs and renders the public diagnosis.
+The tool-free verifier assesses each complete numbered item once against every
+retained observation, including uncited counterevidence. Its output contains
+item IDs, not copied text. Mechanical coverage/reference checks run in code;
+semantic support remains a model judgment. Uncertainty is assessed per item,
+without an independent model-generated veto.
 
-Langfuse stores datasets, experiments, scores and optional runtime tracing.
-Offline Judge and online verifier share review contracts and proof obligations;
-only offline evaluation receives held-out correctness labels.
+A frozen policy reserves two existing model slots for one review and at most one
+format repair. Semantic rejection is not retried. Review errors remain distinct
+from unsupported diagnoses. Supported findings can survive rejection as an
+inconclusive report; the full candidate and review remain saved. Checkpointed
+attempts never repeat an ambiguous paid call on recovery. Versioned legacy runs
+are readable and explicitly barred from resuming the rewritten graph.
+
+A bounded packet removes duplicated text and unrelated execution events without
+silently dropping retained observations or attributes. Langfuse stores original
+artifacts, assessments and usage. Offline and runtime review share the semantic
+contract; only offline correctness evaluation receives held-out labels. This
+shared component supports fair single-agent/multi-agent comparisons, with
+investigation and review costs reported separately.
 Why: Runtime acceptance must be based on retained observations rather than leaked
 reference answers. Scripted replay
 lives under tests and measures harness behavior. The independent RAG service

@@ -148,6 +148,25 @@ class RagRuntime:
             reader = Path(self._reader_directory.name) / "lightrag"
             await run_io(shutil.copytree, working_dir, reader)
             working_dir = reader
+
+        # LightRAG deep-copies config; a bound runtime method would copy
+        # its open database connection too.
+        async def embed(texts, **kwargs):
+            with observation(
+                self.langfuse_client,
+                "knowledge.embedding",
+                as_type="embedding",
+                input={"texts": texts, "context": kwargs.get("context")},
+                metadata={
+                    "model": self.settings.embedding_model,
+                    "revision": self.settings.embedding_revision,
+                },
+            ) as span:
+                vectors = await self.models.embed(texts, **kwargs)
+                if span is not None:
+                    span.update(output={"vectors": len(vectors)})
+                return vectors
+
         try:
             special_tokens = (
                 self.models.embedding.tokenizer.num_special_tokens_to_add(
@@ -177,7 +196,7 @@ class RagRuntime:
                     ),
                     model_name=settings.embedding_model,
                     supports_asymmetric=True,
-                    func=self._embed,
+                    func=embed,
                 ),
                 llm_model_func=self.model.complete,
                 role_llm_configs={
@@ -276,22 +295,6 @@ class RagRuntime:
                 raise ValueError(
                     "Qdrant workspace already contains vectors; "
                     "use a new snapshot ID")
-
-    async def _embed(self, texts, **kwargs):
-        with observation(
-            self.langfuse_client,
-            "knowledge.embedding",
-            as_type="embedding",
-            input={"texts": texts, "context": kwargs.get("context")},
-            metadata={
-                "model": self.settings.embedding_model,
-                "revision": self.settings.embedding_revision,
-            },
-        ) as span:
-            vectors = await self.models.embed(texts, **kwargs)
-            if span is not None:
-                span.update(output={"vectors": len(vectors)})
-            return vectors
 
     async def search(self, query, **kwargs):
         with observation(

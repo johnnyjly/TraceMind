@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
     verifier_timeout_seconds: float = Field(
         default=60, gt=0, allow_inf_nan=False)
-    verifier_input_bytes: int = Field(default=65536, ge=1)
+    verifier_input_bytes: int = Field(default=131072, ge=1)
     verifier_output_tokens: int = Field(default=4096, ge=1)
     telemetry_transport: Literal["mcp"] = "mcp"
     telemetry_mcp_url: AnyHttpUrl = "http://127.0.0.1:8012/mcp"

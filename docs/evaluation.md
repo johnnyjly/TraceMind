@@ -3,7 +3,7 @@
 Langfuse owns datasets, experiment results, scores and comparisons. TraceMind
 supplies task adapters and versioned evaluators through its Python SDK. The
 agent harness still owns execution budgets, authorization, checkpoints and
-recovery. An optional online verifier checks completion before acceptance;
+recovery. An optional online verifier checks assertions before acceptance;
 Langfuse remains the only experiment/reporting platform.
 
 ## Local deployment
@@ -115,6 +115,10 @@ The alternative `--case evals/cases/payment_failure.json --lookback-minutes 10`
 constructs an item from a Demo scenario and a fixed UTC window. It does not
 activate faults. Run scenario setup separately, and wait for fresh telemetry.
 The case's tool cap still applies. See the Demo procedures below for fault setup.
+The CLI includes `expected_status` only when the case JSON explicitly specifies
+it. Omitting it allows evidence-backed localization to pass without a complete
+root cause; explicit status requirements remain strict. Use an online verifier
+or `--judge` to measure semantic support, rather than citation membership alone.
 
 `--task saved` accepts a saved diagnosis in each item's `input`. Canonical fields
 are `diagnosis`, `evidence`, `run_state` (or historical `state`), investigation
@@ -208,6 +212,9 @@ execution and chunking behavior retain their ordinary deterministic tests.
 | `required_source_citation` | Labeled service/source provenance only; not causal correctness |
 | `trace_integrity`, `tool_budget` | Retained harness accounting/closure/isolation and tool limit |
 | `expected_status` | Status matches a held-out case expectation |
+| `diagnosis_status` | Diagnostic certainty, separate from operational run status |
+| `verification_completed`, `verification_attempts`, `verification_format_repairs`, `verification_error` | Runtime review completion, paid attempts, local contract repairs and terminal errors; distinct from semantic rejection |
+| `grounded_findings`, `supported_finding_count` | Reviewed diagnostic excerpts actually retained with all their supporting telemetry citations; not independent correctness or measured information gain |
 | `model_calls`, `tool_calls`, `reported_tokens`, `unreported_model_calls` | Execution accounting; missing usage is explicit |
 | `backend_attempts`, `retries`, `recovered`, `diagnosis_repairs`, `fallback_activations`, `context_compressions` | Harness recovery and context behavior |
 | `run_status`, `stop_reason` | Retained terminal outcome |
@@ -225,9 +232,14 @@ runs require trace integrity/tool budget. Saved items with retained run state
 require those gates individually; mixing in an item without state cannot bypass
 another item's failed trace gate. Complete verified runs also require a saved
 accepted runtime review. Judge runs additionally require Judge
-completion, full claim support and appropriate uncertainty. Per-item status and
-correctness labels activate their corresponding gates, including mixed labeled
-and unlabeled datasets. `--min-score NAME=MIN` configures/overrides thresholds.
+completion, full claim support and appropriate uncertainty. Explicit per-item
+status requirements remain strict. Without an explicit status target, a reviewed
+item requires at least one grounded diagnostic finding; a pure abstention or an
+empty report cannot pass this usefulness gate. When the item labels a service
+and evidence source, their citation-provenance gate also applies. Correctness
+against a held-out reference is still reported, but is required by default only
+for answers claiming completion. These rules apply per item in mixed datasets.
+`--min-score NAME=MIN` configures/overrides thresholds.
 A failed task/evaluator, missing required score/item or unavailable score/trace
 publication fails acceptance. Acceptance is limited to the dataset, evaluator version and
 thresholds; it is not a causal truth certificate.
@@ -248,59 +260,72 @@ or price is not a measured zero. No second local pricing/report engine remains.
 
 ## Online completion verification
 
-Set `TRACEMIND_VERIFIER_ENABLED=true` in the API/worker/experiment environment.
-Default is false for existing deployments. Configure the independent reviewer
-with `TRACEMIND_VERIFIER_PROVIDER`, `TRACEMIND_VERIFIER_MODEL`,
-`TRACEMIND_VERIFIER_TIMEOUT_SECONDS`, `TRACEMIND_VERIFIER_INPUT_BYTES` and
-`TRACEMIND_VERIFIER_OUTPUT_TOKENS`. Defaults are DeepSeek Pro, 60 s, 65,536 bytes
-and 4,096 output tokens. Model/provider credentials use the existing settings.
-No extra dependency, tool permission or database migration is required.
+Set `TRACEMIND_VERIFIER_ENABLED=true` to enable the frozen run policy. The
+independent reviewer defaults to DeepSeek Pro, a total 60-second review deadline,
+131,072 input bytes and 4,096 output tokens. Existing explicit environment values
+continue to apply. The tool allowlist and public `Diagnosis` fields are unchanged.
 
-After citation validation, a complete candidate and **all retained** telemetry,
-knowledge excerpts and execution events are reviewed once without tools. Labels
-are absent from runtime review. Knowledge cannot establish current incident
-facts; empty queries and individual successful requests cannot establish fault
-absence. A JSON/schema/reference/proof-obligation validator checks the response.
-DeepSeek reviews use provider JSON Output (`response_format=json_object`), as
-[documented by DeepSeek](https://api-docs.deepseek.com/guides/json_mode/).
-Schema and semantic proof checks still run locally; JSON mode does not establish
-claim correctness. `claim.text` must quote a contiguous original root-cause or
-remediation excerpt (whitespace is normalized). Invented assertions fail the
-review instead of being used to judge the answer. Proposals to inspect/query are
-excluded from factual claims; explicit promised remediation effects still need
-support. Two generic contrast examples illustrate that distinction without
-using calibration item labels. Runtime and offline Judge share these rules.
-Why: Review must assess assertions actually made, preserving qualifications and
-excluding proposed checks.
-Completed reviews from another rubric version cannot be reused on resume.
-Why: A saved result from another rubric cannot establish compliance with the current
-review contract.
+The investigator submits `DiagnosisProposal`: scoped findings, explicitly
+unverified hypotheses, limitations and proposed checks. Each statement cites
+run-local `E` telemetry or `K` knowledge handles. The application maintains their
+stable mapping to original IDs, numbers statements, validates references and
+renders the public diagnosis deterministically. There is no later free-text model
+rewrite. Current run/checkpoint contract is `diagnosis-items-v1`; older records
+remain readable, but cannot resume the new graph. Start a new run instead.
 
-| Review outcome | Runtime outcome |
+Rubric `diagnosis-review-v22-items` reviews every numbered item exactly once.
+The model returns item IDs and assessments, never copied text. The application
+binds each assessment to the complete original item and checks exact ID coverage,
+unique valid references, time windows and proof obligations. Provider schemas
+constrain item, evidence and query-event references to the actual packet values;
+local validation is still authoritative. Model section labels do not exempt
+factual premises, claimed completed actions or promised effects from review.
+
+`ReviewPacket` includes every retained telemetry observation and its complete
+attributes, including uncited counterevidence. Queries are interned losslessly;
+duplicate candidate text, redundant trace indexes and unrelated model/checkpoint
+events are omitted. Relevant query events retain their sequence, timestamp and
+operational metadata. Original evidence and events remain in the run ledger.
+The actual native output schema is included once in input-budget accounting.
+Oversize packets are rejected before any paid call; evidence is not silently
+truncated. Knowledge cannot establish current incident facts, and an empty query
+cannot establish service health.
+
+| Outcome | Runtime behavior |
 | --- | --- |
-| Supported claims and appropriate uncertainty | Accept the original candidate and emit `diagnosis.accepted` |
-| Insufficient/contradicted claims or inappropriate uncertainty | `inconclusive`, reason `verification_rejected`; retain candidate and review |
-| Reviewer timeout/provider error, invalid review, oversized input or experiment call-cap denial | Failed run, reason `verification_failed`; retain partial state |
-| Shared run deadline or model-call limit exhausted | Existing harness deadline/budget stop applies; never accept complete |
-| Candidate already inconclusive | No verifier call |
+| All items supported | Accept the rendered candidate; inconclusive remains inconclusive |
+| Insufficient or contradicted item | Reject complete; preserve supported findings in an inconclusive result |
+| Malformed output, missing/duplicate items or invalid references | One targeted format repair at most |
+| Semantic rejection | No retry or repair |
+| Timeout, provider/call-cap error, exhausted format repair or input limit | Explicit verification failure; never accept complete |
 
-There is no automatic repair, model fallback or reviewer retry. Verification
-uses the existing run deadline and model-call budget, with one model
-slot reserved when verification is enabled. Reported tokens enter shared usage
-accounting, and review output has its own token cap; there is no aggregate
-monetary/token spend gate. Cancellation propagates and SSE
-reports review progress. Policy is frozen on run creation and inherited by
-follow-ups, so worker configuration changes do not silently bypass a saved gate.
-A persisted completed review is reused after checking its subject fingerprint;
-an interrupted/ambiguous attempt fails closed instead of issuing another paid
-call. Full evidence is never truncated to fit the reviewer.
-Why: Recovery must not duplicate an ambiguous paid attempt or silently weaken the
-evidence reviewed.
+There is no separate model-generated uncertainty veto. Uncertainty is assessed
+in the numbered items and its summary is derived from those verdicts. This
+prevents contradictory outcomes such as all items supported but rejected merely
+because no ritual unknown-cause sentence exists. It does not prove the model's
+semantic assessment correct.
 
-The review record lives in RunState/checkpoints. Langfuse records the review
-input/output and model usage when tracing is enabled; a Langfuse outage is not a
-second runtime authority. The verifier evaluates retained evidence, not facts
-that were never collected, and model agreement does not establish causal truth.
+Two existing model slots are reserved for review and its optional format repair;
+unused capacity is not a paid call. Both calls share the original run budget and
+review deadline. Reservations and results are checkpointed before/after external
+work. A completed matching review is reused; interrupted/ambiguous attempts fail
+closed, including interrupted repairs. Subject fingerprints bind the complete
+candidate, evidence packet and relevant query events. Cancellation propagates.
+
+Online and offline review share packets, schemas and proof validation. Offline
+Judge has no tool loop and uses one invocation per evaluation; online review may
+use the bounded format repair. Runtime inputs never receive held-out labels.
+Offline root-cause correctness is separate from evidence support and is null
+without a supplied reference. Langfuse is an observability/evaluation sink, not
+another runtime authority. Reports separate verification completion/error,
+semantic verdict, retained grounded findings and independent correctness; a
+correctly rejected wrong diagnosis is a successful verifier decision.
+
+This is a bounded single-agent baseline component for reuse in multi-agent
+experiments. Do not tune baseline diagnosis accuracy indefinitely or count an
+empty inconclusive result as a useful finding. Compare both architectures with
+the same verifier version, data, investigation budgets and separately reported
+review overhead.
 
 Run the same runtime verifier against eight manufactured cases with predefined
 expected verdicts:
@@ -308,11 +333,11 @@ expected verdicts:
 ```bash
 uv run python scripts/run_experiment.py --task verification \
   --name verifier-calibration --data evals/langfuse/verifier-calibration.json \
-  --env-file .env --env-file deploy/.env.langfuse --max-model-calls 8
+  --env-file .env --env-file deploy/.env.langfuse --max-model-calls 16
 ```
 
-This task makes one reviewer attempt per item, with no investigator or extra
-Judge call. `expected_output` stays outside the model input. Scores include
+This task uses one review plus at most one format repair per item, without
+an investigator or extra Judge call. Semantic rejection is not retried. `expected_output` stays outside the model input. Scores include
 `review_completed`, `support_verdict`, `would_accept`, `expected_verdict`,
 `expected_decision`, `false_acceptance` and `false_rejection`. A correct rejection
 passes the classification experiment. This differs from judging a set of

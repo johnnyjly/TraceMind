@@ -235,7 +235,9 @@ def test_generic_reference_id_cannot_become_a_diagnosis_citation():
 
 @pytest.mark.parametrize("definitions,grants", [
     ([definition("read_evidence")], ("catalog.lookup",)),
-    ([definition("DiagnosisDraft")], ("DiagnosisDraft",)),
+    ([definition("search_knowledge")], ("catalog.lookup",)),
+    ([definition("read_knowledge")], ("catalog.lookup",)),
+    ([definition("DiagnosisProposal")], ("DiagnosisProposal",)),
     ([definition("catalog.lookup"), definition("catalog.lookup")],
      ("catalog.lookup",)),
     ([definition("other")], ("catalog.lookup",)),
@@ -247,6 +249,16 @@ def test_bad_discovery_contracts_fail_before_dispatch(definitions, grants):
     with pytest.raises(RunStopped) as rejected:
         asyncio.run(bind(client, state(grants)))
     assert rejected.value.reason is StopReason.TOOL_ERROR
+    assert client.calls == []
+
+
+def test_disabled_local_knowledge_grants_are_not_required_from_mcp():
+    client = Client([definition("catalog.lookup")], CallToolResult(content=[]))
+    run = state(("catalog.lookup", "search_knowledge", "read_knowledge"))
+    tools, _, _ = asyncio.run(bind(client, run))
+    assert set(tools) == {"catalog.lookup"}
+    assert run.allowed_tools == (
+        "catalog.lookup", "search_knowledge", "read_knowledge")
     assert client.calls == []
 
 

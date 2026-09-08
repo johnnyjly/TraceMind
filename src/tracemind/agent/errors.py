@@ -53,13 +53,14 @@ class DiagnosisValidationError(DiagnosisError):
 
     def __init__(
         self, message: str, *, code: str, evidence_ids: Sequence[UUID] = (),
-        knowledge_refs: Sequence[str] = (),
+        knowledge_refs: Sequence[str] = (), references: Sequence[str] = (),
     ) -> None:
         """Keep validation details separate from provider exception text."""
         super().__init__(message)
         self.code = code
         self.evidence_ids = evidence_ids
         self.knowledge_refs = knowledge_refs
+        self.references = references
 
     def details(self) -> dict:
         """Bound citation feedback without hiding that more IDs failed."""
@@ -74,6 +75,8 @@ class DiagnosisValidationError(DiagnosisError):
                 "omitted_knowledge_refs": max(
                     0, len(self.knowledge_refs) - 20),
             })
+        if self.references:
+            result["references"] = list(self.references[:20])
         return result
 
 

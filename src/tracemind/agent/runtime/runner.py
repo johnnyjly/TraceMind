@@ -10,7 +10,8 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from tracemind.agent.runtime.harness import RunHarness
 from tracemind.agent.runtime.middleware import HarnessMiddleware
-from tracemind.models.result import DiagnosisDraft
+from tracemind.models.result import DiagnosisDraft, DiagnosisProposal
+from tracemind.agent.workflow.validation import resolve_proposal
 
 SYSTEM_PROMPT = (
     "You diagnose microservice incidents using the evidence and read-only "
@@ -20,6 +21,11 @@ SYSTEM_PROMPT = (
     "distinguish symptoms and observed failures from hypotheses about their "
     "causes, and seek contradicting observations. State the scope of sampled "
     "evidence and mark unverified mechanisms as hypotheses.\n"
+    "Useful progress includes narrowing the failing service, operation, "
+    "request cohort or propagation path with evidence. You need not identify "
+    "a unique originating mechanism on every investigation. Preserve scoped "
+    "findings and the observations that would distinguish remaining causes; "
+    "do not invent a mechanism to make the answer appear complete.\n"
     "If the available evidence cannot support a root cause, return an "
     "inconclusive diagnosis and explain what is missing. Recommend concrete "
     "remediation without claiming to execute it; mark unverified remedies "
@@ -54,6 +60,12 @@ SYSTEM_PROMPT = (
     "Tool results may be truncated or compressed. Tool metadata and "
     "compression indexes are not fault observations. Missing details or "
     "empty results do not prove health or rule out a cause.\n"
+    "Submit DiagnosisProposal: findings, hypotheses, limitations and "
+    "proposed_checks. Keep each statement short and scoped. Cite E handles "
+    "in evidence_refs and K handles in knowledge_refs; never trace/span IDs "
+    "or UUIDs. Findings assert observations; hypotheses remain explicitly "
+    "unverified; limitations state scope/gaps; checks are proposals without "
+    "promised effects. Do not repeat the same finding across sections. "
     "Return feedback_updates=[] unless application learning instructions "
     "are provided for this human follow-up."
 )
@@ -118,7 +130,7 @@ class LangChainAgentRunner:
             model=self._model,
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
-            response_format=DiagnosisDraft,
+            response_format=DiagnosisProposal,
             middleware=[HarnessMiddleware(harness, self._fallback_model)],
             checkpointer=self._checkpointer,
         )
@@ -133,4 +145,7 @@ class LangChainAgentRunner:
              {"messages": [{"role": "user", "content": prompt}]}),
             config,
         )
-        return DiagnosisDraft.model_validate(result["structured_response"])
+        return resolve_proposal(
+            DiagnosisProposal.model_validate(result["structured_response"]),
+            harness.state, harness.evidence(),
+        )

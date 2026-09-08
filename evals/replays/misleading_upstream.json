@@ -69,7 +69,7 @@
       }
     },
     {
-      "name": "DiagnosisDraft",
+      "name": "DiagnosisProposal",
       "args": {
         "status": "complete",
         "root_cause": "Payment Charge failed; checkout is the symptom",

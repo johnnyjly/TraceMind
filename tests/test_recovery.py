@@ -1,5 +1,7 @@
 """Injected failures exercise retry admission, backoff, and safe taxonomy."""
 
+from proposal_fixtures import proposal_payload
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -309,8 +311,9 @@ def test_fallback_selection_is_run_local(tmp_path):
 
     primary = ScriptedModel(respond=primary_response)
     fallback = ScriptedModel(respond=lambda messages, calls: tool_call(
-        "DiagnosisDraft", {"status": "inconclusive", "root_cause": "Unknown",
-                           "confidence": 0, "evidence_ids": []}
+        "DiagnosisProposal", {"status": "inconclusive",
+                              "root_cause": "Unknown",
+                              "confidence": 0, "evidence_ids": []}
     ))
     telemetry = Telemetry()
     service = DiagnosisService(
@@ -361,15 +364,15 @@ def test_specific_citation_feedback_repairs_output(tmp_path, native, failure):
         fields = diagnosis(messages).tool_calls[0]["args"]
         if calls == 2:
             invalid_ids.extend([unknown] if failure == "unknown"
-                               else fields["evidence_ids"] * 2)
-            fields["evidence_ids"] = invalid_ids
+                               else fields["findings"][0]["evidence_refs"] * 2)
+            fields["findings"][0]["evidence_refs"] = invalid_ids
         else:
             feedback = messages[-1].text
-            assert ("unknown_evidence" if failure == "unknown" else
-                    "duplicate_evidence") in feedback
+            assert ("unknown_reference" if failure == "unknown" else
+                    "duplicate_reference") in feedback
             assert invalid_ids[0] in feedback
         return (AIMessage(content=json.dumps(fields)) if native
-                else tool_call("DiagnosisDraft", fields))
+                else tool_call("DiagnosisProposal", fields))
 
     model = ScriptedModel(respond=respond, profile={
         "structured_output": native, "tool_calling": True,
@@ -380,9 +383,9 @@ def test_specific_citation_feedback_repairs_output(tmp_path, native, failure):
     assert run.state.diagnosis_repairs == 1
     rejected = next(e for e in run.state.events
                     if e.kind == "diagnosis.rejected")
-    assert rejected.data["validation_evidence_ids"] == [invalid_ids[0]]
+    assert rejected.data["validation_references"] == [invalid_ids[0]]
     candidate = json.loads(rejected.data["candidate_preview"])
-    assert candidate["evidence_ids"] == invalid_ids
+    assert candidate["findings"][0]["evidence_refs"] == invalid_ids
 
 
 def test_old_persisted_citation_is_rejected_with_window_feedback(tmp_path):
@@ -396,7 +399,7 @@ def test_old_persisted_citation_is_rejected_with_window_feedback(tmp_path):
             return tool_call()
         if calls == 2:
             return diagnosis(messages, override={
-                "evidence_ids": [str(old.id)],
+                "evidence_ids": ["E1"],
             })
         assert "evidence_outside_window" in messages[-1].text
         assert str(old.id) in messages[-1].text
@@ -429,7 +432,7 @@ def test_exhausted_schema_repairs_keep_bounded_audit(tmp_path, native):
         fields = {"status": "inconclusive", "root_cause": "原因" * 4000,
                   "confidence": 2, "evidence_ids": []}
         return (AIMessage(content=json.dumps(fields)) if native else
-                tool_call("DiagnosisDraft", fields))
+                tool_call("DiagnosisProposal", fields))
 
     model = ScriptedModel(respond=respond, profile={
         "structured_output": native, "tool_calling": True,
@@ -446,7 +449,10 @@ def test_exhausted_schema_repairs_keep_bounded_audit(tmp_path, native):
     assert len(rejected) == 2
     for data in rejected:
         assert data["validation_code"] == "schema_validation"
-        assert data["validation_fields"] == ["confidence: less_than_equal"]
+        assert set(data["validation_fields"]) == {
+            "confidence: less_than_equal",
+            "findings.0.text: string_too_long",
+        }
         assert len(data["candidate_preview"].encode()) <= 4096
         assert "原因" in data["candidate_preview"]
         assert data["candidate_truncated"]
@@ -465,7 +471,7 @@ def test_malformed_schema_repair_preserves_provider_usage(tmp_path, native):
                 usage_metadata={"input_tokens": 10, "output_tokens": 5,
                                 "total_tokens": 15},
             )
-        return tool_call("DiagnosisDraft", {"status": "invalid"}
+        return tool_call("DiagnosisProposal", {"status": "invalid"}
                          if calls == 1 else fields)
 
     model = ScriptedModel(respond=respond, profile={
@@ -488,7 +494,7 @@ def test_empty_queries_finalize_without_fabricating_evidence(tmp_path):
     def respond(messages, calls):
         if calls <= 3:
             return tool_call(arguments={"expression": str(calls)})
-        return tool_call("DiagnosisDraft", {
+        return tool_call("DiagnosisProposal", {
             "status": "inconclusive", "root_cause": "No observations found",
             "confidence": 0,
         })
@@ -556,7 +562,7 @@ def test_missing_structure_is_repaired_with_accounted_usage(tmp_path, content):
                                 "total_tokens": 15},
             )
         assert isinstance(messages[-1], HumanMessage)
-        return tool_call("DiagnosisDraft", {
+        return tool_call("DiagnosisProposal", {
             "status": "inconclusive", "root_cause": "Missing evidence",
             "confidence": 0,
         })
@@ -604,7 +610,7 @@ def test_repair_limits_are_independent_of_output_strategy(
             "root_cause": "Missing evidence", "confidence": 0,
         }
         return (AIMessage(content=json.dumps(fields)) if native
-                else tool_call("DiagnosisDraft", fields))
+                else tool_call("DiagnosisProposal", fields))
 
     model = ScriptedModel(respond=respond, profile={
         "structured_output": native, "tool_calling": True,
@@ -631,9 +637,9 @@ def test_mixed_rejected_diagnosis_executes_tools_and_repairs(
                 "status": "complete", "root_cause": "Unsupported",
                 "confidence": 1, "evidence_ids": [],
             })
-            drafts = tool_call("DiagnosisDraft", fields).tool_calls
+            drafts = tool_call("DiagnosisProposal", fields).tool_calls
             if failure == "multiple":
-                drafts += tool_call("DiagnosisDraft", fields).tool_calls
+                drafts += tool_call("DiagnosisProposal", fields).tool_calls
             queries = tool_call().tool_calls + tool_call(
                 arguments={"expression": "second"}
             ).tool_calls
@@ -644,7 +650,7 @@ def test_mixed_rejected_diagnosis_executes_tools_and_repairs(
                                 "total_tokens": 15},
             )
         errors = [m for m in messages if isinstance(m, ToolMessage)
-                  and m.name == "DiagnosisDraft"]
+                  and m.name == "DiagnosisProposal"]
         assert len(errors) == (2 if failure == "multiple" else 1)
         assert all(m.status == "error" for m in errors)
         return diagnosis(messages)
@@ -668,7 +674,7 @@ def test_internal_repair_history_survives_a_followup_tool_round(
         assert_tool_pairs(messages)
         if calls == 1:
             return (AIMessage(content="invalid json") if native else
-                    tool_call("DiagnosisDraft", {"status": "invalid"}))
+                    tool_call("DiagnosisProposal", {"status": "invalid"}))
         if calls == 2:
             return tool_call()
         assert sum("Diagnosis rejected" in m.text for m in messages) == 1
@@ -699,7 +705,9 @@ def test_repair_messages_reach_deepseek_with_valid_pairs(
 
     def sdk_call(name, fields, call_id):
         return {"id": call_id, "type": "function", "function": {
-            "name": name, "arguments": json.dumps(fields),
+            "name": name, "arguments": json.dumps(
+                proposal_payload(fields) if name == "DiagnosisProposal"
+                else fields),
         }}
 
     def respond(request):
@@ -719,7 +727,8 @@ def test_repair_messages_reach_deepseek_with_valid_pairs(
         if len(requests) == 1:
             message = {"role": "assistant", "content": "Missing structure"}
             if mixed or invalid_arguments:
-                draft = sdk_call("DiagnosisDraft", {"status": "invalid"}, "d1")
+                draft = sdk_call(
+                    "DiagnosisProposal", {"status": "invalid"}, "d1")
                 if invalid_arguments:
                     draft["function"]["arguments"] = "invalid json"
                 message["tool_calls"] = [draft]
@@ -738,7 +747,7 @@ def test_repair_messages_reach_deepseek_with_valid_pairs(
                                   json.loads(observation["content"])[0]["id"]
                               ])
             message = {"role": "assistant", "content": "", "tool_calls": [
-                sdk_call("DiagnosisDraft", fields, "d2"),
+                sdk_call("DiagnosisProposal", fields, "d2"),
             ]}
         return httpx.Response(200, json={
             "id": f"completion-{len(requests)}", "object": "chat.completion",

@@ -164,9 +164,12 @@ uv run python scripts/run_experiment.py --task agent --name payment-baseline \
 ```
 
 Online completion verification is opt-in with `TRACEMIND_VERIFIER_ENABLED=true`.
-It reviews a complete candidate once, before acceptance; rejection returns
-inconclusive and review failure fails the run. It never automatically repairs
-the diagnosis. See [verification](docs/evaluation.md#online-completion-verification).
+It reviews application-numbered findings, hypotheses, limits and proposed checks,
+including inconclusive answers. One format repair is allowed. Rejection
+returns an inconclusive report retaining review-supported findings and citations;
+review failure fails the run. It never automatically repairs the diagnosis.
+An unknown underlying mechanism does not erase evidence-backed localization.
+See [verification](docs/evaluation.md#online-completion-verification).
 Why: Keep review costs and failure outcomes explicit before enabling the saved
 completion gate.
 
