@@ -48,7 +48,7 @@ def test_soft_limits_close_tools_and_accept_valid_final_diagnosis(
 ):
     def respond(messages, calls):
         assert_tool_pairs(messages)
-        if "Investigation is closed" not in messages[0].text:
+        if "Investigation is closed" not in messages[-1].text:
             return tool_call()
         assert set(model.bindings[-1]) <= {"DiagnosisProposal"}
         fields = {

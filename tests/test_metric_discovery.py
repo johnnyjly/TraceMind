@@ -151,7 +151,7 @@ def test_metadata_reads_trigger_existing_closure_limits(
     tmp_path, reason, limits,
 ):
     def respond(messages, calls):
-        if "Investigation is closed" not in messages[0].text:
+        if "Investigation is closed" not in messages[-1].text:
             return tool_call("discover_metrics", {"limit": calls})
         assert model.bindings[-1] == ["DiagnosisProposal"]
         return tool_call("DiagnosisProposal", {

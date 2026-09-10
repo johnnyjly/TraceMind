@@ -41,6 +41,7 @@ class ScriptedModel(BaseChatModel):
 
     calls: int = 0
     bindings: list[list[str]] = Field(default_factory=list)
+    inputs: list[list] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
@@ -60,6 +61,7 @@ class ScriptedModel(BaseChatModel):
         self, messages, stop=None, run_manager=None, **kwargs
     ):
         self.calls += 1
+        self.inputs.append(messages)
         tool_messages = [
             item for item in messages
             if isinstance(item, ToolMessage) and item.name == "query_metrics"
@@ -83,6 +85,7 @@ class ScriptedModel(BaseChatModel):
             }])
         response.usage_metadata = {
             "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+            "input_token_details": {"cache_read": 4},
         }
         return ChatResult(generations=[ChatGeneration(message=response)])
 
@@ -147,6 +150,8 @@ def test_worker_persists_graph_and_terminal_result(tmp_path: Path) -> None:
     assert stored.state.status is RunStatus.SUCCEEDED
     assert stored.state.model_calls == model.calls == 2
     assert stored.state.tool_calls == {"query_metrics": 1}
+    assert stored.state.usage.reported_cache_hit_tokens == 8
+    assert stored.state.usage.reported_cache_model_calls == 2
     assert len(stored.evidence) == 1
     assert stored.result is not None
     assert stored.result.diagnosis.evidence_ids == [stored.evidence[0].id]
@@ -221,6 +226,7 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
     halfway = repository.get(state.id)
     assert halfway.state.model_calls == 1
     assert halfway.state.tool_calls == {"query_metrics": 1}
+    assert halfway.state.usage.reported_cache_hit_tokens == 4
     assert len(halfway.evidence) == telemetry.calls == 1
     with sqlite3.connect(settings.agent_run_database) as connection:
         connection.execute(
@@ -245,7 +251,16 @@ def test_resume_reuses_checkpoint_and_retained_evidence(
     assert completed.state.status is RunStatus.SUCCEEDED
     assert completed.state.model_calls == 2
     assert completed.state.tool_calls == {"query_metrics": 1}
+    assert completed.state.usage.reported_cache_hit_tokens == 8
+    assert completed.state.usage.reported_cache_model_calls == 2
     assert telemetry.calls == 1
+    original = first_model.inputs[0]
+    resumed = resumed_model.inputs[0]
+    assert resumed[:len(original)] == original
+    snapshots = [m for m in resumed if m.name == "runtime_budget"]
+    assert len(snapshots) == len({m.id for m in snapshots}) == 2
+    assert f"{model_budget} model calls" in snapshots[0].text
+    assert f"{model_budget - 1} model calls" in snapshots[1].text
     assert completed.result is not None
     assert completed.result.diagnosis.evidence_ids == [halfway.evidence[0].id]
     if finalizing or model_budget == 2:

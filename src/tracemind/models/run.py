@@ -125,6 +125,10 @@ class TokenUsage(BaseModel):
     reported_input_tokens: int = 0
     reported_output_tokens: int = 0
     reported_total_tokens: int = 0
+    reported_cache_model_calls: int = 0
+    unreported_cache_model_calls: int = 0
+    reported_cache_hit_tokens: int = 0
+    reported_cache_miss_tokens: int = 0
 
 
 class RunState(BaseModel):
@@ -161,7 +165,7 @@ class RunState(BaseModel):
     allowed_tools: tuple[ToolName, ...]
     knowledge_policy: KnowledgePolicy | None = None
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
-    prompt_version: str = "single-agent-v8"
+    prompt_version: str = "single-agent-v9"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None

@@ -21,6 +21,7 @@ from test_harness import (
     ScriptedModel,
     Telemetry,
     diagnosis,
+    last_exchange,
     make_service,
     run_service,
     tool_call,
@@ -225,9 +226,9 @@ def test_tool_exhaustion_uses_remaining_source(tmp_path):
         if calls == 1:
             return tool_call("search_traces", {"service": "checkout"})
         if calls == 2:
-            assert messages[-1].status == "error"
-            assert "No evidence" in messages[-1].content
-            assert "private" not in messages[-1].content
+            assert last_exchange(messages).status == "error"
+            assert "No evidence" in last_exchange(messages).content
+            assert "private" not in last_exchange(messages).content
             return tool_call()
         return diagnosis(messages)
 
@@ -336,8 +337,8 @@ def test_citation_repair_reuses_graph_messages_and_accounts_usage(tmp_path):
             return tool_call()
         if calls == 2:
             return diagnosis(messages, override={"evidence_ids": []})
-        assert messages[-1].status == "error"
-        assert '"code":"missing_evidence"' in messages[-1].content
+        assert last_exchange(messages).status == "error"
+        assert '"code":"missing_evidence"' in last_exchange(messages).content
         return diagnosis(messages)
 
     run = run_service(make_service(ScriptedModel(respond=respond),
@@ -367,7 +368,7 @@ def test_specific_citation_feedback_repairs_output(tmp_path, native, failure):
                                else fields["findings"][0]["evidence_refs"] * 2)
             fields["findings"][0]["evidence_refs"] = invalid_ids
         else:
-            feedback = messages[-1].text
+            feedback = last_exchange(messages).text
             assert ("unknown_reference" if failure == "unknown" else
                     "duplicate_reference") in feedback
             assert invalid_ids[0] in feedback
@@ -401,9 +402,9 @@ def test_old_persisted_citation_is_rejected_with_window_feedback(tmp_path):
             return diagnosis(messages, override={
                 "evidence_ids": ["E1"],
             })
-        assert "evidence_outside_window" in messages[-1].text
-        assert str(old.id) in messages[-1].text
-        assert START.isoformat() in messages[-1].text
+        assert "evidence_outside_window" in last_exchange(messages).text
+        assert str(old.id) in last_exchange(messages).text
+        assert START.isoformat() in last_exchange(messages).text
         return diagnosis(messages)
 
     service = make_service(ScriptedModel(respond=respond),
@@ -428,7 +429,8 @@ def test_exhausted_schema_repairs_keep_bounded_audit(tmp_path, native):
     def respond(messages, calls):
         assert_tool_pairs(messages)
         if calls > 1:
-            assert "confidence: less_than_equal" in messages[-1].text
+            assert "confidence: less_than_equal" in (
+                last_exchange(messages).text)
         fields = {"status": "inconclusive", "root_cause": "原因" * 4000,
                   "confidence": 2, "evidence_ids": []}
         return (AIMessage(content=json.dumps(fields)) if native else
@@ -561,7 +563,7 @@ def test_missing_structure_is_repaired_with_accounted_usage(tmp_path, content):
                 usage_metadata={"input_tokens": 10, "output_tokens": 5,
                                 "total_tokens": 15},
             )
-        assert isinstance(messages[-1], HumanMessage)
+        assert isinstance(last_exchange(messages), HumanMessage)
         return tool_call("DiagnosisProposal", {
             "status": "inconclusive", "root_cause": "Missing evidence",
             "confidence": 0,

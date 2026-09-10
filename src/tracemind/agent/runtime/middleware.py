@@ -16,7 +16,6 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -52,7 +51,7 @@ class HarnessMiddleware(AgentMiddleware):
 
         Add remaining budgets, reduce tool results when needed, and reserve
         output space. Stop before model admission if the input cannot fit.
-        Bind the provider output cap without mutating graph message history.
+        Retain runtime snapshots with the model exchanges in graph history.
         """
         self.harness.check_active()
         state = self.harness.state
@@ -60,7 +59,7 @@ class HarnessMiddleware(AgentMiddleware):
             self.harness.begin_finalization(StopReason.TOOL_BUDGET)
         else:
             self.harness.check_progress()
-        repair_history = []
+        model_history = []
         while True:
             if self._using_fallback:
                 request = request.override(model=self._fallback)
@@ -70,11 +69,18 @@ class HarnessMiddleware(AgentMiddleware):
 
             def prepare():
                 """Rebind before each attempt, including transport retries."""
-                nonlocal prepared
+                nonlocal prepared, request
                 if (state.limits.model_calls - state.model_calls
                         <= self.harness.finalization_calls):
                     self.harness.begin_finalization(StopReason.MODEL_BUDGET)
                 prepared = self._prepare_request(request)
+                # Keep exactly the snapshot sent before this attempt. Retrying
+                # appends a new snapshot without rewriting the earlier prefix.
+                snapshot = prepared.messages[-1]
+                model_history.append(snapshot)
+                request = request.override(
+                    messages=[*request.messages, snapshot]
+                )
 
             async def invoke():
                 """Retain provider output and usage after schema rejection."""
@@ -178,18 +184,18 @@ class HarnessMiddleware(AgentMiddleware):
                     ) for item in response.result
                 ):
                     return ModelResponse(
-                        result=[*repair_history, *feedback.result]
+                        result=[*model_history, *feedback.result]
                     )
                 # Both output strategies repair here. Only investigation
                 # rounds advance the no-progress policy, and all exchanges
                 # are returned to graph history when this invocation ends.
-                repair_history.extend(feedback.result)
+                model_history.extend(feedback.result)
                 request = request.override(
                     messages=[*request.messages, *feedback.result]
                 )
                 continue
             return ModelResponse(
-                result=[*repair_history, *response.result],
+                result=[*model_history, *response.result],
                 structured_response=response.structured_response,
             )
 
@@ -364,14 +370,15 @@ class HarnessMiddleware(AgentMiddleware):
         """Rebuild bounded context and output settings for the model."""
         state = self.harness.state
         budget = (
-            f"\nRemaining budget including the next call: "
+            "Application runtime snapshot. Earlier snapshots are historical; "
+            "only the latest applies.\n"
+            "Remaining budget including the next call: "
             f"{state.limits.model_calls - state.model_calls} model calls, "
             f"{state.limits.tool_calls - sum(state.tool_calls.values())} "
             "tool calls. "
             "Propose an inconclusive diagnosis if the evidence "
             "is insufficient."
         )
-        system = request.system_message.text if request.system_message else ""
         reason = self.harness.finalization_reason
         if reason is not None:
             budget += (
@@ -388,26 +395,23 @@ class HarnessMiddleware(AgentMiddleware):
             # The framework still binds the structured diagnosis schema;
             # DiagnosisProposal only submits the final result.
             request = request.override(tools=[], tool_choice=None)
-            # End the investigation exchange explicitly; a system-only budget
-            # update can leave the model continuing the last tool result.
-            request = request.override(messages=[
-                *request.messages,
-                HumanMessage(content=(
-                    "Investigation is now closed. Submit DiagnosisProposal "
-                    "now, using the evidence already available. No further "
-                    "tool queries are permitted. Keep conclusions scoped to "
-                    "the observed operations and distinguish confirmed "
-                    "failures from unverified underlying causes. In "
-                    "findings and limitations, discuss supporting and "
-                    "contrary "
-                    "evidence (including successful "
-                    "operations), and state what remains unknown. Do not "
-                    "merge events from separate traces into one transaction "
-                    "without a shared business identifier."
-                )),
-            ])
+            budget += (
+                "\nInvestigation is now closed. Submit DiagnosisProposal "
+                "now, using the evidence already available. No further "
+                "tool queries are permitted. Keep conclusions scoped to "
+                "the observed operations and distinguish confirmed "
+                "failures from unverified underlying causes. In "
+                "findings and limitations, discuss supporting and contrary "
+                "evidence (including successful operations), and state "
+                "what remains unknown. Do not merge events from separate "
+                "traces into one transaction without a shared business "
+                "identifier."
+            )
         request = request.override(
-            system_message=SystemMessage(content=system + budget)
+            messages=[*request.messages, HumanMessage(
+                content=budget, name="runtime_budget",
+                id=f"runtime-budget-{state.id}-{state.model_calls + 1}",
+            )]
         )
         selection = select_context(
             request, state.limits.context_tokens - state.limits.output_tokens

@@ -258,6 +258,39 @@ on Langfuse model pricing and available usage attribution; configure/verify the
 model catalog before treating displayed costs as authoritative. Unknown usage
 or price is not a measured zero. No second local pricing/report engine remains.
 
+### Context-cache measurements
+
+`model.completed` records `model`, `purpose`, `call`,
+`cache_usage_reported`, `cache_hit_tokens` and `cache_miss_tokens`.
+Cache values are null when the provider did not report usable cache usage.
+Normalized `input_token_details.cache_read` is preferred; DeepSeek's original
+`response_metadata.token_usage.prompt_cache_hit_tokens` is also supported.
+Miss tokens are the reported input total minus hit tokens. Cache hits are
+already included in input tokens and must not be added to total usage again.
+
+Run usage retains measured hit/miss totals and counts of attempts with and
+without cache usage. Langfuse code scores expose `cache_usage_coverage`
+(reported cache attempts / all admitted model attempts), measured
+`cache_hit_tokens`, `cache_miss_tokens`, and `cache_hit_rate`. The rate is
+omitted without measured input tokens. With partial coverage it applies only
+to the reported subset, not the entire run. Historical saved runs without
+cache fields cannot provide a measured hit rate.
+
+Compare weighted rates: sum(hit) / sum(hit + miss), rather than averaging
+per-request percentages. Use event model/purpose and order to distinguish
+investigation, verification, knowledge calls, and the first investigation
+request from later requests. Match model, tool schemas, workload and context
+limits across variants; inspect miss tokens, latency and diagnostic quality
+alongside the rate. Service-side cache persistence is best-effort, so a small
+live comparison is a smoke check rather than a stable performance estimate.
+
+Investigation requests keep system instructions fixed and append runtime
+budget snapshots after complete tool exchanges. Snapshots are retained in
+graph history, including retries and diagnosis repairs; the latest snapshot
+is authoritative. Context compression still operates on a request-only view,
+and finalization still removes investigation tools. These transitions can
+interrupt prefix reuse and should be identified when comparing requests.
+
 ## Online completion verification
 
 Set `TRACEMIND_VERIFIER_ENABLED=true` to enable the frozen run policy. The

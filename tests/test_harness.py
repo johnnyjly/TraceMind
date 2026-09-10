@@ -109,6 +109,12 @@ def tool_call(name="query_metrics", arguments=None) -> AIMessage:
     )
 
 
+def last_exchange(messages):
+    """Locate the last model/tool feedback before the runtime snapshot."""
+    return next(item for item in reversed(messages)
+                if item.name != "runtime_budget")
+
+
 def diagnosis(messages, *, override=None) -> AIMessage:
     observation = next(message for message in reversed(messages)
                        if isinstance(message, ToolMessage)
@@ -188,8 +194,10 @@ def test_real_loop_success_records_usage_evidence_and_terminal_event(tmp_path):
     assert run.state.evidence_ids == run.diagnosis.evidence_ids
     assert run.state.usage.reported_total_tokens == 30
     assert run.state.usage.unreported_model_calls == 0
-    assert "8 model calls" in model.inputs[0][0].text
-    assert "7 model calls" in model.inputs[1][0].text
+    assert model.inputs[0][0] == model.inputs[1][0]
+    assert "8 model calls" in model.inputs[0][-1].text
+    assert "7 model calls" in model.inputs[1][-1].text
+    assert model.inputs[1][:len(model.inputs[0])] == model.inputs[0]
     events = events_at(tmp_path)
     assert [event["sequence"] for event in events] == list(
         range(1, len(events) + 1)
@@ -437,7 +445,7 @@ def test_tools_exclude_outside_window_observations_before_storage(tmp_path):
     def respond(messages, calls):
         if calls == 1:
             return tool_call("get_trace_detail", {"trace_id": trace_id})
-        records = json.loads(messages[-1].content)
+        records = json.loads(last_exchange(messages).content)
         observations = [r for r in records if "id" in r]
         assert len(observations) == 2
         assert records[-1]["excluded_outside_window"] == 2
@@ -460,7 +468,7 @@ def test_old_only_tool_result_is_metadata_not_citable_evidence(tmp_path):
     def respond(messages, calls):
         if calls == 1:
             return tool_call()
-        records = json.loads(messages[-1].content)
+        records = json.loads(last_exchange(messages).content)
         assert all("id" not in r for r in records)
         assert records[0]["excluded_outside_window"] == 1
         return tool_call("DiagnosisProposal", {
@@ -491,8 +499,8 @@ def test_invalid_trace_id_is_repaired_before_backend_query(tmp_path, trace_id):
         if calls == 1:
             return tool_call("get_trace_detail", {"trace_id": invalid})
         if calls == 2:
-            assert messages[-1].status == "error"
-            assert "invalid_request" in messages[-1].content
+            assert last_exchange(messages).status == "error"
+            assert "invalid_request" in last_exchange(messages).content
             return tool_call("get_trace_detail", {"trace_id": trace_id})
         return diagnosis(messages)
 
@@ -945,7 +953,7 @@ def test_model_retry_rebinds_final_attempt_without_investigation_tools(
             assert "query_metrics" in model.bindings[-1]
             raise http_failure(503)
         assert model.bindings[-1] == ["DiagnosisProposal"]
-        assert "Investigation is closed (model_budget)" in messages[0].text
+        assert "Investigation is closed (model_budget)" in messages[-1].text
         return diagnosis(messages)
 
     model = ScriptedModel(respond=respond)

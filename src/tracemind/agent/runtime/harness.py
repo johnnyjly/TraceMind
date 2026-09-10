@@ -32,6 +32,23 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
+def _cache_usage(message) -> tuple[int, int] | None:
+    """Read normalized usage or DeepSeek's original chat-completion fields."""
+    usage = getattr(message, "usage_metadata", None) or {}
+    hit = (usage.get("input_token_details") or {}).get("cache_read")
+    total = usage.get("input_tokens")
+    if hit is None:
+        metadata = getattr(message, "response_metadata", {})
+        raw = metadata.get("token_usage") or {}
+        hit = raw.get("prompt_cache_hit_tokens")
+        total = raw.get("prompt_tokens", total)
+    # Missing or inconsistent external usage must not look like a zero hit.
+    if (type(hit) is not int or type(total) is not int
+            or not 0 <= hit <= total):
+        return None
+    return hit, total - hit
+
+
 class RunStopped(DiagnosisError):
     """Signal a harness-enforced stop with its machine-readable reason."""
 
@@ -405,6 +422,7 @@ class RunHarness:
             raise ModelCallFailed(Failure("model_budget_reserved"),
                                   timed_out=False)
         self.state.model_calls += 1
+        call_number = self.state.model_calls
         self.state.active_model = model_name
         span = uuid4()
         parent = self._tool_span.get() or self.state.id
@@ -412,9 +430,10 @@ class RunHarness:
             self._model_span = span
         started = monotonic()
         self.emit("model.started", span_id=span, parent_span_id=parent,
-                  data={"model": model_name, "call": self.state.model_calls,
+                  data={"model": model_name, "call": call_number,
                         "purpose": purpose})
         reported = False
+        cache_reported = False
         call_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         try:
             async with asyncio.timeout(
@@ -423,9 +442,12 @@ class RunHarness:
                 await self.checkpoint()
                 response = await call()
             # Main-loop responses wrap AIMessage; auxiliary calls return it.
-            usage = [getattr(item, "usage_metadata", None)
-                     for item in getattr(response, "result", (response,))]
-            for item in usage:
+            messages = getattr(response, "result", (response,))
+            cache_usage = []
+            for message in messages:
+                if hasattr(message, "usage_metadata"):
+                    cache_usage.append(_cache_usage(message))
+                item = getattr(message, "usage_metadata", None)
                 if item is not None:
                     reported = True
                     for key in call_usage:
@@ -439,10 +461,24 @@ class RunHarness:
                     self.state.usage.reported_total_tokens += item.get(
                         "total_tokens", 0
                     )
+            cache_reported = bool(cache_usage) and all(
+                item is not None for item in cache_usage
+            )
+            cache_hit = cache_miss = None
+            if cache_reported:
+                cache_hit = sum(item[0] for item in cache_usage)
+                cache_miss = sum(item[1] for item in cache_usage)
+                self.state.usage.reported_cache_hit_tokens += cache_hit
+                self.state.usage.reported_cache_miss_tokens += cache_miss
             self.emit("model.completed",
                       span_id=span, parent_span_id=parent,
                       duration_ms=(monotonic() - started) * 1000,
-                      data={"usage_reported": reported,
+                      data={"model": model_name, "purpose": purpose,
+                            "call": call_number,
+                            "usage_reported": reported,
+                            "cache_usage_reported": cache_reported,
+                            "cache_hit_tokens": cache_hit,
+                            "cache_miss_tokens": cache_miss,
                             **{key: value if reported else None
                                for key, value in call_usage.items()}})
             self.check_active()
@@ -467,6 +503,10 @@ class RunHarness:
                             "status_code": classify_failure(exc).status_code})
             raise
         finally:
+            if cache_reported:
+                self.state.usage.reported_cache_model_calls += 1
+            else:
+                self.state.usage.unreported_cache_model_calls += 1
             if reported:
                 self.state.usage.reported_model_calls += 1
             else:

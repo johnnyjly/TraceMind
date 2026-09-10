@@ -123,8 +123,26 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
                     state.usage.unreported_model_calls,
                 ),
                 metric("reported_tokens", state.usage.reported_total_tokens),
+                metric("cache_reported_model_calls",
+                       state.usage.reported_cache_model_calls),
+                metric("cache_unreported_model_calls",
+                       state.usage.unreported_cache_model_calls),
             ]
         )
+        if state.model_calls:
+            scores.append(metric(
+                "cache_usage_coverage",
+                state.usage.reported_cache_model_calls / state.model_calls,
+            ))
+        if state.usage.reported_cache_model_calls:
+            hit = state.usage.reported_cache_hit_tokens
+            miss = state.usage.reported_cache_miss_tokens
+            scores.extend([
+                metric("cache_hit_tokens", hit),
+                metric("cache_miss_tokens", miss),
+            ])
+            if hit + miss:
+                scores.append(metric("cache_hit_rate", hit / (hit + miss)))
     if state is not None and state.verification_policy is not None:
         record = state.verification
         review = (record.review if record and record.status == "completed"
