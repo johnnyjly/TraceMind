@@ -66,7 +66,7 @@ def worker(tmp_path, runs, model):
     """Keep the real graph/checkpoints and substitute only model/telemetry."""
     library = MemoryRepository(runs.database)
     settings = Settings(
-        _env_file=None, agent_run_database=runs.path,
+        _env_file=None, verifier_enabled=False, agent_run_database=runs.path,
         agent_checkpoint_database=tmp_path / "checkpoints.db",
         agent_trace_directory=tmp_path / "traces",
     )

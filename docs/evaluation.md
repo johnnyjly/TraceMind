@@ -293,7 +293,8 @@ interrupt prefix reuse and should be identified when comparing requests.
 
 ## Online completion verification
 
-Set `TRACEMIND_VERIFIER_ENABLED=true` to enable the frozen run policy. The
+Runtime verification is enabled by default. Set
+`TRACEMIND_VERIFIER_ENABLED=false` to explicitly disable it for new runs. The
 independent reviewer defaults to DeepSeek Pro, a total 60-second review deadline,
 131,072 input bytes and 4,096 output tokens. Existing explicit environment values
 continue to apply. The tool allowlist and public `Diagnosis` fields are unchanged.

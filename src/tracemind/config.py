@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     eval_judge_timeout_seconds: float = Field(default=60, gt=0)
     eval_judge_input_bytes: int = Field(default=65536, ge=1)
     eval_judge_output_tokens: int = Field(default=4096, ge=1)
-    verifier_enabled: bool = False
+    verifier_enabled: bool = True
     verifier_provider: Literal["google", "openai", "deepseek"] = "deepseek"
     verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
     verifier_timeout_seconds: float = Field(

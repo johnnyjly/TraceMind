@@ -193,11 +193,13 @@ Correction/revocation/deletion affects future retrieval but keeps copies in prio
 snapshots, receipts, checkpoints and reports. Evaluation uses separate
 [frozen corpora](evaluation.md#runtime-and-regression-boundaries), never the live user library.
 
-## Optional online verifier and Langfuse
+## Online verifier and optional Langfuse
 
-Enable `TRACEMIND_VERIFIER_ENABLED=true` consistently in API and worker settings
-for newly created runs. One tool-free completion review consumes the existing
-model-call/time budgets and shared token accounting; it never automatically repairs a diagnosis.
+Online verification is enabled by default for newly created runs. Set
+`TRACEMIND_VERIFIER_ENABLED=false` consistently in API and worker settings to
+explicitly disable it. Restart existing API and worker processes after changes.
+One tool-free completion review consumes the existing model-call/time budgets
+and shared token accounting; it never automatically repairs a diagnosis.
 Semantic rejection returns inconclusive, and review failure fails the run.
 Persisted policy and review state govern resumed runs.
 Why: Admission freezes the gate so later worker settings cannot silently remove it.

@@ -268,7 +268,8 @@ def test_disabled_knowledge_is_absent_from_the_real_model_tool_schema():
     from tracemind.config import Settings
 
     model = ScriptedModel(respond=lambda messages, calls: answer(messages))
-    settings = Settings(_env_file=None, agent_allowed_tools=GRANTS,
+    settings = Settings(_env_file=None, verifier_enabled=False,
+                        agent_allowed_tools=GRANTS,
                         agent_trace_directory=None)
     selected = build_service(
         settings, LangChainAgentRunner(model), NoRemoteTools())
@@ -350,7 +351,8 @@ def test_factory_wires_enabled_search_without_expanding_grants(monkeypatch):
                         lambda config: retrieval)
     monkeypatch.setattr(factory, "create_rag_completion",
                         lambda settings, rag: None)
-    configured = Settings(_env_file=None, agent_knowledge_enabled=True,
+    configured = Settings(_env_file=None, verifier_enabled=False,
+                          agent_knowledge_enabled=True,
                           agent_knowledge_snapshot=POLICY.snapshot,
                           agent_allowed_tools=GRANTS,
                           agent_trace_directory=None)

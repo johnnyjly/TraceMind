@@ -39,9 +39,11 @@ def diagnosis_judge(settings, client, budget):
         subject = ReviewSubject(
             diagnosis=observed.diagnosis, evidence=observed.evidence,
             items=(observed.run_state.candidate_items
-                   if observed.run_state and observed.run_state.verification
-                   and observed.run_state.verification.review
-                   and observed.run_state.verification.review.accepted
+                   if observed.run_state and (
+                       observed.run_state.verification is None
+                       or (observed.run_state.verification.review
+                           and observed.run_state.verification.review.accepted
+                           ))
                    else []),
             start=observed.investigation_start, end=observed.investigation_end,
             knowledge=observed.knowledge,

@@ -664,6 +664,8 @@ def test_process_claim_uses_execution_events_without_claiming_incident_support(
     )
     observed.diagnosis.root_cause += (
         "; The trace query returned an observation")
+    # This test intentionally edits a saved free-text diagnosis.
+    observed.run_state.candidate_items = []
     body = valid_review(observed)
     body["assessments"][0].update(
         kind="process", supporting_event_sequences=[sequence])
@@ -821,3 +823,69 @@ def test_verification_accepts_correct_rejection_with_held_out_labels(
     subject = json.loads(model.entered[0][-1].text)
     assert subject["reference"] is None
     assert scores(result.run_evaluations)["model_calls_admitted"] == 1
+
+
+@pytest.mark.parametrize("runtime_review", ["off", "accepted", "rejected"])
+def test_judge_preserves_items_without_runtime_review(
+    monkeypatch, sdk, tmp_path, runtime_review
+):
+    from tracemind.agent.verification import parse_review, partial_draft
+    from tracemind.agent.workflow.validation import render_items
+    from tracemind.models.verification import (
+        ReviewItem, ReviewSubject, VerificationRecord,
+    )
+    from replay_support import run_replay_evaluation
+
+    observed = asyncio.run(run_replay_evaluation(
+        ReplayFixture.load(Path("evals/replays/payment_failure.json")),
+        Settings(_env_file=None, verifier_enabled=False,
+                 agent_trace_directory=tmp_path),
+    ))
+    items = [ReviewItem(
+        id=f"F{i}", section="finding", text=f"Payment observation {i}",
+        evidence_ids=[observed.evidence[0].id],
+    ) for i in (1, 2)]
+    draft = render_items(items, observed.diagnosis.status,
+                         observed.diagnosis.confidence)
+    observed.diagnosis = Diagnosis(
+        incident_id=observed.diagnosis.incident_id, **draft.model_dump())
+    observed.run_state.candidate_items = items
+    body = valid_review(observed)
+    body["assessments"].append({
+        **body["assessments"][0], "item_id": "F2",
+    })
+    if runtime_review != "off":
+        subject = ReviewSubject(
+            diagnosis=observed.diagnosis, evidence=observed.evidence,
+            items=items, start=observed.investigation_start,
+            end=observed.investigation_end,
+        )
+        runtime_body = json.loads(json.dumps(body))
+        if runtime_review == "rejected":
+            runtime_body["assessments"][1].update(
+                verdict="insufficient", supporting_refs=[],
+                missing_observations=["Missing linked observation"],
+            )
+        review = parse_review(
+            AIMessage(content=json.dumps(runtime_body)), subject)
+        observed.run_state.verification = VerificationRecord(
+            candidate=observed.diagnosis, items=items,
+            rubric_version="test", input_sha256="test",
+            review=review,
+        )
+        if runtime_review == "rejected":
+            partial = partial_draft(items, review)
+            observed.diagnosis = Diagnosis(
+                incident_id=observed.diagnosis.incident_id,
+                **partial.model_dump())
+            body = valid_review(observed)
+    model = FakeModel(response=json.dumps(body))
+    monkeypatch.setattr("tracemind.evaluation.judge.create_review_model",
+                        lambda settings: model)
+    evaluate = diagnosis_judge(Settings(_env_file=None), sdk[0],
+                               ModelCallBudget(1))
+    result = scores(asyncio.run(evaluate(output=observed)))
+    assert result["judge_completed"]
+    packet = json.loads(model.entered[0][1].content)
+    assert [item["id"] for item in packet["items"]] == (
+        ["F1"] if runtime_review == "rejected" else ["F1", "F2"])

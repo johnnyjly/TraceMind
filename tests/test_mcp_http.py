@@ -360,7 +360,8 @@ def test_http_timeout_or_cancellation_closes_owner_task(cancel):
 def test_http_service_reaches_validated_diagnosis():
     async def exercise():
         async with http_server() as url:
-            settings = Settings(_env_file=None, telemetry_mcp_url=url)
+            settings = Settings(_env_file=None, verifier_enabled=False,
+                                telemetry_mcp_url=url)
             async with open_telemetry_backend(settings) as client:
                 service = DiagnosisService(
                     LangChainAgentRunner(ScriptedModel()),
@@ -460,7 +461,7 @@ def test_entrypoints_use_shared_http_service_assembly(
         backend = Backend()
         async with http_server(backend) as url:
             settings = Settings(
-                _env_file=None, telemetry_mcp_url=url,
+                _env_file=None, verifier_enabled=False, telemetry_mcp_url=url,
                 agent_run_database=tmp_path / 'runs.db',
                 agent_checkpoint_database=tmp_path / 'checkpoints.db',
                 agent_trace_directory=tmp_path / 'traces',

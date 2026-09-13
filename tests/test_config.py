@@ -30,3 +30,14 @@ def test_example_covers_all_settings_and_loads_diagnostic_profile():
     assert settings.agent_fallback_model == "deepseek-flash"
     assert settings.eval_judge_provider == "deepseek"
     assert settings.eval_judge_model == "deepseek-v4-pro"
+
+    assert settings.verifier_enabled
+    assert settings.verification_policy is not None
+
+
+def test_verifier_defaults_on_and_can_be_explicitly_disabled(monkeypatch):
+    assert Settings(_env_file=None).verification_policy is not None
+    monkeypatch.setenv("TRACEMIND_VERIFIER_ENABLED", "false")
+    settings = Settings(_env_file=None)
+    assert not settings.verifier_enabled
+    assert settings.verification_policy is None
