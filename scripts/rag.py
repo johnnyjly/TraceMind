@@ -29,13 +29,13 @@ from tracemind.rag.local_models import LocalModels, load_tokenizer
 
 def create_completion(
     settings: RagSettings, *, env_file: Path | list[Path] | None = None,
-    callbacks=None,
+    callbacks=None, purpose="ingestion",
 ) -> Completion:
     """Assemble a lazy provider adapter outside the retrieval library."""
     provider_settings = Settings(
         **({"_env_file": env_file} if env_file else {}))
     return create_rag_completion(
-        provider_settings, settings, callbacks=callbacks)
+        provider_settings, settings, callbacks=callbacks, purpose=purpose)
 
 
 async def run(args) -> None:
@@ -253,6 +253,7 @@ async def _run(args) -> None:
     runtime = RagRuntime(
         settings,
         completion=create_completion(settings, env_file=args.env_file,
+                                     purpose="retrieval",
                                      callbacks=callbacks_for(app_settings)),
         langfuse_client=client,
     )

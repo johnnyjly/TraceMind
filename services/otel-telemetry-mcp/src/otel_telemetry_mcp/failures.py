@@ -19,7 +19,8 @@ def classify_failure(error: Exception) -> RemoteFailure:
             status = current.response.status_code
             retryable = status in {408, 429, 500, 502, 503, 504}
             category = ("transient" if retryable else "access_denied"
-                        if status in {401, 403} else "invalid_request"
+                        if status in {401, 403} else "not_found"
+                        if status == 404 else "invalid_request"
                         if 400 <= status < 500 else "service_error")
             hint = retry_after(current.response.headers.get("retry-after"))
             return RemoteFailure(category=category, retryable=retryable,

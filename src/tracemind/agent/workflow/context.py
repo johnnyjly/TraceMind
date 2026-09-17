@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 
 from langchain.agents.middleware import ModelRequest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from tracemind.models import Evidence
 from tracemind.models.run import RunState
@@ -15,15 +15,23 @@ def guidance_context(state: RunState) -> str:
     """Expose bounded reusable instructions; saved snapshots retain origins."""
     payload = {
         "profile": state.guidance_snapshot.profile,
-        "records": [{
-            "id": str(r.id), "key": r.key, "kind": r.kind,
-            "revision": r.revision, "instruction": r.instruction[:1000],
-            "bounded_preview": True,
-        } for r in state.guidance_snapshot.records],
+        "records": [
+            {
+                "id": str(r.id),
+                "key": r.key,
+                "kind": r.kind,
+                "revision": r.revision,
+                "instruction": r.instruction[:1000],
+                "bounded_preview": True,
+            }
+            for r in state.guidance_snapshot.records
+        ],
         "omitted_records": 0,
     }
-    while (len(json_text(payload).encode()) >
-           state.learning_policy.context_bytes and payload["records"]):
+    while (
+        len(json_text(payload).encode()) > state.learning_policy.context_bytes
+        and payload["records"]
+    ):
         payload["records"].pop()
         payload["omitted_records"] += 1
     return json_text(payload)
@@ -40,22 +48,32 @@ def memory_context(state: RunState) -> str:
         "scope": snapshot.scope.model_dump(),
         "snapshot_id": snapshot.fingerprint,
         "historical_experience_only": True,
-        "records": [{
-            "memory_id": str(r.id), "revision": r.revision,
-            "services": r.services, "symptom": r.symptom[:240],
-            "resolution": r.resolution[:640],
-            "diagnostic_queries": [q[:240] for q in r.diagnostic_queries[:2]],
-            "remediation": [q[:240] for q in r.remediation[:2]],
-            "source_run_id": str(r.source_run_id),
-            "confirmed_by": r.confirmed_by,
-            "confirmation_note": r.confirmation_note[:160],
-            "confirmed_at": r.confirmed_at.isoformat(),
-            "expires_at": r.expires_at.isoformat(), "bounded_preview": True,
-        } for r in snapshot.records],
+        "records": [
+            {
+                "memory_id": str(r.id),
+                "revision": r.revision,
+                "services": r.services,
+                "symptom": r.symptom[:240],
+                "resolution": r.resolution[:640],
+                "diagnostic_queries": [
+                    q[:240] for q in r.diagnostic_queries[:2]
+                ],
+                "remediation": [q[:240] for q in r.remediation[:2]],
+                "source_run_id": str(r.source_run_id),
+                "confirmed_by": r.confirmed_by,
+                "confirmation_note": r.confirmation_note[:160],
+                "confirmed_at": r.confirmed_at.isoformat(),
+                "expires_at": r.expires_at.isoformat(),
+                "bounded_preview": True,
+            }
+            for r in snapshot.records
+        ],
         "omitted_records": 0,
     }
-    while (len(json_text(payload).encode()) > state.memory_policy.context_bytes
-           and payload["records"]):
+    while (
+        len(json_text(payload).encode()) > state.memory_policy.context_bytes
+        and payload["records"]
+    ):
         payload["records"].pop()
         payload["omitted_records"] += 1
     if len(json_text(payload).encode()) > state.memory_policy.context_bytes:
@@ -74,21 +92,35 @@ def _evidence_preview(item: Evidence) -> dict:
     if len(json_text(data).encode()) <= 2000:
         return data
     preview = {
-        "id": str(item.id), "source": item.source.value,
+        "id": str(item.id),
+        "source": item.source.value,
         "service": item.service[:120] if item.service else None,
         "observed_at": item.observed_at.isoformat(),
         "summary": item.summary[:240],
         "query": item.query[:240] if item.query else None,
-        "attributes": {}, "truncated": True,
-        "omitted_attribute_keys": [], "truncated_attribute_keys": [],
+        "attributes": {},
+        "truncated": True,
+        "omitted_attribute_keys": [],
+        "truncated_attribute_keys": [],
     }
     priority = (
-        "operation", "error_type", "otel_status_description",
-        "status_message", "body", "trace_id", "span_id", "labels", "value",
+        "operation",
+        "error_type",
+        "otel_status_description",
+        "status_message",
+        "body",
+        "trace_id",
+        "span_id",
+        "labels",
+        "value",
     )
-    keys = sorted(item.attributes, key=lambda k: (
-        priority.index(k) if k in priority else len(priority), k,
-    ))
+    keys = sorted(
+        item.attributes,
+        key=lambda k: (
+            priority.index(k) if k in priority else len(priority),
+            k,
+        ),
+    )
     for key in keys:
         value = item.attributes[key]
         shortened = isinstance(value, str) and len(value) > 320
@@ -104,15 +136,21 @@ def _evidence_preview(item: Evidence) -> dict:
     return preview
 
 
-def _prioritized_evidence(state: RunState, evidence: list[Evidence]):
+def _prioritized_evidence(
+    state: RunState, evidence: list[Evidence], priority_ids=()
+):
     """Yield cited observations first, interleaving services and sources.
 
     This is a coverage heuristic, not a causal ranking. It prevents a large
     batch from one service from displacing every downstream observation.
     """
-    cited = set(state.prior_diagnosis.evidence_ids) if (
-        state.prior_diagnosis is not None
-    ) else set()
+    cited = (
+        set(state.prior_diagnosis.evidence_ids)
+        if (state.prior_diagnosis is not None)
+        else set()
+    )
+    if priority_ids:
+        cited = set(priority_ids)
     for is_cited in (True, False):
         groups = {}
         for item in evidence:
@@ -124,7 +162,9 @@ def _prioritized_evidence(state: RunState, evidence: list[Evidence]):
                     yield group[offset]
 
 
-def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
+def collaboration_context(
+    state: RunState, evidence: list[Evidence], *, priority_ids=()
+) -> str:
     """Bound prior findings while keeping the current user request intact.
 
     Complete observations remain available through run-local read_evidence.
@@ -142,12 +182,16 @@ def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
             "remediation": [text[:240] for text in prior.remediation[:3]],
             "evidence_ids": [str(i) for i in prior.evidence_ids[:20]],
             "historical_claim_only": True,
-        } if prior else None,
+        }
+        if prior
+        else None,
         "available_evidence_count": len(evidence),
         "omitted_prior_evidence": state.omitted_prior_evidence,
         "evidence_previews": [
             _evidence_preview(item)
-            for item in list(_prioritized_evidence(state, evidence))[:20]
+            for item in list(
+                _prioritized_evidence(state, evidence, priority_ids)
+            )[:20]
         ],
         "omitted_evidence_previews": 0,
         "bounded_history": True,
@@ -159,11 +203,14 @@ def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
             else "detail retrieval is unavailable under current tool policy"
         ),
     }
-    allowance = min(16000, max(
-        0, (state.limits.context_tokens - state.limits.output_tokens) // 3
-    ))
-    payload["omitted_evidence_previews"] = (
-        len(evidence) - len(payload["evidence_previews"])
+    allowance = min(
+        16000,
+        max(
+            0, (state.limits.context_tokens - state.limits.output_tokens) // 3
+        ),
+    )
+    payload["omitted_evidence_previews"] = len(evidence) - len(
+        payload["evidence_previews"]
     )
     while len(json_text(payload).encode()) > allowance:
         if payload["recent_user_messages"]:
@@ -180,8 +227,9 @@ def collaboration_context(state: RunState, evidence: list[Evidence]) -> str:
 
 def json_text(value: object) -> str:
     """Serialize JSON deterministically while preserving Unicode characters."""
-    return json.dumps(value, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":"))
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def estimate_payload(payload: object) -> int:
@@ -203,10 +251,15 @@ def estimate_input(request: ModelRequest) -> int:
     if schema is not None and hasattr(schema, "model_json_schema"):
         schema = schema.model_json_schema()
     payload = {
-        "system": (request.system_message.model_dump(mode="json")
-                   if request.system_message else None),
-        "messages": [m.model_dump(mode="json", exclude={"artifact"})
-                     for m in request.messages],
+        "system": (
+            request.system_message.model_dump(mode="json")
+            if request.system_message
+            else None
+        ),
+        "messages": [
+            m.model_dump(mode="json", exclude={"artifact"})
+            for m in request.messages
+        ],
         "tools": [convert_to_openai_tool(tool) for tool in request.tools],
         "response_format": schema,
         "tool_choice": request.tool_choice,
@@ -233,8 +286,13 @@ class ContextSelection:
     omitted_previews: int = 0
 
 
-def bounded_index(items: list[dict], count: int, *, key: str = "id",
-                  reader: str = "read_evidence") -> list[dict]:
+def bounded_index(
+    items: list[dict],
+    count: int,
+    *,
+    key: str = "id",
+    reader: str = "read_evidence",
+) -> list[dict]:
     """Retain a prefix of evidence references and all non-evidence records.
 
     Omission concerns this input view only. The run-local evidence catalogue
@@ -242,20 +300,27 @@ def bounded_index(items: list[dict], count: int, *, key: str = "id",
     """
     references = [item for item in items if key in item]
     metadata = [item for item in items if key not in item]
-    return [*references[:count], *metadata, {
-        "context_omitted_count": len(references) - count,
-        "retrieval": (
-            f"{reader} pages retained references and reads full detail"
-        ),
-    }]
+    return [
+        *references[:count],
+        *metadata,
+        {
+            "context_omitted_count": len(references) - count,
+            "retrieval": (
+                f"{reader} pages retained references and reads full detail"
+            ),
+        },
+    ]
 
 
-def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
+def select_context(
+    request: ModelRequest, allowance: int, *, coordinator_handoff: bool = False
+) -> ContextSelection:
     """Reduce tool results oldest first to fit the input-only allowance.
 
     Use application-generated indexes, then bounded previews if authorized
     evidence retrieval is available. Preserve tool-call/result pairs and
-    newly requested detail pages. Count omitted references explicitly.
+    newly requested pages. Catalogue pages may use full compact indexes,
+    but their references must stay reachable through the returned cursor.
     Return fits=False if reduction is insufficient. Original messages and
     stored evidence are not mutated; output space must be reserved by the
     caller before supplying allowance.
@@ -266,14 +331,20 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
 
     messages = list(request.messages)
     last_call = max(
-        (i for i, m in enumerate(messages)
-         if isinstance(m, AIMessage) and m.tool_calls), default=-1
+        (
+            i
+            for i, m in enumerate(messages)
+            if isinstance(m, AIMessage) and m.tool_calls
+        ),
+        default=-1,
     )
     reduced = set()
     eligible = []
     after = before
-    readers = {convert_to_openai_tool(tool)["function"]["name"]
-               for tool in request.tools}
+    readers = {
+        convert_to_openai_tool(tool)["function"]["name"]
+        for tool in request.tools
+    }
     # Oldest results first; never remove an assistant call or its response.
     for index, message in enumerate(messages):
         if not isinstance(message, ToolMessage):
@@ -287,7 +358,8 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
         # A requested detail page must reach the model intact this round.
         if index > last_call and artifact.get("detail_page"):
             continue
-        eligible.append(index)
+        if not (index > last_call and artifact.get("catalogue_page")):
+            eligible.append(index)
         content = json_text(artifact["context_index"])
         if len(content.encode()) >= len(str(message.content).encode()):
             continue
@@ -317,10 +389,13 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
             def candidate(keep: int) -> ModelRequest:
                 """Build a view while preserving messages and artifacts."""
                 view = list(messages)
-                view[index] = message.model_copy(update={
-                    "content": json_text(bounded_index(
-                        items, keep, key=key, reader=reader)),
-                })
+                view[index] = message.model_copy(
+                    update={
+                        "content": json_text(
+                            bounded_index(items, keep, key=key, reader=reader)
+                        ),
+                    }
+                )
                 return request.override(messages=view)
 
             compact = candidate(0)
@@ -348,7 +423,69 @@ def select_context(request: ModelRequest, allowance: int) -> ContextSelection:
                 return ContextSelection(
                     compact, before, after, len(reduced), True, omitted
                 )
+    if (
+        coordinator_handoff
+        and messages
+        and isinstance(messages[0], HumanMessage)
+    ):
+        # This packet is created by the coordinator, not by user/tool text.
+        # Measure the outer message escaping, schema and runtime budget too.
+        message = messages[0]
+        prefix, marker, content = message.text.rpartition(
+            "\nCoordinator context:\n"
+        )
+        if marker:
+            packet = json.loads(content)
+            originals = packet["originals"]
+
+            def handoff(keep: int) -> ModelRequest:
+                view = {
+                    **packet,
+                    "originals": originals[:keep],
+                    "omitted_original_refs": list(
+                        dict.fromkeys(
+                            [
+                                *packet["omitted_original_refs"],
+                                *(item["id"] for item in originals[keep:]),
+                            ]
+                        )
+                    ),
+                    "originals_reader_available": "read_evidence" in readers,
+                    "originals_coverage": (
+                        "Only displayed originals were supplied in "
+                        "this message. "
+                        "Omitted records remain retained, but their content "
+                        "is not supplied here. Do not infer their content. "
+                        "Use only inspected originals; state missing support."
+                    ),
+                }
+                compact_messages = list(messages)
+                compact_messages[0] = message.model_copy(
+                    update={"content": prefix + marker + json_text(view)}
+                )
+                return request.override(messages=compact_messages)
+
+            compact = handoff(0)
+            if estimate_input(compact) < after:
+                keep = 0
+                low, high = 0, len(originals) - 1
+                while low <= high:
+                    middle = (low + high) // 2
+                    probe = handoff(middle)
+                    if estimate_input(probe) <= allowance:
+                        keep, compact = middle, probe
+                        low = middle + 1
+                    else:
+                        high = middle - 1
+                messages = list(compact.messages)
+                after = estimate_input(compact)
+                reduced.add(0)
+                omitted += len(originals) - keep
     return ContextSelection(
-        request.override(messages=messages), before, after, len(reduced),
-        False, omitted,
+        request.override(messages=messages),
+        before,
+        after,
+        len(reduced),
+        after <= allowance,
+        omitted,
     )

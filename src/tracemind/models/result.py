@@ -44,7 +44,10 @@ class ProposalStatement(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=1400)
-    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(
+        default_factory=list,
+        description='Exact retained handles, e.g. ["E17", "E18"]. '
+        'Repeat the E prefix on every entry; never use bare numbers.')
     knowledge_refs: list[str] = Field(default_factory=list)
 
 

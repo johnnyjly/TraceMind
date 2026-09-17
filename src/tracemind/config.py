@@ -22,21 +22,29 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     langfuse_enabled: bool = False
+    langfuse_timeout_seconds: float = Field(
+        default=5, gt=0, allow_inf_nan=False
+    )
     langfuse_base_url: AnyHttpUrl = "http://127.0.0.1:3000"
     langfuse_public_key: str | None = None
     langfuse_secret_key: SecretStr | None = None
     eval_judge_provider: Literal["google", "openai", "deepseek"] = "deepseek"
     eval_judge_model: str = "deepseek-v4-pro"
-    eval_judge_timeout_seconds: float = Field(default=60, gt=0)
+    eval_judge_deepseek_thinking: bool = True
+    eval_judge_reasoning_effort: Literal["low", "high", "max"] = "high"
+    eval_judge_timeout_seconds: float = Field(default=180, gt=0)
     eval_judge_input_bytes: int = Field(default=65536, ge=1)
-    eval_judge_output_tokens: int = Field(default=4096, ge=1)
+    eval_judge_output_tokens: int = Field(default=8192, ge=1)
     verifier_enabled: bool = True
     verifier_provider: Literal["google", "openai", "deepseek"] = "deepseek"
     verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
+    verifier_deepseek_thinking: bool = True
+    verifier_reasoning_effort: Literal["low", "high", "max"] = "high"
     verifier_timeout_seconds: float = Field(
-        default=60, gt=0, allow_inf_nan=False)
+        default=180, gt=0, allow_inf_nan=False
+    )
     verifier_input_bytes: int = Field(default=131072, ge=1)
-    verifier_output_tokens: int = Field(default=4096, ge=1)
+    verifier_output_tokens: int = Field(default=8192, ge=1)
     telemetry_transport: Literal["mcp"] = "mcp"
     telemetry_mcp_url: AnyHttpUrl = "http://127.0.0.1:8012/mcp"
     telemetry_mcp_response_bytes: int = Field(default=16_777_216, ge=1024)
@@ -45,22 +53,25 @@ class Settings(BaseSettings):
     google_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     deepseek_api_key: SecretStr | None = None
-    agent_fallback_provider: Literal[
-        "google", "openai", "deepseek"
-    ] | None = None
+    deepseek_thinking: bool = True
+    deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    agent_fallback_provider: Literal["google", "openai", "deepseek"] | None = (
+        None
+    )
     agent_fallback_model: str | None = Field(default=None, min_length=1)
     agent_recursion_limit: int = Field(default=12, ge=2, le=50)
+    agent_mode: Literal["single", "multi"] = "single"
     agent_context_tokens: int = Field(default=32768, ge=1)
-    agent_output_tokens: int = Field(default=4096, ge=1)
+    agent_output_tokens: int = Field(default=8192, ge=1)
     agent_observation_bytes: int = Field(default=8_388_608, ge=1)
     agent_max_model_calls: int = Field(default=8, ge=1)
     agent_max_tool_calls: int = Field(default=12, ge=1)
     agent_max_identical_tool_calls: int = Field(default=2, ge=1)
     agent_timeout_seconds: float = Field(
-        default=120, gt=0, allow_inf_nan=False
+        default=600, gt=0, allow_inf_nan=False
     )
     agent_model_timeout_seconds: float = Field(
-        default=60, gt=0, allow_inf_nan=False
+        default=180, gt=0, allow_inf_nan=False
     )
     agent_tool_timeout_seconds: float = Field(
         default=20, gt=0, allow_inf_nan=False
@@ -81,20 +92,25 @@ class Settings(BaseSettings):
     agent_memory_enabled: bool = False
     agent_knowledge_enabled: bool = False
     agent_knowledge_snapshot: str | None = Field(
-        default=None, pattern=r"^[A-Za-z0-9_-]+$",
+        default=None,
+        pattern=r"^[A-Za-z0-9_-]+$",
     )
     agent_knowledge_max_references: int = Field(default=20, ge=1, le=100)
     agent_knowledge_retention_bytes: int = Field(default=262144, ge=1)
     agent_knowledge_context_bytes: int = Field(default=8192, ge=64)
     agent_knowledge_max_queries: int = Field(default=3, ge=1, le=3)
     agent_knowledge_result_limit: int = Field(default=5, ge=1, le=20)
-    agent_knowledge_model_output_tokens: int = Field(default=2048, ge=1)
+    agent_knowledge_model_output_tokens: int = Field(default=8192, ge=1)
     agent_knowledge_reserved_model_calls: int = Field(default=1, ge=1)
     agent_memory_environment: str | None = Field(
-        default=None, min_length=1, max_length=120,
+        default=None,
+        min_length=1,
+        max_length=120,
     )
     agent_memory_deployment_version: str | None = Field(
-        default=None, min_length=1, max_length=120,
+        default=None,
+        min_length=1,
+        max_length=120,
     )
     agent_memory_max_records: int = Field(default=3, ge=1, le=10)
     agent_memory_context_bytes: int = Field(default=4096, ge=512, le=16000)
@@ -103,13 +119,17 @@ class Settings(BaseSettings):
     @property
     def verification_policy(self):
         from tracemind.models.verification import VerificationPolicy
-        if not self.verifier_enabled:
+
+        if not self.verifier_enabled and self.agent_mode != "multi":
             return None
         return VerificationPolicy(
-            provider=self.verifier_provider, model=self.verifier_model,
+            provider=self.verifier_provider,
+            model=self.verifier_model,
             timeout_seconds=self.verifier_timeout_seconds,
             input_bytes=self.verifier_input_bytes,
             output_tokens=self.verifier_output_tokens,
+            deepseek_thinking=self.verifier_deepseek_thinking,
+            deepseek_reasoning_effort=self.verifier_reasoning_effort,
         )
 
     @model_validator(mode="after")
@@ -132,6 +152,14 @@ class Settings(BaseSettings):
             self.knowledge_policy
         return self
 
+    @model_validator(mode="after")
+    def validate_multi_agent(self) -> "Settings":
+        if self.agent_mode == "multi" and (self.agent_memory_enabled):
+            raise ValueError(
+                "multi-agent does not support historical memory writes"
+            )
+        return self
+
     @property
     def knowledge_policy(self):
         """Freeze online run limits independently of CLI configuration."""
@@ -141,7 +169,8 @@ class Settings(BaseSettings):
             return None
         if not self.agent_knowledge_snapshot:
             raise ValueError(
-                "online knowledge requires a published snapshot ID")
+                "online knowledge requires a published snapshot ID"
+            )
         return KnowledgePolicy(
             snapshot=self.agent_knowledge_snapshot,
             max_references=self.agent_knowledge_max_references,
@@ -158,14 +187,18 @@ class Settings(BaseSettings):
         """Freeze an opt-in policy; disabled memory performs no DB lookup."""
         if not self.agent_memory_enabled:
             return None
-        if (not self.agent_memory_environment or
-                not self.agent_memory_deployment_version):
+        if (
+            not self.agent_memory_environment
+            or not self.agent_memory_deployment_version
+        ):
             raise ValueError(
-                "memory requires environment and deployment version")
+                "memory requires environment and deployment version"
+            )
         return MemoryPolicy(
-            scope=MemoryScope(environment=self.agent_memory_environment,
-                              deployment_version=(
-                                  self.agent_memory_deployment_version)),
+            scope=MemoryScope(
+                environment=self.agent_memory_environment,
+                deployment_version=(self.agent_memory_deployment_version),
+            ),
             max_records=self.agent_memory_max_records,
             context_bytes=self.agent_memory_context_bytes,
             auto_expiry_days=self.agent_memory_auto_expiry_days,

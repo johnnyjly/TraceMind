@@ -334,3 +334,40 @@ def test_catalogue_filters_page_matching_records_and_preserve_direct_reads():
     }))
     assert json.loads(direct[0]["content"])["id"] == str(traces[0].id)
     assert len(collector.evidence) == 50
+
+
+@pytest.mark.parametrize("next_offset", [None, 40])
+def test_current_catalogue_page_keeps_all_refs_and_cursor(next_offset):
+    request, content = request_with_results()
+    content.append({"next_offset": next_offset, "total_evidence": 100})
+    artifact = {**context_index(content), "catalogue_page": True}
+    page = ToolMessage(
+        content=json_text(content), name="read_evidence", tool_call_id="page",
+        artifact=artifact,
+    )
+    call = AIMessage(content="", tool_calls=[{
+        "name": "read_evidence", "args": {"offset": 20}, "id": "page",
+    }])
+    request = request.override(
+        messages=[request.messages[0], call, page],
+        tools=[{"type": "function", "function": {
+            "name": "read_evidence", "parameters": {"type": "object"},
+        }}],
+    )
+    compact = page.model_copy(update={
+        "content": json_text(artifact["context_index"]),
+    })
+    compact_request = request.override(messages=[
+        request.messages[0], call, compact,
+    ])
+    allowance = estimate_input(compact_request)
+    for budget, fits in [(allowance, True), (allowance - 1, False)]:
+        selected = select_context(request, budget)
+        assert selected.fits is fits
+        assert selected.request.messages[-1].content == compact.content
+        assert json.loads(compact.content)[-1]["next_offset"] == next_offset
+        assert {p["id"] for p in json.loads(compact.content) if "id" in p} == {
+            p["id"] for p in content if "id" in p
+        }
+        assert selected.omitted_previews == 0
+    assert request.messages[-1].content == json_text(content)

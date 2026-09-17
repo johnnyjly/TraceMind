@@ -95,10 +95,12 @@ class RagRuntime:
         try:
             workspace = settings.workspace.resolve()
             bound = _snapshot_workspaces.setdefault(
-                settings.snapshot, workspace)
+                settings.snapshot, workspace
+            )
             if bound != workspace:
                 raise ValueError(
-                    "snapshot ID is already bound to another local directory")
+                    "snapshot ID is already bound to another local directory"
+                )
             await self._initialize(chunking_func=chunking_func)
         except BaseException:
             await self.close()
@@ -130,12 +132,20 @@ class RagRuntime:
         }
         if manifest.exists():
             previous = json.loads(await run_io(manifest.read_text))
-            immutable = ("snapshot", "lightrag", "qdrant_url", "embedding",
-                         "embedding_revision", "dimension", "max_tokens",
-                         "chunk_tokens")
+            immutable = (
+                "snapshot",
+                "lightrag",
+                "qdrant_url",
+                "embedding",
+                "embedding_revision",
+                "dimension",
+                "max_tokens",
+                "chunk_tokens",
+            )
             if any(previous.get(key) != identity[key] for key in immutable):
                 raise ValueError(
-                    "workspace configuration changed; use a new ID")
+                    "workspace configuration changed; use a new ID"
+                )
         await run_io(self.models.load)
         self.index = KeywordIndex(
             settings.workspace / "keyword.sqlite3", readonly=self._published
@@ -191,8 +201,7 @@ class RagRuntime:
                 embedding_func=EmbeddingFunc(
                     embedding_dim=settings.embedding_dimension,
                     max_token_size=(
-                        settings.embedding_max_tokens
-                        - special_tokens
+                        settings.embedding_max_tokens - special_tokens
                     ),
                     model_name=settings.embedding_model,
                     supports_asymmetric=True,
@@ -200,8 +209,11 @@ class RagRuntime:
                 ),
                 llm_model_func=self.model.complete,
                 role_llm_configs={
-                    "keyword": {"func": partial(
-                        self.model.complete, keyword_extraction=True)},
+                    "keyword": {
+                        "func": partial(
+                            self.model.complete, keyword_extraction=True
+                        )
+                    },
                 },
                 llm_model_name=settings.llm_model or "injected-model",
                 llm_model_max_async=1,
@@ -211,17 +223,17 @@ class RagRuntime:
                 chunk_overlap_token_size=0,
                 summary_max_tokens=settings.summary_max_tokens,
                 summary_length_recommended=(
-                    settings.summary_length_recommended),
+                    settings.summary_length_recommended
+                ),
                 max_parallel_insert=1,
                 enable_llm_cache=not self._published,
-                **({"chunking_func": chunking_func}
-                   if chunking_func else {}),
+                **({"chunking_func": chunking_func} if chunking_func else {}),
             )
             await self.rag.initialize_storages()
             if not manifest.exists():
                 await run_io(
-                    manifest.write_text,
-                    json.dumps(identity, indent=2) + "\n")
+                    manifest.write_text, json.dumps(identity, indent=2) + "\n"
+                )
         except BaseException:
             await self.close()
             raise
@@ -237,29 +249,38 @@ class RagRuntime:
         try:
             if self.rag is not None:
                 functions = list(
-                    getattr(self.rag, "role_llm_funcs", {}).values())
+                    getattr(self.rag, "role_llm_funcs", {}).values()
+                )
                 embedding = getattr(self.rag, "embedding_func", None)
-                if embedding is not None:
-                    functions.append(embedding.func)
                 try:
-                    await asyncio.gather(*[
-                        func.shutdown(graceful=False) for func in functions])
+                    await asyncio.gather(
+                        *[func.shutdown(graceful=False) for func in functions]
+                    )
                 finally:
                     failures = []
                     try:
                         # The framework swallows storage errors and skips
                         # partial initialization. Close our transports first.
                         if getattr(self.rag, "vector_storage", None) == (
-                                "AsyncQdrantVectorDBStorage"):
-                            for store in (self.rag.chunks_vdb,
-                                          self.rag.entities_vdb,
-                                          self.rag.relationships_vdb):
+                            "AsyncQdrantVectorDBStorage"
+                        ):
+                            for store in (
+                                self.rag.chunks_vdb,
+                                self.rag.entities_vdb,
+                                self.rag.relationships_vdb,
+                            ):
                                 try:
                                     await store.finalize()
                                 except Exception as exc:
                                     failures.append(exc)
                     finally:
-                        await self.rag.finalize_storages()
+                        try:
+                            # Pending vector writes still need the embedding
+                            # queue; then drain inference before store cleanup.
+                            if embedding is not None:
+                                await embedding.func.shutdown(graceful=False)
+                        finally:
+                            await self.rag.finalize_storages()
                     if failures:
                         raise failures[0]
         finally:
@@ -283,18 +304,25 @@ class RagRuntime:
         from lightrag.kg.qdrant_impl import workspace_filter_condition
         from qdrant_client import models
 
-        for store in (self.rag.chunks_vdb, self.rag.entities_vdb,
-                      self.rag.relationships_vdb):
+        for store in (
+            self.rag.chunks_vdb,
+            self.rag.entities_vdb,
+            self.rag.relationships_vdb,
+        ):
             count = await store._client.count(
                 collection_name=store.final_namespace,
-                count_filter=models.Filter(must=[
-                    workspace_filter_condition(store.effective_workspace)]),
+                count_filter=models.Filter(
+                    must=[
+                        workspace_filter_condition(store.effective_workspace)
+                    ]
+                ),
                 exact=True,
             )
             if count.count:
                 raise ValueError(
                     "Qdrant workspace already contains vectors; "
-                    "use a new snapshot ID")
+                    "use a new snapshot ID"
+                )
 
     async def search(self, query, **kwargs):
         with observation(
@@ -312,6 +340,32 @@ class RagRuntime:
             if span is not None:
                 span.update(output=self.last_retrieval)
             return hits
+
+    def retrieval_policy(self, mode=None):
+        """Resolved service policy; no credentials or corpus text."""
+        from hashlib import sha256
+        import json
+
+        settings = self.settings
+        values = {
+            k: getattr(settings, k)
+            for k in (
+                "snapshot",
+                "bm25_enabled",
+                "rerank_min_score",
+                "candidate_limit",
+                "result_limit",
+                "embedding_model",
+                "embedding_revision",
+                "reranker_model",
+                "reranker_revision",
+            )
+        }
+        values["mode"] = mode or settings.mode
+        values["fingerprint"] = sha256(
+            json.dumps(values, sort_keys=True).encode()
+        ).hexdigest()
+        return values
 
     async def _search(
         self,
@@ -348,25 +402,32 @@ class RagRuntime:
                 "snapshot": self.settings.snapshot,
                 "k": self.settings.result_limit,
                 "stages": {"final": []},
+                "policy": self.retrieval_policy(selected_mode),
+                "empty_reason": "no_candidates",
             }
             if self.index.count == 0:
                 return []
             started = monotonic()
             branches = {}
-            if (query_keywords is not None
-                    and len(query_keywords) != len(queries or [query])):
+            if query_keywords is not None and len(query_keywords) != len(
+                queries or [query]
+            ):
                 raise ValueError("keyword plans must match query count")
             for number, planned in enumerate(queries or [query]):
-                high, low = (query_keywords[number] if query_keywords
-                             is not None else (high_level_keywords or [],
-                                               low_level_keywords or []))
+                high, low = (
+                    query_keywords[number]
+                    if query_keywords is not None
+                    else (high_level_keywords or [], low_level_keywords or [])
+                )
                 with observation(
-                    self.langfuse_client, "knowledge.vector_graph",
+                    self.langfuse_client,
+                    "knowledge.vector_graph",
                     as_type="retriever",
                     input={"query": planned, "mode": selected_mode},
                 ):
                     result = await self.rag.aquery_data(
-                        planned, QueryParam(
+                        planned,
+                        QueryParam(
                             mode=selected_mode,
                             only_need_context=True,
                             enable_rerank=False,
@@ -375,7 +436,8 @@ class RagRuntime:
                             hl_keywords=high,
                             ll_keywords=low,
                             max_total_tokens=(
-                                self.settings.retrieval_context_tokens),
+                                self.settings.retrieval_context_tokens
+                            ),
                         ),
                     )
                 no_results = (
@@ -389,18 +451,21 @@ class RagRuntime:
                     chunk = self.index.get(item["chunk_id"])
                     if item["content"] != chunk.text:
                         raise ValueError(
-                            "retrieved text differs from canonical chunk")
+                            "retrieved text differs from canonical chunk"
+                        )
                     chunks.append(chunk)
                 suffix = f":{number}" if len(queries or [query]) > 1 else ""
                 branches[selected_mode + suffix] = chunks
                 if self.settings.bm25_enabled:
                     with observation(
-                        self.langfuse_client, "knowledge.bm25",
+                        self.langfuse_client,
+                        "knowledge.bm25",
                         as_type="retriever",
                         input={"query": planned},
                     ):
                         branches["bm25" + suffix] = self.index.search(
-                            planned, limit=self.settings.candidate_limit)
+                            planned, limit=self.settings.candidate_limit
+                        )
             hits = fuse_candidates(
                 branches, limit=self.settings.candidate_limit
             )
@@ -412,9 +477,13 @@ class RagRuntime:
             }
             stages["fused"] = [self._reference(h.chunk) for h in hits]
             with observation(
-                self.langfuse_client, "knowledge.rerank", as_type="retriever",
-                input={"query": query,
-                       "candidate_ids": [h.chunk.chunk_id for h in hits]},
+                self.langfuse_client,
+                "knowledge.rerank",
+                as_type="retriever",
+                input={
+                    "query": query,
+                    "candidate_ids": [h.chunk.chunk_id for h in hits],
+                },
             ):
                 scores = await self.models.rank(
                     query, [h.chunk.text for h in hits]
@@ -425,6 +494,14 @@ class RagRuntime:
                 hit.rerank_score = score
             ranking_ms = (monotonic() - ranking_started) * 1000
             candidate_count = len(hits)
+            scored = [
+                {
+                    "doc_id": h.chunk.doc_id,
+                    "chunk_id": h.chunk.chunk_id,
+                    "score": h.rerank_score,
+                }
+                for h in hits
+            ]
             threshold = self.settings.rerank_min_score
             if threshold is not None:
                 hits = [h for h in hits if h.rerank_score >= threshold]
@@ -435,7 +512,7 @@ class RagRuntime:
                     h.chunk.chunk_id,
                 )
             )
-            for hit in hits[:self.settings.result_limit]:
+            for hit in hits[: self.settings.result_limit]:
                 if hit.chunk.parent_id is not None:
                     hit.parent = self.index.get_parent(hit.chunk.parent_id)
             logger.info(
@@ -451,12 +528,27 @@ class RagRuntime:
                 self.model.output_tokens,
                 self.model.unreported_calls,
                 (monotonic() - started) * 1000,
-                retrieval_ms, ranking_ms, candidate_count - len(hits),
+                retrieval_ms,
+                ranking_ms,
+                candidate_count - len(hits),
             )
             final = hits[: self.settings.result_limit]
             stages["final"] = [self._reference(h.chunk) for h in final]
             self.last_retrieval.update(
                 stages=stages,
+                branch_counts={k: len(v) for k, v in branches.items()},
+                candidates=scored,
+                rejected_count=candidate_count - len(hits),
+                returned_count=len(final),
+                retrieval_ms=retrieval_ms,
+                ranking_ms=ranking_ms,
+                empty_reason=(
+                    None
+                    if final
+                    else "below_cutoff"
+                    if candidate_count
+                    else "no_candidates"
+                ),
                 model_calls=self.model.calls,
                 input_tokens=self.model.input_tokens,
                 output_tokens=self.model.output_tokens,
@@ -466,7 +558,11 @@ class RagRuntime:
 
     @staticmethod
     def _reference(chunk):
-        return {"evaluation_id": chunk.doc_id, "chunk_id": chunk.chunk_id,
-                "section": chunk.section, "text": chunk.text,
-                "source_revision": chunk.source_revision,
-                "document_sha256": chunk.document_sha256}
+        return {
+            "evaluation_id": chunk.doc_id,
+            "chunk_id": chunk.chunk_id,
+            "section": chunk.section,
+            "text": chunk.text,
+            "source_revision": chunk.source_revision,
+            "document_sha256": chunk.document_sha256,
+        }

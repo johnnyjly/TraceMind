@@ -3,7 +3,8 @@
 Langfuse owns datasets, experiment results, scores and comparisons. TraceMind
 supplies task adapters and versioned evaluators through its Python SDK. The
 agent harness still owns execution budgets, authorization, checkpoints and
-recovery. An optional online verifier checks assertions before acceptance;
+recovery. The online verifier checks assertions before acceptance and is
+enabled by default; single-agent deployments can explicitly disable it;
 Langfuse remains the only experiment/reporting platform.
 
 ## Local deployment
@@ -66,15 +67,35 @@ shown below uses at most **8 total calls**.
 Why: An explicit campaign cap accounts for all admitted provider attempts across
 experiment variants.
 
-DeepSeek currently runs with the existing non-thinking configuration. Judge
-has a separate timeout (60 s), input byte limit (65,536) and output token limit
-(4,096). It makes one attempt per item. Oversized evidence fails evaluation;
+DeepSeek diagnosis thinking is configured by `TRACEMIND_DEEPSEEK_THINKING`
+and `TRACEMIND_DEEPSEEK_REASONING_EFFORT`. Verifier and Judge have independent
+`*_DEEPSEEK_THINKING` and `*_REASONING_EFFORT` settings, defaulting to thinking
+with high effort. A run saves its verifier settings in its verification policy;
+changing the main model's effort does not change review effort. Legacy policies
+without saved effort use high; historical nondefault settings cannot be inferred.
+
+Online retrieval assumes English input. Query decomposition and keyword
+extraction use JSON output with `TRACEMIND_RAG_RETRIEVAL_THINKING=false` and
+`TRACEMIND_RAG_RETRIEVAL_OUTPUT_TOKENS=512` by default. Ingestion retains the
+existing model thinking and `TRACEMIND_RAG_LLM_OUTPUT_TOKENS` allowance.
+Decomposition is optional and separates distinct needs; it does not translate
+or produce synonym variants.
+
+Judge has a separate timeout, input byte limit and output token limit, and
+allows one bounded format repair. Oversized evidence fails evaluation;
 observations and counterevidence are never silently dropped to fit the Judge.
 Why: A review of selectively truncated observations could approve an unsupported answer.
 
-Self-hosting keeps Langfuse storage local. Calls to DeepSeek still send the
-selected prompts/evidence to DeepSeek. Synthetic smoke examples contain only
-manufactured data; real incident exports require appropriate authorization.
+For model comparisons, freeze evidence, prompt version and limits, then vary
+one profile at a time. Check known-good and known-bad review subjects before
+selecting lower effort. Output limits include reasoning tokens; raising them
+alone may prolong a request that spends its allowance on reasoning. Record
+provider-reported input, output, reasoning and cache tokens, and failed calls
+with unknown usage. Reasoning is part of output, not an additional charge.
+Saved verifier evaluations preserve their original query events for review;
+their fresh execution ledger measures only the new review calls. Provider usage
+and elapsed time are measurements; usage multiplied by a published rate is a
+cost estimate, not a billing record.
 
 ## Experiment input
 
@@ -568,3 +589,32 @@ Freeze the tool contract, prompt and budgets before comparisons. Preserve
 all primary attempts, including inconclusive and failed outcomes, and
 report budget-matched comparisons separately. Small diagnostic samples
 do not establish general incident accuracy.
+
+## Serial multi-agent evaluation
+
+`--task agent` uses `TRACEMIND_AGENT_MODE`; no separate task runner is needed.
+Experiment metadata retains agent mode, investigator/fallback/verifier models;
+item output retains the frozen run mode, phase, handoffs and execution accounting.
+
+The next real-model comparison should use these three variants:
+
+| Variant | Agent mode | Verifier |
+| --- | --- | --- |
+| Single-agent baseline | `single` | Disabled |
+| Reviewed baseline | `single` | Enabled |
+| Serial delegation | `multi` | Always enabled |
+
+Keep RAG/memory disabled and match investigator model, telemetry contracts,
+incident windows, total model/tool limits and deadlines. Review consumes the
+existing model cap in both reviewed variants. Keep failed and inconclusive runs;
+report false completion, supported/correct diagnoses, appropriate abstention,
+redundant queries, all admitted calls, reported/unknown usage and elapsed time.
+Held-out labels remain outside every role and the runtime verifier.
+Why: Larger aggregate budgets, changed models or removed failures would prevent
+attributing differences to delegation.
+
+Before any paid campaign, choose its explicit aggregate call cap, including
+investigator, coordinator, verifier, retries, fallback and optional offline Judge.
+The existing CLI cap covers all these provider calls within one invocation;
+separate invocations still require explicit cross-run accounting. No real-model
+multi-agent campaign or quality advantage is established by scripted regression.

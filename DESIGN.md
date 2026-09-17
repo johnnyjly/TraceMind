@@ -1,8 +1,11 @@
 # TraceMind design
 
 TraceMind is a portfolio-oriented incident diagnosis system for controlled
-microservice faults. A single agent chooses queries and interprets results;
-application code owns permissions, execution, state and termination.
+microservice faults. By default, a single agent chooses queries and interprets
+results; application code owns permissions, execution, state and termination.
+An opt-in
+collaborative multi-agent mode delegates bounded investigations before synthesis
+and the existing completion review.
 
 This document describes the current implementation. Feature changes are in
 [CHANGELOG.md](CHANGELOG.md); setup and API usage start in [README.md](README.md).
@@ -54,6 +57,20 @@ normalization and tool definitions. It imports no TraceMind or LangChain code.
 The pinned OpenTelemetry Demo stays in a sibling checkout; its built-in agentic
 mode is excluded from diagnosis.
 Why: Preserve independent deployment and keep diagnosis attributable to TraceMind.
+
+## Collaborative multi-agent mode
+
+The `graph-v6` LangGraph workflow dynamically assigns at most two concurrent
+telemetry/knowledge tasks. Atomic reports retain E/K provenance, support,
+counterevidence and gaps. Coordinator synthesis and item-addressed verification
+can trigger at most two bounded feedback rounds. The shared harness owns budgets,
+permissions, task-context tracing, evidence and durable publication. Fixed
+per-task tool allocations bound first-batch spending while preserving a shared
+pool for later investigation; local exhaustion does not close sibling tasks.
+
+See [collaboration architecture](docs/multi-agent.md) for state ownership,
+singleflight query reuse, semantic checkpoints, restart semantics and evaluation
+boundaries. Existing RAG snapshot, fusion and BGE components are reused.
 
 ## Tools and evidence
 
@@ -240,8 +257,8 @@ includes broader real-model evaluation, authentication, tenant/source authorizat
 retention controls, automatic alert ingestion, distributed retrieval and worker
 ownership guarantees. Before adding
 workers, enforce checkpoint ownership and test process-level takeover/stale-writer
-races. Multi-agent work follows an evaluated single-agent baseline; mutation tools
-and reinforcement learning are outside current scope.
+races. Claims of multi-agent benefit require an evaluated baseline;
+mutation tools and reinforcement learning are outside current scope.
 Why: Checkpoint fencing and a measured baseline are prerequisites for expanding
 execution ownership.
 

@@ -2,6 +2,7 @@
 
 Handles the window, retained evidence, history and permissions.
 """
+
 from datetime import datetime
 from uuid import UUID
 
@@ -19,25 +20,34 @@ from tracemind.agent.workflow.tool_policy import resolve_tool_policy
 
 
 def plan_follow_up(
-    parent: StoredRun, history: list[RunState], *, investigation_id: UUID,
-    message: str, purpose: RunPurpose, limits: RunLimits,
-    allowed_tools: tuple[ToolName, ...], start: datetime | None,
-    end: datetime | None, memory_policy: MemoryPolicy | None,
+    parent: StoredRun,
+    history: list[RunState],
+    *,
+    investigation_id: UUID,
+    message: str,
+    purpose: RunPurpose,
+    limits: RunLimits,
+    allowed_tools: tuple[ToolName, ...],
+    start: datetime | None,
+    end: datetime | None,
+    memory_policy: MemoryPolicy | None,
 ) -> tuple[RunState, list[Evidence]]:
     start = start or parent.state.investigation_start
     end = end or parent.state.investigation_end
-    if (start.utcoffset() is None or end.utcoffset() is None
-            or end <= start):
+    if start.utcoffset() is None or end.utcoffset() is None or end <= start:
         raise ValueError("invalid follow-up investigation window")
     if purpose is RunPurpose.EXPLAIN and (
-        start != parent.state.investigation_start or
-        end != parent.state.investigation_end
+        start != parent.state.investigation_start
+        or end != parent.state.investigation_end
     ):
         raise RunConflict("explanation must use the previous window")
     prior = parent.state.diagnosis or parent.state.prior_diagnosis
-    candidates = [item for item in parent.evidence
-                  if item.observed_at.utcoffset() is not None
-                  and start <= item.observed_at <= end]
+    candidates = [
+        item
+        for item in parent.evidence
+        if item.observed_at.utcoffset() is not None
+        and start <= item.observed_at <= end
+    ]
     cited = set(prior.evidence_ids) if prior else set()
     candidates.sort(key=lambda item: item.id not in cited)
     evidence = []
@@ -48,27 +58,54 @@ def plan_follow_up(
             evidence.append(item)
             size += item_size
     state = RunState(
+        agent_mode=(
+            parent.state.agent_mode
+            if purpose is RunPurpose.INVESTIGATE
+            else "single"
+        ),
         incident=parent.state.incident,
         investigation_id=investigation_id,
-        parent_run_id=parent.state.id, purpose=purpose,
-        prompt_version="single-agent-followup-v4",
+        parent_run_id=parent.state.id,
+        purpose=purpose,
+        prompt_version=(
+            "multi-agent-graph-v6-rca3"
+            if (
+                parent.state.agent_mode == "multi"
+                and purpose is RunPurpose.INVESTIGATE
+            )
+            else "single-agent-followup-v5"
+        ),
         user_message=message,
-        previous_messages=[s.user_message for s in history
-                           if s.user_message],
+        previous_messages=[s.user_message for s in history if s.user_message],
         prior_diagnosis=prior,
         omitted_prior_evidence=len(parent.evidence) - len(evidence),
-        memory_policy=(memory_policy if purpose is
-                       RunPurpose.INVESTIGATE else None),
-        learning_policy=memory_policy,
-        investigation_start=start, investigation_end=end,
+        memory_policy=(
+            memory_policy
+            if (
+                purpose is RunPurpose.INVESTIGATE
+                and parent.state.agent_mode != "multi"
+            )
+            else None
+        ),
+        learning_policy=(
+            memory_policy if parent.state.agent_mode != "multi" else None
+        ),
+        investigation_start=start,
+        investigation_end=end,
         limits=limits.model_copy(deep=True),
         verification_policy=(
             parent.state.verification_policy.model_copy(deep=True)
-            if parent.state.verification_policy else None),
-        knowledge_policy=(parent.state.knowledge_policy.model_copy(deep=True)
-                          if parent.state.knowledge_policy else None),
-        knowledge=[item.model_copy(deep=True)
-                   for item in parent.state.knowledge],
+            if parent.state.verification_policy
+            else None
+        ),
+        knowledge_policy=(
+            parent.state.knowledge_policy.model_copy(deep=True)
+            if parent.state.knowledge_policy
+            else None
+        ),
+        knowledge=[
+            item.model_copy(deep=True) for item in parent.state.knowledge
+        ],
         allowed_tools=resolve_tool_policy(allowed_tools, purpose=purpose),
         status=RunStatus.QUEUED,
     )

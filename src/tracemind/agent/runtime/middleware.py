@@ -25,22 +25,74 @@ from pydantic import ValidationError
 
 from tracemind.agent.workflow.context import json_text, select_context
 from tracemind.agent.workflow.validation import resolve_proposal
+from tracemind.agent.workflow.references import (
+    normalize_reference_handles, register_references,
+)
 from tracemind.agent.errors import DiagnosisError, DiagnosisValidationError
-from tracemind.agent.runtime.harness import InvestigationClosed, RunHarness
+from tracemind.agent.runtime.harness import (
+    InvestigationClosed, RunHarness, TaskToolBudgetExhausted,
+)
 from tracemind.agent.runtime.recovery import ModelCallFailed, ToolUnavailable
 from tracemind.models.run import StopReason
+
+
+class TaskBudgetExhausted(Exception):
+    """End a specialist without consuming synthesis or sibling reserves."""
+
+
+class TaskReportInvalid(Exception):
+    """A specialist exhausted repairs; its siblings and evidence survive."""
 
 
 class HarnessMiddleware(AgentMiddleware):
     """Adapt LangChain model/tool hooks to a single run's harness controls."""
 
     def __init__(
-        self, harness: RunHarness, fallback_model: BaseChatModel | None = None
+        self,
+        harness: RunHarness,
+        fallback_model: BaseChatModel | None = None,
+        *,
+        output_name: str = "DiagnosisProposal",
+        validator=None,
+        role: str = "diagnosis",
+        reserved_calls: int = 0,
+        investigation: bool = True,
+        allowed_tools: tuple[str, ...] | None = None,
     ) -> None:
         """Bind all interception hooks to the supplied run harness."""
         self.harness = harness
         self._fallback = fallback_model
         self._using_fallback = False
+        self._output_name = output_name
+        self._validator = validator or (
+            self._validate_proposal
+            if output_name == "DiagnosisProposal"
+            else None
+        )
+        self._role = role
+        self._reserve_policy = reserved_calls
+        self._local_finalization = None
+        self._last_task_progress = None
+        self._stalled = 0
+        self._investigation = investigation
+        self._allowed_tools = allowed_tools
+
+    @property
+    def _reserved_calls(self):
+        return (
+            self._reserve_policy()
+            if callable(self._reserve_policy)
+            else self._reserve_policy
+        )
+
+    def _validate_proposal(self, proposal):
+        draft = resolve_proposal(
+            proposal,
+            self.harness.state,
+            self.harness.evidence(),
+        )
+        if self.harness.validate_draft is not None:
+            self.harness.validate_draft(draft)
 
     async def awrap_model_call(
         self,
@@ -55,10 +107,27 @@ class HarnessMiddleware(AgentMiddleware):
         """
         self.harness.check_active()
         state = self.harness.state
-        if sum(state.tool_calls.values()) >= state.limits.tool_calls:
-            self.harness.begin_finalization(StopReason.TOOL_BUDGET)
-        else:
-            self.harness.check_progress()
+        if self._investigation:
+            if sum(state.tool_calls.values()) >= state.limits.tool_calls:
+                self.harness.begin_finalization(StopReason.TOOL_BUDGET)
+            elif self.harness.task_tools_remaining() == 0:
+                self._local_finalization = StopReason.TOOL_BUDGET
+            elif self._output_name == "InvestigationReport":
+                progress = sum(
+                    int(e.data.get("added", 0))
+                    for e in state.events
+                    if e.data.get("task_id") == self.harness._task_id.get()
+                )
+                self._stalled = (
+                    self._stalled + 1
+                    if progress == self._last_task_progress
+                    else 0
+                )
+                self._last_task_progress = progress
+                if self._stalled >= state.limits.no_progress_rounds:
+                    self._local_finalization = StopReason.NO_PROGRESS
+            else:
+                self.harness.check_progress()
         model_history = []
         while True:
             if self._using_fallback:
@@ -70,9 +139,23 @@ class HarnessMiddleware(AgentMiddleware):
             def prepare():
                 """Rebind before each attempt, including transport retries."""
                 nonlocal prepared, request
-                if (state.limits.model_calls - state.model_calls
-                        <= self.harness.finalization_calls):
-                    self.harness.begin_finalization(StopReason.MODEL_BUDGET)
+                if state.limits.model_calls - state.model_calls <= (
+                    self.harness.verification_calls + self._reserved_calls
+                ):
+                    if self._output_name == "InvestigationReport":
+                        raise TaskBudgetExhausted
+                    self.harness.stop(StopReason.MODEL_BUDGET)
+                if (
+                    self._investigation
+                    and state.limits.model_calls - state.model_calls
+                    <= (self.harness.finalization_calls + self._reserved_calls)
+                ):
+                    if self._output_name == "InvestigationReport":
+                        self._local_finalization = StopReason.MODEL_BUDGET
+                    else:
+                        self.harness.begin_finalization(
+                            StopReason.MODEL_BUDGET
+                        )
                 prepared = self._prepare_request(request)
                 # Keep exactly the snapshot sent before this attempt. Retrying
                 # appends a new snapshot without rewriting the earlier prefix.
@@ -89,45 +172,70 @@ class HarnessMiddleware(AgentMiddleware):
                     return await handler(prepared)
                 except StructuredOutputError as exc:
                     malformed = True
-                    validation = self._schema_failure(exc)
+                    validation = self._schema_failure(exc, self._output_name)
                     return ModelResponse(result=[exc.ai_message])
 
-            model_name = (
-                getattr(request.model, "model_name", None)
-                or getattr(request.model, "model",
-                           type(request.model).__name__)
+            model_name = getattr(request.model, "model_name", None) or getattr(
+                request.model, "model", type(request.model).__name__
             )
             try:
                 response = await self.harness.model_call(
-                    invoke, model_name=str(model_name),
+                    invoke,
+                    model_name=str(model_name),
                     before_attempt=prepare,
-                    reserved_calls=self.harness.verification_calls,
+                    purpose=self._role,
+                    required=self._output_name != "InvestigationReport",
+                    reserved_calls=(
+                        self.harness.verification_calls + self._reserved_calls
+                    ),
                     allow_fallback=(
                         self._fallback is not None and not self._using_fallback
                     ),
                 )
-            except ModelCallFailed:
+            except ModelCallFailed as exc:
+                if self._output_name == "InvestigationReport" and (
+                    self._fallback is None
+                    or self._using_fallback
+                    or not exc.failure.retryable
+                ):
+                    raise
+                if self._fallback is None or self._using_fallback:
+                    self.harness.stop(StopReason.MODEL_BUDGET)
                 self._using_fallback = True
                 self.harness.state.model_switches += 1
-                fallback_name = (
-                    getattr(self._fallback, "model_name", None)
-                    or getattr(self._fallback, "model",
-                               type(self._fallback).__name__)
+                fallback_name = getattr(
+                    self._fallback, "model_name", None
+                ) or getattr(
+                    self._fallback, "model", type(self._fallback).__name__
                 )
                 self.harness.emit(
-                    "model.switched", parent_span_id=self.harness.state.id,
-                    data={"from_model": str(model_name),
-                          "to_model": str(fallback_name)},
+                    "model.switched",
+                    parent_span_id=self.harness.state.id,
+                    data={
+                        "from_model": str(model_name),
+                        "to_model": str(fallback_name),
+                    },
                 )
                 continue
             if response.structured_response is not None:
-                if self.harness.validate_draft is not None:
+                register_references(state)
+                normalized, repairs = normalize_reference_handles(
+                    response.structured_response, state.reference_map,
+                )
+                response.structured_response = normalized
+                for repair in repairs:
+                    self.harness.emit(
+                        "reference.normalized",
+                        data={"role": self._role,
+                              "output": self._output_name,
+                              "response_ids": [m.id for m in response.result
+                                               if isinstance(m, AIMessage)
+                                               and m.id],
+                              **repair},
+                    )
+                if self._validator is not None:
                     try:
-                        draft = resolve_proposal(
-                            response.structured_response, state,
-                            self.harness.evidence(),
-                        )
-                        self.harness.validate_draft(draft)
+                        self._validator(response.structured_response)
                     except DiagnosisValidationError as exc:
                         malformed = True
                         validation = exc.details()
@@ -138,26 +246,39 @@ class HarnessMiddleware(AgentMiddleware):
                             "message": "Diagnosis contract validation failed.",
                         }
             elif request.response_format is not None and any(
-                isinstance(item, AIMessage) and (
-                    not item.tool_calls or item.invalid_tool_calls or any(
-                        call["name"] == "DiagnosisProposal"
+                isinstance(item, AIMessage)
+                and (
+                    not item.tool_calls
+                    or item.invalid_tool_calls
+                    or any(
+                        call["name"] == self._output_name
                         for call in item.tool_calls
                     )
-                ) for item in response.result
+                )
+                for item in response.result
             ):
                 malformed = True
                 validation = validation or self._output_failure(
-                    response, request.response_format,
+                    response,
+                    request.response_format,
+                    self._output_name,
                 )
-            finalizing = self.harness.finalization_reason is not None
+            finalizing = (
+                self._local_finalization is not None
+                or self.harness.finalization_reason is not None
+            )
             if finalizing and (
-                response.structured_response is None or any(
-                    isinstance(item, AIMessage) and (
-                        item.invalid_tool_calls or any(
-                            call["name"] != "DiagnosisProposal"
+                response.structured_response is None
+                or any(
+                    isinstance(item, AIMessage)
+                    and (
+                        item.invalid_tool_calls
+                        or any(
+                            call["name"] != self._output_name
                             for call in item.tool_calls
                         )
-                    ) for item in response.result
+                    )
+                    for item in response.result
                 )
             ):
                 malformed = True
@@ -165,23 +286,52 @@ class HarnessMiddleware(AgentMiddleware):
                     "code": "finalization_output",
                     "message": (
                         "Investigation tools are disabled; return only one "
-                        "valid DiagnosisProposal using existing evidence."
+                        f"valid {self._output_name} using existing evidence."
                     ),
                 }
             if malformed:
-                preview, truncated = self._candidate_preview(response)
+                if (
+                    self._output_name == "InvestigationReport"
+                    and state.limits.model_calls - state.model_calls
+                    <= (self.harness.verification_calls + self._reserved_calls)
+                ):
+                    raise TaskBudgetExhausted
+                preview, truncated = self._candidate_preview(
+                    response, self._output_name
+                )
+                if (
+                    self._output_name == "InvestigationReport"
+                    and state.collaboration.repairs.get(
+                        self.harness._task_id.get(), 0
+                    )
+                    >= state.limits.diagnosis_repairs
+                ):
+                    self.harness.emit(
+                        "collaboration.task_report_rejected",
+                        data={
+                            "task_id": self.harness._task_id.get(),
+                            "validation": json_text(validation),
+                        },
+                    )
+                    raise TaskReportInvalid
                 self.harness.repair_diagnosis(
-                    validation=validation, candidate_preview=preview,
+                    validation=validation,
+                    candidate_preview=preview,
                     candidate_truncated=truncated,
                 )
                 feedback = self._repair_feedback(
-                    response, finalizing=finalizing, validation=validation,
+                    response,
+                    finalizing=finalizing,
+                    validation=validation,
+                    output_name=self._output_name,
                 )
                 if not finalizing and any(
-                    isinstance(item, AIMessage) and any(
-                        call["name"] != "DiagnosisProposal"
+                    isinstance(item, AIMessage)
+                    and any(
+                        call["name"] != self._output_name
                         for call in item.tool_calls
-                    ) for item in response.result
+                    )
+                    for item in response.result
                 ):
                     return ModelResponse(
                         result=[*model_history, *feedback.result]
@@ -200,57 +350,74 @@ class HarnessMiddleware(AgentMiddleware):
             )
 
     @staticmethod
-    def _schema_failure(error: Exception) -> dict:
+    def _schema_failure(
+        error: Exception,
+        output_name="DiagnosisProposal",
+    ) -> dict:
         """Report field paths and error types without raw provider errors."""
         if isinstance(error, MultipleStructuredOutputsError):
             return {
                 "code": "multiple_diagnoses",
-                "message": "Submit exactly one proposal per response.",
+                "message": f"Submit exactly one {output_name} per response.",
             }
         source = getattr(error, "source", error)
         seen = set()
         while source is not None and id(source) not in seen:
             seen.add(id(source))
             if isinstance(source, ValidationError):
-                errors = source.errors(include_input=False,
-                                       include_context=False)
+                errors = source.errors(
+                    include_input=False, include_context=False
+                )
                 return {
                     "code": "schema_validation",
-                    "message": "Correct the listed DiagnosisProposal fields.",
+                    "message": f"Correct the listed {output_name} fields.",
                     "fields": [
                         ".".join(str(p) for p in e["loc"])[:160]
-                        + ": " + e["type"] for e in errors[:20]
+                        + ": "
+                        + e["type"]
+                        for e in errors[:20]
                     ],
                     "omitted_fields": max(0, len(errors) - 20),
                 }
             if isinstance(source, json.JSONDecodeError):
                 return {
                     "code": "invalid_json",
-                    "message": "Return valid JSON matching DiagnosisProposal.",
+                    "message": f"Return valid JSON matching {output_name}.",
                 }
             source = source.__cause__ or source.__context__
         return {
             "code": "schema_validation",
-            "message": "Return one valid proposal matching its schema.",
+            "message": f"Return one valid {output_name} matching its schema.",
         }
 
     @staticmethod
-    def _output_failure(response: ModelResponse, response_format) -> dict:
+    def _output_failure(
+        response: ModelResponse,
+        response_format,
+        output_name="DiagnosisProposal",
+    ) -> dict:
         """Recover field errors already converted to framework tool messages.
 
         ToolStrategy can return an error ToolMessage instead of raising.
         Revalidate only its rejected arguments to extract safe field metadata.
         """
-        calls = [call for item in response.result
-                 if isinstance(item, AIMessage) for call in item.tool_calls
-                 if call["name"] == "DiagnosisProposal"]
+        calls = [
+            call
+            for item in response.result
+            if isinstance(item, AIMessage)
+            for call in item.tool_calls
+            if call["name"] == output_name
+        ]
         if len(calls) > 1:
             return {
                 "code": "multiple_diagnoses",
-                "message": "Submit exactly one proposal per response.",
+                "message": f"Submit exactly one {output_name} per response.",
             }
-        if any(item.invalid_tool_calls for item in response.result
-               if isinstance(item, AIMessage)):
+        if any(
+            item.invalid_tool_calls
+            for item in response.result
+            if isinstance(item, AIMessage)
+        ):
             return {
                 "code": "invalid_tool_arguments",
                 "message": "Return valid JSON arguments for each tool call.",
@@ -260,14 +427,17 @@ class HarnessMiddleware(AgentMiddleware):
             try:
                 schema.model_validate(calls[0]["args"])
             except ValidationError as exc:
-                return HarnessMiddleware._schema_failure(exc)
+                return HarnessMiddleware._schema_failure(exc, output_name)
         return {
             "code": "missing_structured_output",
-            "message": "Return a single valid DiagnosisProposal.",
+            "message": f"Return a single valid {output_name}.",
         }
 
     @staticmethod
-    def _candidate_preview(response: ModelResponse) -> tuple[str, bool]:
+    def _candidate_preview(
+        response: ModelResponse,
+        output_name="DiagnosisProposal",
+    ) -> tuple[str, bool]:
         """Retain at most 4096 UTF-8 bytes of rejected diagnosis output."""
         candidate = response.structured_response
         if candidate is not None:
@@ -275,9 +445,10 @@ class HarnessMiddleware(AgentMiddleware):
         else:
             candidate = [
                 call.get("args")
-                for item in response.result if isinstance(item, AIMessage)
+                for item in response.result
+                if isinstance(item, AIMessage)
                 for call in [*item.tool_calls, *item.invalid_tool_calls]
-                if call.get("name") == "DiagnosisProposal"
+                if call.get("name") == output_name
             ]
             if not candidate:
                 candidate = []
@@ -291,8 +462,11 @@ class HarnessMiddleware(AgentMiddleware):
         # Feedback quotes belong in the ledger, not rejected-output logs.
         def diagnostic_only(value):
             if isinstance(value, dict):
-                return {k: diagnostic_only(v) for k, v in value.items()
-                        if k != "feedback_updates"}
+                return {
+                    k: diagnostic_only(v)
+                    for k, v in value.items()
+                    if k != "feedback_updates"
+                }
             if isinstance(value, list):
                 return [diagnostic_only(item) for item in value]
             if isinstance(value, str) and "feedback_updates" in value:
@@ -305,38 +479,53 @@ class HarnessMiddleware(AgentMiddleware):
 
     @staticmethod
     def _repair_feedback(
-        response: ModelResponse, *, finalizing: bool = False,
+        response: ModelResponse,
+        *,
+        finalizing: bool = False,
         validation: dict | None = None,
+        output_name="DiagnosisProposal",
     ) -> ModelResponse:
         """Keep message pairing and send bounded schema/citation feedback."""
         feedback = (
             "Diagnosis rejected by schema or evidence validation. Return one "
             "valid DiagnosisProposal. Cite unique E handles available "
             "in this run within the investigation window, including retained "
-            "observations. Include a "
-            "nonblank explanation, and use inconclusive if unsupported."
+            "observations. Use findings, hypotheses, limitations and "
+            "proposed_checks; apply the assigned task's completion rule."
         )
+        if output_name == "InvestigationReport":
+            feedback = (
+                f"Structured output rejected. Return one valid {output_name}. "
+                "Cite E telemetry and separate K knowledge handles; record "
+                "supported findings and gaps in missing_observations."
+            )
+        elif output_name == "CoordinatorDecision":
+            feedback = (
+                "Structured output rejected. Return one valid "
+                "CoordinatorDecision: investigate with 1-2 tasks and "
+                "no proposal, "
+                "or submit with a DiagnosisProposal and no tasks. Use valid "
+                "hypothesis IDs and E/K handles. If investigation is closed, "
+                "submit retained findings with explicit gaps."
+            )
         if validation is not None:
-            feedback += (
-                " Specific validation failure: " + json_text(validation)
+            feedback += " Specific validation failure: " + json_text(
+                validation
             )
         if finalizing:
             feedback += (
-                " All investigation tools are disabled. Submit the final "
-                "diagnosis using existing evidence only."
+                " All investigation tools are disabled. Submit "
+                f"{output_name} using existing evidence only."
             )
         messages = []
         for item in response.result:
-            if isinstance(item, ToolMessage) and (
-                    item.name == "DiagnosisProposal"):
+            if isinstance(item, ToolMessage) and item.name == output_name:
                 continue
             if not isinstance(item, AIMessage):
                 messages.append(item)
                 continue
-            calls = [c for c in item.tool_calls
-                     if c["name"] == "DiagnosisProposal"]
-            pending = [c for c in item.tool_calls
-                       if c["name"] != "DiagnosisProposal"]
+            calls = [c for c in item.tool_calls if c["name"] == output_name]
+            pending = [c for c in item.tool_calls if c["name"] != output_name]
             if finalizing:
                 calls.extend(pending)
                 pending = []
@@ -346,20 +535,36 @@ class HarnessMiddleware(AgentMiddleware):
                 # exchange includes a structured-output tool response.
                 # Close the rejected diagnosis exchange before opening the
                 # investigation exchange, preserving every call ID.
-                additional = {k: v for k, v in item.additional_kwargs.items()
-                              if k != "tool_calls"}
-                messages.append(item.model_copy(update={
-                    "tool_calls": calls, "additional_kwargs": additional,
-                }))
-                messages.extend(ToolMessage(
-                    content=feedback, tool_call_id=call["id"],
-                    name=call["name"], status="error",
-                ) for call in rejected)
+                additional = {
+                    k: v
+                    for k, v in item.additional_kwargs.items()
+                    if k != "tool_calls"
+                }
+                messages.append(
+                    item.model_copy(
+                        update={
+                            "tool_calls": calls,
+                            "additional_kwargs": additional,
+                        }
+                    )
+                )
+                messages.extend(
+                    ToolMessage(
+                        content=feedback,
+                        tool_call_id=call["id"],
+                        name=call["name"],
+                        status="error",
+                    )
+                    for call in rejected
+                )
                 if pending:
-                    messages.append(AIMessage(
-                        content="", tool_calls=pending,
-                        additional_kwargs=additional,
-                    ))
+                    messages.append(
+                        AIMessage(
+                            content="",
+                            tool_calls=pending,
+                            additional_kwargs=additional,
+                        )
+                    )
             elif pending:
                 messages.extend([HumanMessage(content=feedback), item])
             else:
@@ -375,59 +580,72 @@ class HarnessMiddleware(AgentMiddleware):
             "Remaining budget including the next call: "
             f"{state.limits.model_calls - state.model_calls} model calls, "
             f"{state.limits.tool_calls - sum(state.tool_calls.values())} "
-            "tool calls. "
-            "Propose an inconclusive diagnosis if the evidence "
-            "is insufficient."
+            f"tool calls. Return {self._output_name}; preserve supported "
+            "observations and state gaps."
         )
-        reason = self.harness.finalization_reason
+        task_remaining = self.harness.task_tools_remaining()
+        if task_remaining is not None:
+            budget += (
+                f"\nThis task has {task_remaining} tool attempts remaining. "
+                "The shared remainder is reserved for other tasks and "
+                "follow-up investigation. Prioritize the observation that "
+                "best distinguishes the assigned hypotheses."
+            )
+        reason = self._local_finalization or self.harness.finalization_reason
         if reason is not None:
             budget += (
                 f"\nInvestigation is closed ({reason.value}). "
-                "Do not call telemetry or evidence-reading tools. Submit "
-                "the final structured diagnosis now using only evidence "
-                "already provided. Cite available evidence IDs within the "
-                "investigation window. Explain the cause and its evidence, "
-                "or return inconclusive with the observed failure, its "
-                "citations and the specific missing observation. Do not "
-                "discard established findings because the deeper cause "
-                "is unknown. Return only DiagnosisProposal."
+                "Do not call investigation or evidence-reading tools. Submit "
+                f"{self._output_name} now using evidence already provided. "
+                "Keep conclusions scoped to inspected operations; distinguish "
+                "observed failures from unverified mechanisms and address "
+                "counterevidence. Do not merge separate traces without a "
+                "shared business identifier. "
             )
-            # The framework still binds the structured diagnosis schema;
-            # DiagnosisProposal only submits the final result.
+            if self._output_name == "DiagnosisProposal":
+                budget += (
+                    "Preserve findings and state gaps in limitations. "
+                    "Apply the assigned task's completion rule."
+                )
+            elif self._output_name == "InvestigationReport":
+                budget += (
+                    "Return supported findings with E/K handles and gaps in "
+                    "missing_observations; findings may be empty."
+                )
+            else:
+                budget += "Choose submit with a proposal and no tasks."
+            # The framework still binds the assigned structured-output schema.
             request = request.override(tools=[], tool_choice=None)
-            budget += (
-                "\nInvestigation is now closed. Submit DiagnosisProposal "
-                "now, using the evidence already available. No further "
-                "tool queries are permitted. Keep conclusions scoped to "
-                "the observed operations and distinguish confirmed "
-                "failures from unverified underlying causes. In "
-                "findings and limitations, discuss supporting and contrary "
-                "evidence (including successful operations), and state "
-                "what remains unknown. Do not merge events from separate "
-                "traces into one transaction without a shared business "
-                "identifier."
-            )
         request = request.override(
-            messages=[*request.messages, HumanMessage(
-                content=budget, name="runtime_budget",
-                id=f"runtime-budget-{state.id}-{state.model_calls + 1}",
-            )]
+            messages=[
+                *request.messages,
+                HumanMessage(
+                    content=budget,
+                    name="runtime_budget",
+                    id=f"runtime-budget-{state.id}-{state.model_calls + 1}",
+                ),
+            ]
         )
         selection = select_context(
-            request, state.limits.context_tokens - state.limits.output_tokens
+            request,
+            state.limits.context_tokens - state.limits.output_tokens,
+            coordinator_handoff=self._output_name == "CoordinatorDecision",
         )
         self.harness.emit(
-            "context.selected", parent_span_id=state.id,
-            data={"estimator": "utf8-bytes-v1",
-                  "estimated_input_before": selection.before,
-                  "estimated_input_after": selection.after,
-                  "reduced_messages": selection.reduced_messages,
-                  "omitted_previews": selection.omitted_previews,
-                  "input_allowance": (
-                      state.limits.context_tokens - state.limits.output_tokens
-                  ),
-                  "output_reserved": state.limits.output_tokens,
-                  "fits": selection.fits},
+            "context.selected",
+            parent_span_id=state.id,
+            data={
+                "estimator": "utf8-bytes-v1",
+                "estimated_input_before": selection.before,
+                "estimated_input_after": selection.after,
+                "reduced_messages": selection.reduced_messages,
+                "omitted_previews": selection.omitted_previews,
+                "input_allowance": (
+                    state.limits.context_tokens - state.limits.output_tokens
+                ),
+                "output_reserved": state.limits.output_tokens,
+                "fits": selection.fits,
+            },
         )
         if not selection.fits:
             self.harness.stop(StopReason.CONTEXT_LIMIT)
@@ -436,9 +654,12 @@ class HarnessMiddleware(AgentMiddleware):
             if isinstance(request.model, ChatGoogleGenerativeAI)
             else "max_tokens"
         )
-        request = selection.request.override(model_settings={
-            **request.model_settings, output_key: state.limits.output_tokens,
-        })
+        request = selection.request.override(
+            model_settings={
+                **request.model_settings,
+                output_key: state.limits.output_tokens,
+            }
+        )
         return request
 
     async def awrap_tool_call(
@@ -456,47 +677,106 @@ class HarnessMiddleware(AgentMiddleware):
             try:
                 # Also intercept hallucinated/hidden tool
                 # names before dispatch.
-                self.harness.authorize_tool(request.tool_call["name"])
+                name = request.tool_call["name"]
+                if (
+                    self._allowed_tools is not None
+                    and name not in self._allowed_tools
+                ):
+                    self.harness.stop(StopReason.TOOL_DENIED)
+                self.harness.authorize_tool(name)
                 result = await handler(request)
-            except InvestigationClosed:
-                reason = self.harness.finalization_reason
+            except TaskToolBudgetExhausted as exc:
+                own_task = exc.task_id == self.harness._task_id.get()
+                if own_task:
+                    self._local_finalization = StopReason.TOOL_BUDGET
                 self.harness.emit(
-                    "tool.skipped", parent_span_id=self.harness.state.id,
+                    "tool.skipped",
+                    parent_span_id=self.harness.state.id,
                     data={"tool": request.tool_call["name"],
-                          "reason": reason.value},
+                          "reason": "task_tool_budget",
+                          "executing_task_id": exc.task_id},
+                )
+                message = (
+                    "This task's tool allocation is exhausted. "
+                    f"Submit {self._output_name} using retained evidence "
+                    "and explicit gaps. Other tasks can still investigate."
+                    if own_task else
+                    "The shared call's executing task exhausted its "
+                    "allocation before this attempt. Your allocation "
+                    "is unchanged; you may retry within your own budget."
                 )
                 return ToolMessage(
                     content=json.dumps({"error": {
-                        "category": "investigation_closed",
-                        "reason": reason.value,
-                        "message": (
-                            "This tool was not executed. "
-                            "Investigation is closed; "
-                            "submit a final diagnosis using existing evidence."
-                        ),
+                        "category": "task_tool_budget", "message": message,
                     }}),
                     tool_call_id=request.tool_call["id"],
                     name=request.tool_call["name"], status="error",
+                )
+            except InvestigationClosed:
+                reason = (
+                    self._local_finalization
+                    or self.harness.finalization_reason
+                )
+                self.harness.emit(
+                    "tool.skipped",
+                    parent_span_id=self.harness.state.id,
+                    data={
+                        "tool": request.tool_call["name"],
+                        "reason": reason.value,
+                    },
+                )
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "category": "investigation_closed",
+                                "reason": reason.value,
+                                "message": (
+                                    "This tool was not executed. "
+                                    "Investigation is closed; "
+                                    f"submit {self._output_name} "
+                                    "using existing evidence."
+                                ),
+                            }
+                        }
+                    ),
+                    tool_call_id=request.tool_call["id"],
+                    name=request.tool_call["name"],
+                    status="error",
                 )
             except ToolUnavailable as exc:
                 self.harness.emit(
-                    "tool.unavailable", parent_span_id=self.harness.state.id,
-                    data={"tool": request.tool_call["name"],
-                          "category": exc.failure.category,
-                          "status_code": exc.failure.status_code},
-                )
-                return ToolMessage(
-                    content=json.dumps({"error": {
+                    "tool.unavailable",
+                    parent_span_id=self.harness.state.id,
+                    data={
+                        "tool": request.tool_call["name"],
                         "category": exc.failure.category,
                         "status_code": exc.failure.status_code,
-                        "message": (
-                            "Query failed; correct arguments or use another "
-                            "source. "
-                            "No evidence was returned by this call."
-                        ),
-                    }}),
+                    },
+                )
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "category": exc.failure.category,
+                                "status_code": exc.failure.status_code,
+                                "message": (
+                                    "The requested resource is not available. "
+                                    "It may be absent or no longer retained. "
+                                    "Do not invent a replacement ID. Use "
+                                    "other evidence and report this gap; "
+                                    "absence does not establish health."
+                                    if exc.failure.category == "not_found"
+                                    else "Query failed; correct arguments "
+                                    "or use another source. "
+                                    "No evidence was returned by this call."
+                                ),
+                            }
+                        }
+                    ),
                     tool_call_id=request.tool_call["id"],
-                    name=request.tool_call["name"], status="error",
+                    name=request.tool_call["name"],
+                    status="error",
                 )
             if isinstance(result, ToolMessage) and result.status == "error":
                 self.harness.emit(

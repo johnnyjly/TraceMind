@@ -74,7 +74,8 @@ def make_task(
                         settings, callbacks=[budget, *callbacks_for(settings)],
                         client=client,
                     ).verify(
-                        state, subject.diagnosis, subject.evidence, harness)
+                        state, subject.diagnosis, subject.evidence, harness,
+                        subject=subject)
                 terminal, reason = RunStatus.SUCCEEDED, StopReason.COMPLETED
             except asyncio.CancelledError:
                 terminal, reason = RunStatus.CANCELLED, StopReason.CANCELLED
@@ -88,7 +89,7 @@ def make_task(
                 harness.finish(terminal, reason)
             return ExperimentOutput(
                 diagnosis=subject.diagnosis, evidence=subject.evidence,
-                run_state=state, error_type=error,
+                run_state=state, error_type=error, elapsed_ms=state.elapsed_ms,
                 investigation_start=subject.start,
                 investigation_end=subject.end,
                 knowledge=subject.knowledge,
@@ -115,6 +116,7 @@ def make_task(
         config = rag_settings or RagSettings()
         completion = create_rag_completion(
             settings, config, callbacks=[budget, *callbacks_for(settings)],
+            purpose="retrieval",
         )
         runtime = RagRuntime(
             config, completion=completion, langfuse_client=client
@@ -200,8 +202,15 @@ def run_experiment(
             "model_call_cap": budget.limit,
             "model_calls_before_run": budget.calls,
             "investigator_model": settings.llm_model,
+            "agent_mode": settings.agent_mode,
+            "verifier_model": (settings.verification_policy.model
+                               if settings.verification_policy else "off"),
             "fallback_model": settings.agent_fallback_model or "off",
             "judge_model": settings.eval_judge_model if judge else "off",
+            "verifier_thinking": settings.verifier_deepseek_thinking,
+            "verifier_reasoning_effort": settings.verifier_reasoning_effort,
+            "judge_thinking": settings.eval_judge_deepseek_thinking,
+            "judge_reasoning_effort": settings.eval_judge_reasoning_effort,
             "memory_corpus": (
                 memory_snapshot.fingerprint if memory_snapshot else "off"
             ),

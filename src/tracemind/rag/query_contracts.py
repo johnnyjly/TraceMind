@@ -1,5 +1,6 @@
 """Bounded internal contract for the read-only retrieval service."""
-from typing import Annotated
+
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -11,7 +12,8 @@ Term = Annotated[str, Field(min_length=1, max_length=512)]
 class QueryKeywords(BaseModel):
     model_config = ConfigDict(extra="forbid")
     high_level_keywords: list[Term] = Field(
-        default_factory=list, max_length=32)
+        default_factory=list, max_length=32
+    )
     low_level_keywords: list[Term] = Field(default_factory=list, max_length=32)
 
 
@@ -28,6 +30,7 @@ class PreparedQuery(QueryKeywords):
 class RetrievalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     snapshot: str = Field(pattern=r"^[a-zA-Z0-9_-]+$", max_length=120)
+    mode: Literal["mix", "naive"]
     question: str = Field(min_length=1, max_length=12000)
     queries: list[PreparedQuery] = Field(min_length=1, max_length=4)
 
@@ -36,3 +39,4 @@ class RetrievalResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     snapshot: str
     hits: list[RetrievalHit]
+    diagnostics: dict = Field(default_factory=dict)

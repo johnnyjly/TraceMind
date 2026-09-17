@@ -224,7 +224,7 @@ def test_deepseek_payload_disables_tools_and_repairs_unwanted_call(
             }
         if len(requests) > 1:
             assert payload["messages"][-1]["role"] == "user"
-            assert "Investigation is now closed" in (
+            assert "Investigation is closed" in (
                 payload["messages"][-1]["content"])
             assert [t["function"]["name"] for t in payload["tools"]] == [
                 "DiagnosisProposal",

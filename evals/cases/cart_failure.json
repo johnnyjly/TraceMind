@@ -5,13 +5,33 @@
     "title": "Customers cannot clear their shopping carts",
     "description": "Removing all cart items fails, and some customers still see items after placing an order. Investigate the cause; do not assume checkout itself failed.",
     "severity": "high",
-    "affected_services": ["frontend"]
+    "affected_services": [
+      "frontend"
+    ]
   },
-  "fault": {"feature_flag": "cartFailure", "variant": "100%"},
+  "fault": {
+    "feature_flag": "cartFailure",
+    "variant": "100%"
+  },
   "ground_truth": {
     "root_cause_service": "cart",
-    "root_cause_terms": ["emptycart", "clear", "redis", "valkey", "badhost"],
-    "required_evidence_source": "trace"
+    "root_cause_terms": [
+      "emptycart",
+      "clear",
+      "redis",
+      "valkey"
+    ],
+    "required_evidence_source": "trace",
+    "diagnostic_reference": {
+      "version": "demo-rca-v2",
+      "operation": "Cart EmptyCart / EmptyCartAsync",
+      "observable_mechanism": "Cart clearing fails while establishing storage connectivity, with EnsureRedisConnected or a corresponding cart-storage connection exception.",
+      "propagation": "The direct clear operation fails; linked checkout requests can still complete despite a later EmptyCart failure. Residual items require linked same-cart readback.",
+      "exclusions": [
+        "Do not generalize to all cart operations or total Valkey outage.",
+        "Do not invent a target hostname or final cart contents absent evidence."
+      ]
+    }
   },
   "max_tool_calls": 12
 }

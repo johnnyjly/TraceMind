@@ -148,6 +148,10 @@ def docker_environment(flag_config: Path) -> dict[str, str]:
             "DEMO_VERSION": "3.1.0",
             "IMAGE_VERSION": "3.1.0",
             "TRACEMIND_FLAGD_CONFIG": str(flag_config.resolve()),
+            "TRACEMIND_JAEGER_CONFIG": str(
+                Path(__file__).resolve().parents[3]
+                / "deploy" / "jaeger-persistent.yaml"
+            ),
         }
     )
     return environment

@@ -154,7 +154,7 @@ def test_model_factory_supports_google_openai_and_deepseek() -> None:
     assert all(model.max_retries == 0 for model in (google, openai, deepseek))
     assert str(deepseek.openai_api_base) == "https://api.deepseek.com"
     assert deepseek.use_responses_api is False
-    assert deepseek.extra_body == {"thinking": {"type": "disabled"}}
+    assert deepseek.extra_body == {"thinking": {"type": "enabled"}}
     assert deepseek.profile["structured_output"] is False
 
 
@@ -176,7 +176,7 @@ def test_deepseek_agent_sends_compatible_structured_tool_request(monkeypatch):
         payload = json.loads(request.content)
         assert payload["max_tokens"] == 512
         assert "max_completion_tokens" not in payload
-        assert payload["thinking"] == {"type": "disabled"}
+        assert payload["thinking"] == {"type": "enabled"}
         assert "response_format" not in payload
         assert any(tool["function"]["name"] == "DiagnosisProposal"
                    for tool in payload["tools"])
@@ -209,7 +209,7 @@ def test_deepseek_agent_sends_compatible_structured_tool_request(monkeypatch):
             transport=httpx.MockTransport(respond)
         ) as http:
             monkeypatch.setattr(
-                "tracemind.agent.runtime.llm.BaseChatOpenAI",
+                "tracemind.agent.runtime.llm.DeepSeekChat",
                 lambda **kwargs: BaseChatOpenAI(
                     http_async_client=http, **kwargs
                 ),

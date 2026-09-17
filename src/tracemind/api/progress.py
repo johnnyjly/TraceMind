@@ -24,6 +24,13 @@ TOOLS = {
     "read_knowledge": "saved reference sections",
 }
 MESSAGES = {
+    "collaboration.planned": ("planning", "Investigation tasks assigned"),
+    "collaboration.handoff": (
+        "synthesizing", "Checking investigator findings"),
+    "collaboration.reinvestigation": (
+        "investigating", "Investigating specific verification gaps"),
+    "collaboration.task_incomplete": (
+        "synthesizing", "Task budget reached; retaining evidence and gaps"),
     "verification.started": (
         "verifying", "Reviewing diagnosis against retained evidence"),
     "verification.completed": ("verified", "Diagnosis review completed"),
@@ -68,6 +75,7 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         "result_count", "reason", "status", "error_type", "category",
         "added", "received", "duplicates", "record_count",
         "applied", "skipped", "rejected_count", "verdict", "accepted", "code",
+        "role", "phase", "task_id", "round",
     } and isinstance(value, (str, int, float, bool))}
     if event.kind.startswith("tool."):
         tool = TOOLS.get(data.get("tool"), "tool")
@@ -82,6 +90,8 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
             count = data.get("result_count", 0)
             # result_count counts returned preview records, not new evidence.
             message = f"Finished reading {tool}, returned {count} records"
+        elif event.kind == "tool.reused":
+            phase, message = "query_completed", f"Reusing saved {tool}"
         elif event.kind == "tool.failed":
             phase, message = "error", f"Failed to read {tool}"
         elif event.kind == "tool.cancelled":
@@ -103,6 +113,10 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
             "cancelled": "Investigation cancelled",
             "failed": "Investigation failed",
         }.get(data.get("status"), "Investigation finished")
+    elif event.kind in {"agent.phase_started", "agent.phase_completed"}:
+        phase = str(data.get("phase", "analyzing"))
+        action = ("Starting" if event.kind.endswith("started") else "Finished")
+        message = f"{action} {data.get('role', 'agent')} {phase}"
     elif event.kind in MESSAGES:
         phase, message = MESSAGES[event.kind]
     else:

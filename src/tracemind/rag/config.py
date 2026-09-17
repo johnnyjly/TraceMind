@@ -51,6 +51,8 @@ class RagSettings(BaseSettings):
     llm_model: str | None = Field(default=None, min_length=1)
     llm_max_calls: int = Field(default=4, ge=1)
     llm_output_tokens: int = Field(default=2048, ge=1)
+    retrieval_thinking: bool = False
+    retrieval_output_tokens: int = Field(default=512, ge=1)
     timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     retrieval_context_tokens: int = Field(default=8192, ge=1)
     summary_max_tokens: int = Field(default=192, ge=1)

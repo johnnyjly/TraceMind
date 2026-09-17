@@ -5,13 +5,33 @@
     "title": "Product browsing and checkout intermittently stall",
     "description": "Customers report intermittent long waits while browsing products and placing orders. Some requests still succeed. Investigate the shared source of latency using current telemetry.",
     "severity": "high",
-    "affected_services": ["frontend"]
+    "affected_services": [
+      "frontend"
+    ]
   },
-  "fault": {"feature_flag": "productCatalogLockContention", "variant": "on"},
+  "fault": {
+    "feature_flag": "productCatalogLockContention",
+    "variant": "on"
+  },
   "ground_truth": {
     "root_cause_service": "product-catalog",
-    "root_cause_terms": ["lock contention", "table lock", "access exclusive", "locking"],
-    "required_evidence_source": "log"
+    "root_cause_terms": [
+      "lock contention",
+      "table lock",
+      "access exclusive",
+      "locking"
+    ],
+    "required_evidence_source": "log",
+    "diagnostic_reference": {
+      "version": "demo-rca-v2",
+      "operation": "Product-catalog GetProduct and database read",
+      "observable_mechanism": "Slow product reads coincide with explicit ACCESS EXCLUSIVE locking of catalog.products, supporting lock contention as a likely cause. A scoped likely mechanism matches even if holder-to-waiter linkage is not retained.",
+      "propagation": "Identify delay through the observed frontend product-fetch or checkout GetProduct chain; either captured path suffices.",
+      "exclusions": [
+        "Do not invent an exact lock holder, SELECT wait linkage, configured hold duration or fixed schedule.",
+        "Do not extend a demonstrated browsing path to all checkout stages."
+      ]
+    }
   },
   "max_tool_calls": 12
 }

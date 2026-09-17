@@ -15,7 +15,7 @@ from tracemind.rag.errors import RetrievalUnavailable
 from tracemind.rag.ingestion import verify_snapshot
 from tracemind.rag.model_bridge import Completion
 from tracemind.rag.local_models import LocalModels
-from tracemind.rag.models import RetrievalHit
+from tracemind.rag.query_contracts import RetrievalResponse
 
 
 logger = logging.getLogger(__name__)
@@ -35,9 +35,13 @@ class SnapshotRetriever:
         self._lock = asyncio.Lock()
 
     async def __call__(
-        self, queries: list[str], *, question: str, snapshot: str,
+        self,
+        queries: list[str],
+        *,
+        question: str,
+        snapshot: str,
         completion: Completion,
-    ) -> list[RetrievalHit]:
+    ) -> RetrievalResponse:
         """Fuse every planned query, rerank once, and copy complete parents."""
         settings = self.settings.model_copy(update={"snapshot": snapshot})
         started = monotonic()
@@ -47,28 +51,35 @@ class SnapshotRetriever:
                 manifest = await run_io(verify_snapshot, settings.workspace)
                 if manifest.get("snapshot") != snapshot:
                     raise ValueError("published snapshot identity mismatch")
-                runtime = RagRuntime(settings, completion=completion,
-                                     models=self.models)
+                runtime = RagRuntime(
+                    settings, completion=completion, models=self.models
+                )
                 verified = monotonic()
                 try:
                     await runtime.initialize()
                     logger.info(
                         "rag.ready snapshot=%s wait_ms=%.1f verify_ms=%.1f "
                         "initialize_ms=%.1f",
-                        snapshot, (acquired - started) * 1000,
+                        snapshot,
+                        (acquired - started) * 1000,
                         (verified - acquired) * 1000,
                         (monotonic() - verified) * 1000,
                     )
-                    return await runtime.search(question, queries=queries)
+                    hits = await runtime.search(question, queries=queries)
+                    return RetrievalResponse(
+                        snapshot=snapshot,
+                        hits=hits,
+                        diagnostics=runtime.last_retrieval,
+                    )
                 finally:
                     await runtime.close()
             except (ApiException, sqlite3.Error) as exc:
                 raise RetrievalUnavailable(
-                    "knowledge storage unavailable") from exc
+                    "knowledge storage unavailable"
+                ) from exc
 
 
 @lru_cache(maxsize=4)
 def get_snapshot_retriever(settings_json: str) -> SnapshotRetriever:
     """Cache weights and admission independently of investigation callbacks."""
-    return SnapshotRetriever(
-        RagSettings.model_validate_json(settings_json))
+    return SnapshotRetriever(RagSettings.model_validate_json(settings_json))

@@ -5,13 +5,35 @@
     "title": "Customers cannot complete checkout",
     "description": "Orders fail during checkout while product browsing still works. Investigate which part of the request path is failing and why.",
     "severity": "high",
-    "affected_services": ["frontend"]
+    "affected_services": [
+      "frontend"
+    ]
   },
-  "fault": {"feature_flag": "paymentUnreachable", "variant": "on"},
+  "fault": {
+    "feature_flag": "paymentUnreachable",
+    "variant": "on"
+  },
   "ground_truth": {
     "root_cause_service": "checkout",
-    "root_cause_terms": ["badaddress", "dns", "name resolution", "resolver", "address", "endpoint"],
-    "required_evidence_source": "trace"
+    "root_cause_terms": [
+      "badaddress",
+      "dns",
+      "name resolution",
+      "resolver",
+      "address",
+      "endpoint"
+    ],
+    "required_evidence_source": "trace",
+    "diagnostic_reference": {
+      "version": "demo-rca-v2",
+      "operation": "Checkout outgoing PaymentService/Charge",
+      "observable_mechanism": "The caller fails during destination name resolution, reporting zero resolved addresses. The affected owner is checkout and the failing edge is checkout to payment.",
+      "propagation": "The failed outgoing Charge propagates through PlaceOrder to checkout failure.",
+      "exclusions": [
+        "Do not substitute payment application rejection for caller resolution failure.",
+        "Do not assert payment server outage, global DNS outage, or an exact bad destination absent retained evidence."
+      ]
+    }
   },
   "max_tool_calls": 12
 }

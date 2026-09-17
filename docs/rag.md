@@ -91,8 +91,9 @@ TRACEMIND_AGENT_KNOWLEDGE_SNAPSHOT=runbooks-v2
 TRACEMIND_AGENT_ALLOWED_TOOLS=["query_metrics","discover_metrics","search_traces","get_trace_detail","search_logs","read_evidence","search_knowledge","read_knowledge"]
 ```
 
-The agent chooses `search_knowledge`; optional rewriting translates/decomposes
-queries into English. Auxiliary attempts/retries consume shared harness budgets
+The agent chooses `search_knowledge`; input is assumed to be English. Optional
+rewriting decomposes the question while preserving exact identifiers; it does
+not translate the input. Auxiliary attempts/retries consume shared harness budgets
 and reserve final-synthesis capacity within the shared model budget. Embedded
 retrieval can load cold models and exceed the default 20-second tool timeout;
 measure locally before adjusting `TRACEMIND_AGENT_TOOL_TIMEOUT_SECONDS`. The

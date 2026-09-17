@@ -108,6 +108,11 @@ def main() -> None:
             parser.error("no previous flag configuration to restore")
         restore_flag_config(GENERATED_FLAG_PATH, BACKUP_FLAG_PATH)
 
+    if args.action == "start":
+        subprocess.run(
+            ["docker", "volume", "create", "tracemind-jaeger-data"],
+            env=environment, check=True, capture_output=True,
+        )
     subprocess.run(
         compose_command(args.demo_path, OVERRIDE_PATH, args.action),
         cwd=args.demo_path,

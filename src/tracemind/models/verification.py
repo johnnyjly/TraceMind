@@ -60,22 +60,46 @@ class Claim(BaseModel):
     rationale: str = Field(min_length=1)
 
 
+class ReferenceComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    matches: bool
+    item_ids: list[str] = Field(max_length=12)
+    rationale: str = Field(min_length=1, max_length=500)
+
+
+class ReferenceAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    owner: ReferenceComponent
+    operation: ReferenceComponent
+    mechanism: ReferenceComponent
+    propagation: ReferenceComponent
+    exclusions: ReferenceComponent
+
+    @property
+    def correct(self) -> bool:
+        return all(getattr(self, k).matches for k in type(self).model_fields)
+
+
 class DiagnosisReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     claims: list[Claim] = Field(
-        min_length=1, max_length=32,
+        min_length=1,
+        max_length=32,
         description=(
             "Exactly one assessment per application-numbered item, including "
             "hypotheses, limitations and proposed checks."
         ),
     )
     uncertainty_appropriate: bool
-    root_cause_correctness: bool | None = Field(description=(
-        "Null unless an explicit held-out reference_answer or "
-        "root_cause_service is supplied in reference. Observations and "
-        "the original diagnosis are not held-out references."
-    ))
+    root_cause_correctness: bool | None = Field(
+        description=(
+            "Null unless an explicit held-out reference_answer or "
+            "root_cause_service is supplied in reference. Observations and "
+            "the original diagnosis are not held-out references."
+        )
+    )
     process_quality: float | None = Field(default=None, ge=0, le=1)
+    reference_assessment: ReferenceAssessment | None = None
     rationale: str = Field(min_length=1)
 
     @property
@@ -106,6 +130,8 @@ class ReviewSubject(BaseModel):
 class VerificationPolicy(BaseModel):
     provider: Literal["google", "openai", "deepseek"] = "deepseek"
     model: str = Field(default="deepseek-v4-pro", min_length=1)
+    deepseek_thinking: bool = True
+    deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
     timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     input_bytes: int = Field(default=131072, ge=1)
     output_tokens: int = Field(default=4096, ge=1)

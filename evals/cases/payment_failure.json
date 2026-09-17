@@ -2,10 +2,12 @@
   "id": "payment_failure",
   "description": "Payment charge requests fail and surface as checkout failures.",
   "incident": {
-    "title": "Checkout requests are returning HTTP 500",
+    "title": "Checkout requests are failing",
     "description": "Customers cannot complete checkout; investigate the downstream cause.",
     "severity": "high",
-    "affected_services": ["checkout"]
+    "affected_services": [
+      "checkout"
+    ]
   },
   "fault": {
     "feature_flag": "paymentFailure",
@@ -13,8 +15,22 @@
   },
   "ground_truth": {
     "root_cause_service": "payment",
-    "root_cause_terms": ["charge", "failure", "error"],
-    "required_evidence_source": "trace"
+    "root_cause_terms": [
+      "charge",
+      "failure",
+      "error"
+    ],
+    "required_evidence_source": "trace",
+    "diagnostic_reference": {
+      "version": "demo-rca-v2",
+      "operation": "PaymentService/Charge or child charge",
+      "observable_mechanism": "Payment Charge executes and rejects with the observed Invalid token application error. The message alone does not establish a real credential configuration defect.",
+      "propagation": "The linked checkout charge call fails and prevents order completion.",
+      "exclusions": [
+        "Do not claim caller-side resolution failure instead of the observed handler rejection.",
+        "Do not infer financial settlement or safe retries."
+      ]
+    }
   },
   "max_tool_calls": 12
 }

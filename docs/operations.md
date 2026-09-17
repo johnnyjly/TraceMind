@@ -50,14 +50,14 @@ profile overrides smaller code defaults when copied into `.env`:
 | Setting suffix (`TRACEMIND_AGENT_`) | Example profile | Code default |
 | --- | --- | --- |
 | `CONTEXT_TOKENS` | 131072 | 32768 |
-| `OUTPUT_TOKENS` | 8192 | 4096 |
+| `OUTPUT_TOKENS` | 8192 | 8192 |
 | `OBSERVATION_BYTES` | 8388608 | 8388608 |
 | `RECURSION_LIMIT` | 50 | 12 |
 | `MAX_MODEL_CALLS` | 15 | 8 |
 | `MAX_TOOL_CALLS` | 25 | 12 |
-| `TIMEOUT_SECONDS` | 300 | 120 |
+| `TIMEOUT_SECONDS` | 600 | 600 |
 
-Attempt timeouts default to 60 seconds for models and 20 for tools. These limits
+Attempt timeouts default to 180 seconds for models and 20 for tools. These limits
 are not model capacity declarations. Retries/repairs consume attempts; evidence
 reads consume tool attempts. Evaluation also applies the case's tool-call cap.
 Context estimates are byte-based, distinct from provider-reported token usage.
@@ -81,6 +81,26 @@ admitted work.
 
 DeepSeek uses its OpenAI-compatible Chat Completions
 endpoint with thinking disabled and tool-based structured diagnoses.
+
+## Collaborative multi-agent mode
+
+Enable `TRACEMIND_AGENT_MODE=multi`; single remains the default. All modes use
+shared run limits. Multi mode always requires the verifier. Enable knowledge
+with `TRACEMIND_AGENT_KNOWLEDGE_ENABLED=true`, a published snapshot ID and explicit
+`search_knowledge` / `read_knowledge` grants. Memory writes remain disabled.
+
+Use one local worker. LangGraph runs at most two investigation tasks concurrently
+and allows up to two targeted feedback rounds. The coordinator cannot expand
+tool permissions. Small model budgets may leave no room for parallel discovery
+or feedback; actual model attempts, repairs, auxiliary retrieval and verification
+all count against the same cap. Budget enough output tokens/time for DeepSeek
+thinking, enabled by default with effort `high`.
+
+Back up both ledger and graph-checkpoint databases. Completed task reports and
+query results are reused after recovery; ambiguous external calls can repeat and
+remain charged. Recovery requires a compatible saved graph contract.
+Follow-up investigations inherit mode; explanations use retained-data single mode.
+See [multi-agent architecture and contracts](multi-agent.md) for details.
 
 ## Persistence and progress
 
@@ -208,3 +228,34 @@ Runtime Langfuse tracing is separately opt-in through `TRACEMIND_LANGFUSE_*`;
 normal operation does not require the evaluation server. For model limits,
 local deployment and scored experiments, see
 [Evaluation](evaluation.md#online-completion-verification).
+
+## Demo trace retention
+
+The Demo's upstream Jaeger stores at most 25,000 traces in memory. Continuous
+traffic can evict an incident window within hours even while Jaeger remains
+healthy. A trace lookup then returns HTTP 404; this is missing telemetry, not
+proof that the service is healthy. MCP reports `not_found`, without transport
+retries, and the agent can preserve conclusions supported by other evidence.
+
+The TraceMind Demo override uses the existing Jaeger 2.19.0 binary's embedded
+Badger backend, with seven-day span retention and the external Docker volume
+`tracemind-jaeger-data`. No image or package upgrade is required. The external
+volume survives Demo `stop` (which otherwise removes Compose-owned volumes).
+`scripts/demo_scenario.py start` creates the volume if needed; direct Compose
+users can create it with `docker volume create tracemind-jaeger-data`.
+Do not delete it during ordinary teardown. See the
+[version-pinned Badger sample](https://github.com/jaegertracing/jaeger/blob/v2.19.0/cmd/jaeger/config-badger.yaml).
+
+Switching an existing memory-only Jaeger requires recreating that container;
+its remaining in-memory traces will be lost. Export any needed traces first.
+Already-evicted traces cannot be recovered from Jaeger by changing storage.
+Capture fresh fault windows after the switch; do not substitute fresh data
+into old trial records. Disk usage must be monitored during sustained traffic.
+
+`evaluate_diagnosis.py` now checks every captured trace through the diagnosis
+MCP endpoint before creating the model-call budget or Langfuse experiment.
+It requires real spans and matching whole-trace fingerprints/counts. A missing
+trace, incomplete reply or changed trace blocks the trial before model calls.
+A fingerprint can also change after MCP normalization changes; recapture the
+window with the current tool version in that case. This check establishes
+availability at admission, not a guarantee against later backend outages.

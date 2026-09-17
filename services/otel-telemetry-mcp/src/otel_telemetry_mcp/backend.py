@@ -14,32 +14,59 @@ class TelemetryBackend(Protocol):
     """Supply observations or metadata without owning execution policy."""
 
     async def query_metrics(
-        self, expression: str, *, at: datetime,
+        self,
+        expression: str,
+        *,
+        at: datetime,
     ) -> list[Evidence]:
         """Return normalized instant-vector samples."""
         ...
 
     async def discover_metrics(
-        self, *, service: str | None, metric: str | None,
-        start: datetime, end: datetime, limit: int,
+        self,
+        *,
+        service: str | None,
+        metric: str | None,
+        start: datetime,
+        end: datetime,
+        limit: int,
     ) -> dict:
         """Return metric metadata, never diagnostic observations."""
         ...
 
     async def search_traces(
-        self, service: str, *, start: datetime, end: datetime,
-        min_duration_ms: float | None = None, errors_only: bool = False,
+        self,
+        service: str,
+        *,
+        start: datetime,
+        end: datetime,
+        min_duration_ms: float | None = None,
+        errors_only: bool = False,
+        operation: str | None = None,
     ) -> list[Evidence] | dict:
         """Return trace summaries for one service and investigation window."""
         ...
 
-    async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
+    async def get_trace_detail(
+        self,
+        trace_id: str,
+        *,
+        service: str | None = None,
+        operation: str | None = None,
+        offset: int = 0,
+        limit: int = 25,
+    ) -> list[Evidence] | dict:
         """Return errors and bounded latency context from one known trace."""
         ...
 
     async def search_logs(
-        self, service: str, *, start: datetime, end: datetime,
+        self,
+        service: str,
+        *,
+        start: datetime,
+        end: datetime,
         text: str | None = None,
+        trace_id: str | None = None,
     ) -> list[Evidence]:
         """Return service logs with an optional body-text filter."""
         ...
@@ -54,46 +81,92 @@ class DirectTelemetryBackend:
     opensearch: OpenSearchClient
 
     async def query_metrics(
-        self, expression: str, *, at: datetime,
+        self,
+        expression: str,
+        *,
+        at: datetime,
     ) -> list[Evidence]:
         """Read instant samples using the existing Prometheus client."""
         return await self.prometheus.query(expression, at=at)
 
     async def discover_metrics(
-        self, *, service: str | None, metric: str | None,
-        start: datetime, end: datetime, limit: int,
+        self,
+        *,
+        service: str | None,
+        metric: str | None,
+        start: datetime,
+        end: datetime,
+        limit: int,
     ) -> dict:
         """Read bounded names and labels without creating Evidence."""
         return await self.prometheus.discover_metrics(
-            service=service, metric=metric, start=start, end=end, limit=limit,
+            service=service,
+            metric=metric,
+            start=start,
+            end=end,
+            limit=limit,
         )
 
     async def search_traces(
-        self, service: str, *, start: datetime, end: datetime,
-        min_duration_ms: float | None = None, errors_only: bool = False,
+        self,
+        service: str,
+        *,
+        start: datetime,
+        end: datetime,
+        min_duration_ms: float | None = None,
+        errors_only: bool = False,
+        operation: str | None = None,
     ) -> list[Evidence] | dict:
         """Read service traces with the client's existing result limit."""
         evidence = await self.jaeger.search_traces(
-            service, start=start, end=end,
-            min_duration_ms=min_duration_ms, errors_only=errors_only,
+            service,
+            start=start,
+            end=end,
+            min_duration_ms=min_duration_ms,
+            errors_only=errors_only,
+            operation=operation,
         )
         if evidence:
             return evidence
         hints = await self.jaeger.service_hints(service)
         hints["filters"] = {
-            "min_duration_ms": min_duration_ms, "errors_only": errors_only,
+            "min_duration_ms": min_duration_ms,
+            "errors_only": errors_only,
         }
         return hints
 
-    async def get_trace_detail(self, trace_id: str) -> list[Evidence]:
+    async def get_trace_detail(
+        self,
+        trace_id: str,
+        *,
+        service: str | None = None,
+        operation: str | None = None,
+        offset: int = 0,
+        limit: int = 25,
+    ) -> list[Evidence] | dict:
         """Read normalized error and latency spans from a known trace."""
-        return await self.jaeger.get_trace_detail(trace_id)
+        return await self.jaeger.get_trace_detail(
+            trace_id,
+            service=service,
+            operation=operation,
+            offset=offset,
+            limit=limit,
+        )
 
     async def search_logs(
-        self, service: str, *, start: datetime, end: datetime,
+        self,
+        service: str,
+        *,
+        start: datetime,
+        end: datetime,
         text: str | None = None,
+        trace_id: str | None = None,
     ) -> list[Evidence]:
         """Read service logs with the client's existing result limit."""
         return await self.opensearch.search_logs(
-            service, start=start, end=end, text=text,
+            service,
+            start=start,
+            end=end,
+            text=text,
+            trace_id=trace_id,
         )

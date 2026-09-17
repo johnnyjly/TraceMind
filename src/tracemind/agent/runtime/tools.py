@@ -255,7 +255,8 @@ def _query_executor(
                                "stored_bytes": collector.bytes_used})
             return result
 
-        result = await harness.tool_call(name, arguments, collect)
+        result = await harness.shared_tool_call(name, arguments, collect)
+        evidence_result = evidence_result or any("id" in r for r in result)
         if evidence_result and not added:
             result.append({
                 "kind": "query_feedback",
@@ -309,6 +310,7 @@ def create_local_tools(
         result = model_references(result, harness.state)
         artifact = context_index(result)
         artifact["detail_page"] = evidence_id is not None
+        artifact["catalogue_page"] = evidence_id is None
         return result, artifact
 
     candidates = [read_evidence, *extra_tools]
@@ -332,7 +334,11 @@ async def create_mcp_tools(
     # Disabled local capabilities are never remote discovery requirements.
     allowed = (set(harness.state.allowed_tools) - LOCAL_TOOL_NAMES
                - {t.name for t in local})
-    if not allowed or harness.finalization_reason is not None:
+    if (not allowed or harness.finalization_reason is not None
+            or (harness.state.agent_mode == "multi"
+                and harness.state.collaboration is not None
+                and harness.state.collaboration.phase in {
+                    "completed"})):
         return local
     started = monotonic()
     harness.check_active()

@@ -358,6 +358,17 @@ def verification_scores(*, output, expected_output=None, **kwargs):
               metric("tool_budget", bool(result.run_state
                      and sum(result.run_state.tool_calls.values())
                      <= result.run_state.limits.tool_calls))]
+    if result.run_state is not None:
+        usage = result.run_state.usage
+        scores.extend([
+            metric("duration_ms", result.elapsed_ms),
+            metric("model_calls", result.run_state.model_calls),
+            metric("reported_input_tokens", usage.reported_input_tokens),
+            metric("reported_output_tokens", usage.reported_output_tokens),
+        ])
+        if usage.reported_reasoning_model_calls:
+            scores.append(metric("reported_reasoning_tokens",
+                                 usage.reported_reasoning_tokens))
     if review is not None:
         scores.extend([
             metric("support_verdict", review.verdict),

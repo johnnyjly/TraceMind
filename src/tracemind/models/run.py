@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.incident import Incident
+from tracemind.models.collaboration import CollaborationState
 from tracemind.models.verification import (
     VerificationPolicy, VerificationRecord, ReviewItem,
 )
@@ -125,6 +126,9 @@ class TokenUsage(BaseModel):
     reported_input_tokens: int = 0
     reported_output_tokens: int = 0
     reported_total_tokens: int = 0
+    reported_reasoning_model_calls: int = 0
+    unreported_reasoning_model_calls: int = 0
+    reported_reasoning_tokens: int = 0
     reported_cache_model_calls: int = 0
     unreported_cache_model_calls: int = 0
     reported_cache_hit_tokens: int = 0
@@ -165,7 +169,9 @@ class RunState(BaseModel):
     allowed_tools: tuple[ToolName, ...]
     knowledge_policy: KnowledgePolicy | None = None
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
-    prompt_version: str = "single-agent-v9"
+    collaboration: CollaborationState | None = None
+    agent_mode: Literal["single", "multi"] = "single"
+    prompt_version: str = "single-agent-v12"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None

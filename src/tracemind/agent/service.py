@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from langgraph.errors import GraphRecursionError
 
@@ -14,7 +15,8 @@ from tracemind.agent.errors import (
 )
 from tracemind.agent.runtime.harness import RunHarness, RunStopped
 from tracemind.agent.runtime.knowledge import (
-    KnowledgeSearch, create_knowledge_tools,
+    KnowledgeSearch,
+    create_knowledge_tools,
 )
 from tracemind.agent.storage.io import run_io
 from tracemind.agent.memory.lookup import (
@@ -35,7 +37,11 @@ from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.knowledge import KnowledgePolicy
 from tracemind.models.verification import VerificationPolicy
-from tracemind.agent.verification import DiagnosisVerifier, partial_draft
+from tracemind.agent.verification import (
+    DiagnosisVerifier,
+    partial_draft,
+    review_still_current,
+)
 from tracemind.rag.model_bridge import Completion
 from tracemind.models.result import DiagnosisDraft, DiagnosisRun
 from tracemind.models.run import (
@@ -77,9 +83,11 @@ class DiagnosisService:
         langfuse_client=None,
         verification_policy: VerificationPolicy | None = None,
         verifier: DiagnosisVerifier | None = None,
+        agent_mode: Literal["single", "multi"] = "single",
     ) -> None:
         """Configure telemetry dependencies, runner, and per-run controls."""
         self._langfuse = langfuse_client
+        self._agent_mode = agent_mode
         self._verification_policy = verification_policy
         self._verifier = verifier
         self._runner = runner
@@ -135,6 +143,12 @@ class DiagnosisService:
             raise ValueError("investigation end must be after its start")
 
         state = RunState(
+            agent_mode=self._agent_mode,
+            prompt_version=(
+                "multi-agent-graph-v6-rca3"
+                if (self._agent_mode == "multi")
+                else "single-agent-v12"
+            ),
             incident=incident,
             investigation_start=start,
             investigation_end=end,
@@ -142,18 +156,29 @@ class DiagnosisService:
             allowed_tools=self._allowed_tools,
             verification_policy=(
                 self._verification_policy.model_copy(deep=True)
-                if self._verification_policy else None),
-            knowledge_policy=(self._knowledge_policy.model_copy(deep=True)
-                              if self._knowledge_policy else None),
+                if self._verification_policy
+                else None
+            ),
+            knowledge_policy=(
+                self._knowledge_policy.model_copy(deep=True)
+                if self._knowledge_policy
+                else None
+            ),
             memory_policy=self._memory_policy,
-            learning_policy=(self._memory_policy
-                             if self._guidance_lookup is not None else None),
+            learning_policy=(
+                self._memory_policy
+                if self._guidance_lookup is not None
+                else None
+            ),
         )
         collector = EvidenceCollector(max_bytes=state.limits.observation_bytes)
         return await self._execute(state, collector)
 
     async def run_persisted(
-        self, state: RunState, evidence: list[Evidence], *,
+        self,
+        state: RunState,
+        evidence: list[Evidence],
+        *,
         persist: Callable[[RunState, list[Evidence]], None],
         is_cancelled: Callable[[], bool],
         resume: bool,
@@ -248,15 +273,21 @@ class DiagnosisService:
             await run_io(persist, current, items)
 
         harness = RunHarness(
-            state, event_directory=self._event_directory,
+            state,
+            event_directory=self._event_directory,
             persist=persist_run if persist else None,
-            is_cancelled=is_cancelled, resume=resume,
+            is_cancelled=is_cancelled,
+            resume=resume,
             graph_resume=graph_resume,
         )
+        harness.verifier = self._verifier
         state.evidence_ids = [item.id for item in collector.evidence]
         harness.evidence = lambda: collector.evidence
         harness.validate_draft = lambda draft: validate_draft(
-            draft, collector.evidence, start=start, end=end,
+            draft,
+            collector.evidence,
+            start=start,
+            end=end,
             knowledge=state.knowledge,
         )
         terminal_status = RunStatus.FAILED
@@ -265,36 +296,51 @@ class DiagnosisService:
             async with asyncio.timeout(harness.remaining_seconds):
                 if state.contract_version != "diagnosis-items-v1":
                     harness.stop(StopReason.CONTRACT_CHANGED)
-                if state.verification is not None:
+                if (
+                    state.verification is not None
+                    and state.agent_mode != "multi"
+                ):
                     draft = DiagnosisDraft(
                         **state.verification.candidate.model_dump(
-                            exclude={"incident_id"}),
+                            exclude={"incident_id"}
+                        ),
                         feedback_updates=state.feedback_updates,
                     )
                 else:
                     tools = await create_mcp_tools(
-                        self._tool_client, start=start, end=end,
-                        collector=collector, harness=harness,
+                        self._tool_client,
+                        start=start,
+                        end=end,
+                        collector=collector,
+                        harness=harness,
                         local_tools=create_knowledge_tools(
-                            harness, search=self._knowledge_search,
+                            harness,
+                            search=self._knowledge_search,
                             completion=self._knowledge_completion,
                             model_name=self._knowledge_model_name,
                         ),
                     )
                     prompt = await prepare_context(
-                        state, collector.evidence, harness,
+                        state,
+                        collector.evidence,
+                        harness,
                         memory_lookup=self._memory_lookup,
                         guidance_lookup=self._guidance_lookup,
                         learning_enabled=feedback_writer is not None,
                     )
                     await harness.checkpoint()
                     draft = await self._runner.run(
-                        prompt, tools,
-                        recursion_limit=self._recursion_limit, harness=harness,
+                        prompt,
+                        tools,
+                        recursion_limit=self._recursion_limit,
+                        harness=harness,
                     )
                 await harness.checkpoint()
                 validate_draft(
-                    draft, collector.evidence, start=start, end=end,
+                    draft,
+                    collector.evidence,
+                    start=start,
+                    end=end,
                     knowledge=state.knowledge,
                 )
                 state.feedback_updates = draft.feedback_updates
@@ -306,13 +352,17 @@ class DiagnosisService:
                         **draft.model_dump(exclude={"feedback_updates"}),
                     )
                     review = await self._verifier.verify(
-                        state, candidate, collector.evidence, harness,
+                        state,
+                        candidate,
+                        collector.evidence,
+                        harness,
                     )
                     if not review.accepted:
                         state.feedback_updates = []
                         harness.stop(StopReason.VERIFICATION_REJECTED)
                 harness.emit(
-                    "diagnosis.accepted", parent_span_id=state.id,
+                    "diagnosis.accepted",
+                    parent_span_id=state.id,
                     data={
                         "status": draft.status.value,
                         "evidence_ids": [
@@ -321,23 +371,33 @@ class DiagnosisService:
                         "knowledge_refs": draft.knowledge_refs,
                     },
                 )
-                if (state.learning_policy is not None and state.user_message
-                        and feedback_writer is not None):
+                if (
+                    state.learning_policy is not None
+                    and state.user_message
+                    and feedback_writer is not None
+                ):
                     outcome = await run_io(
-                        feedback_writer, state.model_copy(deep=True))
+                        feedback_writer, state.model_copy(deep=True)
+                    )
                     state.feedback_updates = outcome.updates
                     if outcome.updates and not any(
                         e.kind == "memory.feedback_saved" for e in state.events
                     ):
-                        harness.emit("memory.feedback_saved", data={
-                            "applied": outcome.applied,
-                            "skipped": outcome.skipped,
-                            "rejected": outcome.rejected,
-                            "rejected_count": len(outcome.rejected),
-                            "guidance_ids": [str(i) for i in
-                                             outcome.guidance_ids],
-                            "memory_ids": [str(i) for i in outcome.memory_ids],
-                        })
+                        harness.emit(
+                            "memory.feedback_saved",
+                            data={
+                                "applied": outcome.applied,
+                                "skipped": outcome.skipped,
+                                "rejected": outcome.rejected,
+                                "rejected_count": len(outcome.rejected),
+                                "guidance_ids": [
+                                    str(i) for i in outcome.guidance_ids
+                                ],
+                                "memory_ids": [
+                                    str(i) for i in outcome.memory_ids
+                                ],
+                            },
+                        )
                     harness.check_active()
             if draft.status is DiagnosisStatus.COMPLETE:
                 terminal_status = RunStatus.SUCCEEDED
@@ -354,44 +414,96 @@ class DiagnosisService:
                 reason = StopReason.RECURSION_LIMIT
             if reason is StopReason.CANCELLED:
                 terminal_status = RunStatus.CANCELLED
+            reviews = [state.verification] if state.verification else []
+            if state.collaboration:
+                reviews.extend(reversed(state.collaboration.reviews))
+            retained = next(
+                (
+                    r
+                    for r in reviews
+                    if r.status == "completed"
+                    and r.review
+                    and review_still_current(state, r, collector.evidence)
+                ),
+                None,
+            )
             if reason is StopReason.VERIFICATION_REJECTED:
+                state.candidate_items = []
                 terminal_status = RunStatus.INCONCLUSIVE
                 draft = partial_draft(
-                    state.verification.items, state.verification.review)
+                    state.verification.items, state.verification.review
+                )
                 harness.emit(
-                    "diagnosis.partial", parent_span_id=state.id,
-                    data={"evidence_ids": [
-                        str(i) for i in draft.evidence_ids]},
+                    "diagnosis.partial",
+                    parent_span_id=state.id,
+                    data={
+                        "evidence_ids": [str(i) for i in draft.evidence_ids]
+                    },
                 )
             elif reason in {
-                StopReason.MODEL_BUDGET, StopReason.TOOL_BUDGET,
-                StopReason.REPEATED_TOOL_CALL, StopReason.RECURSION_LIMIT,
+                StopReason.MODEL_BUDGET,
+                StopReason.TOOL_BUDGET,
+                StopReason.REPEATED_TOOL_CALL,
+                StopReason.RECURSION_LIMIT,
                 StopReason.CONTEXT_LIMIT,
-                StopReason.NO_PROGRESS, StopReason.INVALID_DIAGNOSIS,
-            }:
+                StopReason.NO_PROGRESS,
+                StopReason.INVALID_DIAGNOSIS,
+            } or (
+                reason in {StopReason.DEADLINE, StopReason.VERIFICATION_FAILED}
+                and retained is not None
+            ):
                 terminal_status = RunStatus.INCONCLUSIVE
-                draft = DiagnosisDraft(
-                    status=DiagnosisStatus.INCONCLUSIVE,
-                    root_cause=(
-                        f"Investigation stopped ({reason.value}); "
-                        "no root cause confirmed."
-                    ),
-                    confidence=0,
-                )
+                # Rejected/in-progress candidates are not the terminal output.
+                # Keep prior item-level support without claiming a completed
+                # RCA.
+                state.candidate_items = []
+                if retained is not None:
+                    state.verification = retained
+                    draft = partial_draft(retained.items, retained.review)
+                    harness.emit(
+                        "diagnosis.partial",
+                        parent_span_id=state.id,
+                        data={
+                            "reason": reason.value,
+                            "evidence_ids": [
+                                str(i) for i in draft.evidence_ids
+                            ],
+                            "review_input_sha256": retained.input_sha256,
+                        },
+                    )
+                else:
+                    draft = DiagnosisDraft(
+                        status=DiagnosisStatus.INCONCLUSIVE,
+                        root_cause=(
+                            f"Investigation stopped ({reason.value}); "
+                            "no root cause confirmed."
+                        ),
+                        confidence=0,
+                    )
             else:
                 raise DiagnosisError(
                     f"Diagnosis stopped: {reason.value}",
-                    state=state, evidence=collector.evidence,
+                    state=state,
+                    evidence=collector.evidence,
                 ) from exc
         except DiagnosisError as exc:
             reason = StopReason.INVALID_DIAGNOSIS
-            validation = (exc.details() if isinstance(
-                exc, DiagnosisValidationError
-            ) else {})
-            harness.emit("diagnosis.rejected", parent_span_id=state.id,
-                         data={"reason": reason.value,
-                               **{f"validation_{key}": value for key, value
-                                  in validation.items()}})
+            validation = (
+                exc.details()
+                if isinstance(exc, DiagnosisValidationError)
+                else {}
+            )
+            harness.emit(
+                "diagnosis.rejected",
+                parent_span_id=state.id,
+                data={
+                    "reason": reason.value,
+                    **{
+                        f"validation_{key}": value
+                        for key, value in validation.items()
+                    },
+                },
+            )
             exc.state = state
             exc.evidence = collector.evidence
             raise
@@ -402,13 +514,16 @@ class DiagnosisService:
         except Exception as exc:
             raise DiagnosisError(
                 "Diagnosis failed unexpectedly",
-                state=state, evidence=collector.evidence,
+                state=state,
+                evidence=collector.evidence,
             ) from exc
         finally:
             await harness.drain()
             state.evidence_ids = [item.id for item in collector.evidence]
-            if terminal_status in {RunStatus.SUCCEEDED,
-                                   RunStatus.INCONCLUSIVE}:
+            if terminal_status in {
+                RunStatus.SUCCEEDED,
+                RunStatus.INCONCLUSIVE,
+            }:
                 state.diagnosis = Diagnosis(
                     incident_id=incident.id,
                     **draft.model_dump(exclude={"feedback_updates"}),

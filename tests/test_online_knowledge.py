@@ -12,7 +12,8 @@ from test_harness import END, INCIDENT, START, ScriptedModel, tool_call
 from tracemind.agent.errors import DiagnosisValidationError
 from tracemind.agent.runtime.harness import RunHarness, RunStopped
 from tracemind.agent.runtime.knowledge import (
-    create_knowledge_tools, knowledge_context,
+    create_knowledge_tools,
+    knowledge_context,
 )
 from tracemind.agent.runtime.recovery import ToolUnavailable
 from tracemind.agent.runtime.runner import LangChainAgentRunner
@@ -24,9 +25,14 @@ from tracemind.models import Diagnosis, DiagnosisStatus
 from tracemind.models.knowledge import KnowledgePolicy, KnowledgeReference
 from tracemind.models.result import DiagnosisDraft
 from tracemind.models.run import (
-    RunLimits, RunPurpose, RunState, RunStatus, StopReason,
+    RunLimits,
+    RunPurpose,
+    RunState,
+    RunStatus,
+    StopReason,
 )
 from tracemind.rag.models import KnowledgeChunk, KnowledgeParent, RetrievalHit
+from tracemind.rag.query_contracts import RetrievalResponse
 
 
 POLICY = KnowledgePolicy(snapshot="fixture-v1")
@@ -35,13 +41,22 @@ GRANTS = ("search_knowledge", "read_knowledge")
 
 def hit(text="An RPC timeout may indicate a slow dependency."):
     """Return canonical fixture content with source revision and hash."""
-    return RetrievalHit(chunk=KnowledgeChunk(
-        chunk_id="rpc-timeout", doc_id="rpc-runbook", title="RPC runbook",
-        section="Timeouts", text=text, document_path="runbooks/rpc.md",
-        document_sha256="f" * 64,
-        source_refs=["https://example.test/docs/rpc"],
-        source_revision="fixture-rev-1",
-    ), branches=["mix", "bm25"], fusion_score=.03, rerank_score=.8)
+    return RetrievalHit(
+        chunk=KnowledgeChunk(
+            chunk_id="rpc-timeout",
+            doc_id="rpc-runbook",
+            title="RPC runbook",
+            section="Timeouts",
+            text=text,
+            document_path="runbooks/rpc.md",
+            document_sha256="f" * 64,
+            source_refs=["https://example.test/docs/rpc"],
+            source_revision="fixture-rev-1",
+        ),
+        branches=["mix", "bm25"],
+        fusion_score=0.03,
+        rerank_score=0.8,
+    )
 
 
 def parent_hit():
@@ -50,11 +65,22 @@ def parent_hit():
     result.chunk.parent_id = "timeouts-section"
     text = result.chunk.text + "\n" + "Extra context. " * 250 + "Section tail."
     result.parent = KnowledgeParent(
-        **result.chunk.model_dump(exclude={
-            "chunk_id", "parent_id", "source_start", "source_end",
-            "source_text", "identifiers", "text"}),
-        parent_id=result.chunk.parent_id, text=text,
-        source_start=0, source_end=len(text))
+        **result.chunk.model_dump(
+            exclude={
+                "chunk_id",
+                "parent_id",
+                "source_start",
+                "source_end",
+                "source_text",
+                "identifiers",
+                "text",
+            }
+        ),
+        parent_id=result.chunk.parent_id,
+        text=text,
+        source_start=0,
+        source_end=len(text),
+    )
     return result
 
 
@@ -68,9 +94,12 @@ def test_parent_section_is_paged_losslessly_from_retained_state():
         references = await tools["search_knowledge"].ainvoke({"query": "RPC"})
         pages, offset = [], 0
         while offset is not None:
-            page = await tools["read_knowledge"].ainvoke({
-                "reference_id": references[0]["knowledge_ref"],
-                "offset": offset})
+            page = await tools["read_knowledge"].ainvoke(
+                {
+                    "reference_id": references[0]["knowledge_ref"],
+                    "offset": offset,
+                }
+            )
             pages.append(page[0]["content"])
             offset = page[0]["next_offset"]
         assert "".join(pages) == retrieval.hits[0].parent.text
@@ -89,14 +118,17 @@ def test_repeated_or_empty_knowledge_does_not_create_progress():
         await tools["search_knowledge"].ainvoke({"query": "RPC"})
         progress = state.progress_count
         result = await tools["search_knowledge"].ainvoke(
-            {"query": "RPC error"})
+            {"query": "RPC error"}
+        )
         assert result[-1]["knowledge_status"] == "no_new_references"
         assert state.progress_count == progress
         retrieval.hits = []
         result = await tools["search_knowledge"].ainvoke(
-            {"query": "unrelated"})
+            {"query": "unrelated"}
+        )
         assert result[-1]["knowledge_status"] == "no_results"
         assert state.progress_count == progress
+
     asyncio.run(exercise())
 
 
@@ -118,6 +150,7 @@ def test_parallel_auxiliary_calls_cannot_spend_the_output_reserve():
         assert state.model_calls == 2
         assert sum(isinstance(r, ToolUnavailable) for r in results) == 1
         assert state.limits.model_calls - state.model_calls == 2
+
     asyncio.run(exercise())
 
 
@@ -128,19 +161,30 @@ def test_auxiliary_reservation_preserves_final_synthesis_after_retry():
         attempts.append(True)
         raise httpx.ConnectError("temporary provider failure")
 
-    model = ScriptedModel(respond=lambda messages, calls: (
-        tool_call("search_knowledge", {"query": "RPC timeout"}) if calls == 1
-        else answer(messages)))
-    result = asyncio.run(service(
-        model, Retrieval(keywords=True), knowledge_completion=completion,
-        limits=RunLimits(model_calls=4, retry_backoff_seconds=0),
-    ).diagnose_with_evidence(INCIDENT, start=START, end=END))
+    model = ScriptedModel(
+        respond=lambda messages, calls: (
+            tool_call("search_knowledge", {"query": "RPC timeout"})
+            if calls == 1
+            else answer(messages)
+        )
+    )
+    result = asyncio.run(
+        service(
+            model,
+            Retrieval(keywords=True),
+            knowledge_completion=completion,
+            limits=RunLimits(model_calls=4, retry_backoff_seconds=0),
+        ).diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
     assert len(attempts) == 1
     assert result.state.model_calls == 3
     assert model.calls == 2
     assert result.state.stop_reason is StopReason.INSUFFICIENT_EVIDENCE
-    assert any(e.kind == "model.skipped" and e.data.get("reason") ==
-               "model_budget_reserved" for e in result.state.events)
+    assert any(
+        e.kind == "model.skipped"
+        and e.data.get("reason") == "model_budget_reserved"
+        for e in result.state.events
+    )
 
 
 def test_knowledge_compression_keeps_reader_contract_and_latest_parent_page():
@@ -151,20 +195,35 @@ def test_knowledge_compression_keeps_reader_contract_and_latest_parent_page():
     _, tools = tools_for(state, Retrieval())
     request, _ = request_with_results()
     reference = KnowledgeReference(snapshot=POLICY.snapshot, hit=parent_hit())
-    index = [{"knowledge_ref": reference.id, "title": "Timeouts"},
-             {"error": "partial_search"}]
-    messages = [request.messages[0],
-                tool_call("search_knowledge", {"query": "RPC"}),
-                ToolMessage(content=json.dumps([{"text": "x" * 5000}]),
-                            tool_call_id="search", name="search_knowledge",
-                            artifact={"context_index": index,
-                                      "context_reference_key": "knowledge_ref",
-                                      "context_reader": "read_knowledge"}),
-                tool_call("read_knowledge", {"reference_id": reference.id}),
-                ToolMessage(content="parent section page", tool_call_id="read",
-                            name="read_knowledge", artifact={
-                                "context_index": index, "detail_page": True,
-                                "context_reader": "read_knowledge"})]
+    index = [
+        {"knowledge_ref": reference.id, "title": "Timeouts"},
+        {"error": "partial_search"},
+    ]
+    messages = [
+        request.messages[0],
+        tool_call("search_knowledge", {"query": "RPC"}),
+        ToolMessage(
+            content=json.dumps([{"text": "x" * 5000}]),
+            tool_call_id="search",
+            name="search_knowledge",
+            artifact={
+                "context_index": index,
+                "context_reference_key": "knowledge_ref",
+                "context_reader": "read_knowledge",
+            },
+        ),
+        tool_call("read_knowledge", {"reference_id": reference.id}),
+        ToolMessage(
+            content="parent section page",
+            tool_call_id="read",
+            name="read_knowledge",
+            artifact={
+                "context_index": index,
+                "detail_page": True,
+                "context_reader": "read_knowledge",
+            },
+        ),
+    ]
     request = request.override(messages=messages, tools=list(tools.values()))
     selection = select_context(request, estimate_input(request) - 4000)
     assert selection.fits
@@ -182,16 +241,23 @@ def test_knowledge_text_cannot_be_compressed_away_without_reader_permission():
     request, _ = request_with_results()
     payload = asyncio.run(tools["search_knowledge"].ainvoke({"query": "RPC"}))
     message = ToolMessage(
-        content=json.dumps(payload), tool_call_id="search",
+        content=json.dumps(payload),
+        tool_call_id="search",
         name="search_knowledge",
-        artifact={"context_index": [{
-                      "knowledge_ref": payload[0]["knowledge_ref"]}],
-                  "context_reference_key": "knowledge_ref",
-                  "context_reader": "read_knowledge"})
+        artifact={
+            "context_index": [{"knowledge_ref": payload[0]["knowledge_ref"]}],
+            "context_reference_key": "knowledge_ref",
+            "context_reader": "read_knowledge",
+        },
+    )
     request = request.override(
-        messages=[request.messages[0],
-                  tool_call("search_knowledge", {"query": "RPC"}), message],
-        tools=list(tools.values()))
+        messages=[
+            request.messages[0],
+            tool_call("search_knowledge", {"query": "RPC"}),
+            message,
+        ],
+        tools=list(tools.values()),
+    )
     selection = select_context(request, estimate_input(request) - 100)
     assert not selection.fits
     assert selection.request.messages[-1].content == message.content
@@ -203,24 +269,33 @@ def test_query_planning_accepts_responses_api_text_blocks():
     async def completion(*args, **kwargs):
         return AIMessage(
             content=[{"type": "text", "text": '{"queries":["RPC timeout"]}'}],
-            response_metadata={"status": "completed"})
+            response_metadata={"status": "completed"},
+        )
 
     state = run_state()
     _, tools = tools_for(state, retrieval, completion)
-    result = asyncio.run(tools["search_knowledge"].ainvoke({
-        "query": "翻译 RPC 超时", "rewrite": True}))
+    result = asyncio.run(
+        tools["search_knowledge"].ainvoke(
+            {"query": "Explain RPC timeout", "rewrite": True}
+        )
+    )
     assert retrieval.queries == ["RPC timeout"]
     assert state.reference_map[result[0]["knowledge_ref"]] == (
-        state.knowledge[0].id)
+        state.knowledge[0].id
+    )
 
 
 def run_state(**kwargs):
     """Build an isolated opted-in run without environment configuration."""
-    return RunState(incident=INCIDENT, investigation_start=START,
-                    investigation_end=END, allowed_tools=GRANTS,
-                    limits=kwargs.pop("limits", RunLimits()),
-                    knowledge_policy=kwargs.pop("knowledge_policy", POLICY),
-                    **kwargs)
+    return RunState(
+        incident=INCIDENT,
+        investigation_start=START,
+        investigation_end=END,
+        allowed_tools=GRANTS,
+        limits=kwargs.pop("limits", RunLimits()),
+        knowledge_policy=kwargs.pop("knowledge_policy", POLICY),
+        **kwargs,
+    )
 
 
 class NoRemoteTools:
@@ -249,17 +324,23 @@ class Retrieval:
         if self.error:
             raise self.error
         if self.keywords:
-            await completion([{"role": "user", "content": question}],
-                             max_tokens=2048, keyword_extraction=True)
-        return self.hits
+            await completion(
+                [{"role": "user", "content": question}],
+                max_tokens=2048,
+                keyword_extraction=True,
+            )
+        return RetrievalResponse(snapshot=snapshot, hits=self.hits)
 
 
 def tools_for(state, search=None, completion=None):
     """Bind the real local tools to a run harness."""
     harness = RunHarness(state)
-    tools = create_knowledge_tools(harness, search=search,
-                                   completion=completion,
-                                   model_name="fixture-auxiliary")
+    tools = create_knowledge_tools(
+        harness,
+        search=search,
+        completion=completion,
+        model_name="fixture-auxiliary",
+    )
     return harness, {t.name: t for t in tools}
 
 
@@ -268,13 +349,18 @@ def test_disabled_knowledge_is_absent_from_the_real_model_tool_schema():
     from tracemind.config import Settings
 
     model = ScriptedModel(respond=lambda messages, calls: answer(messages))
-    settings = Settings(_env_file=None, verifier_enabled=False,
-                        agent_allowed_tools=GRANTS,
-                        agent_trace_directory=None)
+    settings = Settings(
+        _env_file=None,
+        verifier_enabled=False,
+        agent_allowed_tools=GRANTS,
+        agent_trace_directory=None,
+    )
     selected = build_service(
-        settings, LangChainAgentRunner(model), NoRemoteTools())
-    result = asyncio.run(selected.diagnose_with_evidence(
-        INCIDENT, start=START, end=END))
+        settings, LangChainAgentRunner(model), NoRemoteTools()
+    )
+    result = asyncio.run(
+        selected.diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
     assert model.bindings
     assert all(not set(GRANTS).intersection(names) for names in model.bindings)
     assert result.state.allowed_tools == GRANTS
@@ -293,9 +379,13 @@ def test_disabled_retrieval_keeps_saved_knowledge_readable_without_mcp():
 
     async def exercise():
         tools = await create_mcp_tools(
-            NoRemoteTools(), start=START, end=END,
-            collector=EvidenceCollector(), harness=harness,
-            local_tools=list(local.values()))
+            NoRemoteTools(),
+            start=START,
+            end=END,
+            collector=EvidenceCollector(),
+            harness=harness,
+            local_tools=list(local.values()),
+        )
         assert [t.name for t in tools] == ["read_knowledge"]
         page = await tools[0].ainvoke({"reference_id": reference.id})
         assert page[0]["content"] == reference.hit.parent.text[:2048]
@@ -312,28 +402,44 @@ def answer(messages, *, complete=False, references=None):
         for message in messages:
             if isinstance(message, ToolMessage) and message.status != "error":
                 payload = json.loads(message.content)
-                refs.extend(item["knowledge_ref"] for item in payload
-                            if "knowledge_ref" in item)
-    return tool_call("DiagnosisProposal", {
-        "status": "complete" if complete else "inconclusive",
-        "root_cause": "Documentation suggests a check; no fault is confirmed.",
-        "confidence": .1, "knowledge_refs": list(dict.fromkeys(refs)),
-    })
+                refs.extend(
+                    item["knowledge_ref"]
+                    for item in payload
+                    if "knowledge_ref" in item
+                )
+    return tool_call(
+        "DiagnosisProposal",
+        {
+            "status": "complete" if complete else "inconclusive",
+            "root_cause": (
+                "Documentation suggests a check; no fault is confirmed."
+            ),
+            "confidence": 0.1,
+            "knowledge_refs": list(dict.fromkeys(refs)),
+        },
+    )
 
 
 def service(model, search=None, **kwargs):
     """Build the production graph without a live telemetry or RAG runtime."""
-    return DiagnosisService(LangChainAgentRunner(model),
-                            tool_client=NoRemoteTools(), allowed_tools=GRANTS,
-                            knowledge_policy=POLICY, knowledge_search=search,
-                            **kwargs)
+    return DiagnosisService(
+        LangChainAgentRunner(model),
+        tool_client=NoRemoteTools(),
+        allowed_tools=GRANTS,
+        knowledge_policy=POLICY,
+        knowledge_search=search,
+        **kwargs,
+    )
 
 
 def test_optional_retrieval_never_forces_tool_calls():
     retrieval = Retrieval()
     model = ScriptedModel(respond=lambda messages, calls: answer(messages))
-    result = asyncio.run(service(model, retrieval).diagnose_with_evidence(
-        INCIDENT, start=START, end=END))
+    result = asyncio.run(
+        service(model, retrieval).diagnose_with_evidence(
+            INCIDENT, start=START, end=END
+        )
+    )
     assert retrieval.queries == []
     assert result.state.model_calls == 1
     assert result.tool_calls == {}
@@ -347,22 +453,35 @@ def test_factory_wires_enabled_search_without_expanding_grants(monkeypatch):
     import tracemind.agent.factory as factory
 
     retrieval = Retrieval()
-    monkeypatch.setattr(retriever, "get_snapshot_retriever",
-                        lambda config: retrieval)
-    monkeypatch.setattr(factory, "create_rag_completion",
-                        lambda settings, rag: None)
-    configured = Settings(_env_file=None, verifier_enabled=False,
-                          agent_knowledge_enabled=True,
-                          agent_knowledge_snapshot=POLICY.snapshot,
-                          agent_allowed_tools=GRANTS,
-                          agent_trace_directory=None)
-    runner = LangChainAgentRunner(ScriptedModel(
-        respond=lambda messages, calls: (
-            tool_call("search_knowledge", {"query": "RPC timeout"})
-            if calls == 1 else answer(messages))))
+    monkeypatch.setattr(
+        retriever, "get_snapshot_retriever", lambda config: retrieval
+    )
+    monkeypatch.setattr(
+        factory,
+        "create_rag_completion",
+        lambda settings, rag, *, purpose: None,
+    )
+    configured = Settings(
+        _env_file=None,
+        verifier_enabled=False,
+        agent_knowledge_enabled=True,
+        agent_knowledge_snapshot=POLICY.snapshot,
+        agent_allowed_tools=GRANTS,
+        agent_trace_directory=None,
+    )
+    runner = LangChainAgentRunner(
+        ScriptedModel(
+            respond=lambda messages, calls: (
+                tool_call("search_knowledge", {"query": "RPC timeout"})
+                if calls == 1
+                else answer(messages)
+            )
+        )
+    )
     selected = build_service(configured, runner, NoRemoteTools())
-    result = asyncio.run(selected.diagnose_with_evidence(
-        INCIDENT, start=START, end=END))
+    result = asyncio.run(
+        selected.diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
     assert retrieval.queries == ["RPC timeout"]
     assert result.state.allowed_tools == GRANTS
     assert result.state.knowledge_policy == configured.knowledge_policy
@@ -374,17 +493,21 @@ def test_english_search_preserves_provenance_dedup_and_copies():
     harness, tools = tools_for(state, retrieval)
 
     async def exercise():
-        first = await tools["search_knowledge"].ainvoke({
-            "query": "RPC timeout",
-        })
+        first = await tools["search_knowledge"].ainvoke(
+            {
+                "query": "RPC timeout",
+            }
+        )
         second = await tools["search_knowledge"].ainvoke({"query": "slow RPC"})
         assert first == second[:-1]
         assert second[-1]["knowledge_status"] == "no_new_references"
         assert first[0]["source_revision"] == "fixture-rev-1"
         assert first[0]["document_sha256"] == "f" * 64
-        page = await tools["read_knowledge"].ainvoke({
-            "reference_id": first[0]["knowledge_ref"],
-        })
+        page = await tools["read_knowledge"].ainvoke(
+            {
+                "reference_id": first[0]["knowledge_ref"],
+            }
+        )
         assert "slow dependency" in page[0]["content"]
 
     asyncio.run(exercise())
@@ -393,8 +516,11 @@ def test_english_search_preserves_provenance_dedup_and_copies():
     assert "changed externally" not in state.knowledge[0].hit.chunk.text
     assert state.evidence_ids == []
     assert state.model_calls == 0
-    assert all(e.data["evidence_ids"] == [] for e in state.events
-               if e.kind == "tool.completed")
+    assert all(
+        e.data["evidence_ids"] == []
+        for e in state.events
+        if e.kind == "tool.completed"
+    )
     assert harness.state.backend_attempts == 2
 
 
@@ -405,20 +531,42 @@ def test_planning_and_keyword_calls_share_usage_budget_and_trace():
     async def completion(messages, *, max_tokens, keyword_extraction):
         auxiliary_calls.append(keyword_extraction)
         assert max_tokens == POLICY.model_output_tokens
-        content = ("{}" if keyword_extraction else
-                   '{"queries":["RPC timeout"]}')
-        return AIMessage(content=content, usage_metadata={
-            "input_tokens": 7, "output_tokens": 3, "total_tokens": 10,
-        })
+        if not keyword_extraction:
+            # DeepSeek rejects JSON mode without this word in the prompt.
+            assert "json" in messages[0]["content"].lower()
+        content = "{}" if keyword_extraction else '{"queries":["RPC timeout"]}'
+        return AIMessage(
+            content=content,
+            usage_metadata={
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "total_tokens": 10,
+            },
+        )
 
-    model = ScriptedModel(respond=lambda messages, calls: (
-        tool_call("search_knowledge", {"query": "解释 RPC 超时", "rewrite": True})
-        if calls == 1 else answer(messages)))
-    result = asyncio.run(service(
-        model, retrieval, knowledge_completion=completion,
-        knowledge_model_name="fixture-auxiliary",
-        limits=RunLimits(model_calls=5),
-    ).diagnose_with_evidence(INCIDENT, start=START, end=END))
+    model = ScriptedModel(
+        respond=lambda messages, calls: (
+            tool_call(
+                "search_knowledge",
+                {
+                    "query": "Explain RPC timeout and identify diagnostic "
+                    "checks",
+                    "rewrite": True,
+                },
+            )
+            if calls == 1
+            else answer(messages)
+        )
+    )
+    result = asyncio.run(
+        service(
+            model,
+            retrieval,
+            knowledge_completion=completion,
+            knowledge_model_name="fixture-auxiliary",
+            limits=RunLimits(model_calls=5),
+        ).diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
     assert auxiliary_calls == [False, True]
     assert result.state.model_calls == 4
     assert result.state.usage.reported_model_calls == 4
@@ -426,42 +574,63 @@ def test_planning_and_keyword_calls_share_usage_budget_and_trace():
     assert result.state.usage.unreported_model_calls == 0
     assert result.diagnosis.knowledge_refs == [result.state.knowledge[0].id]
     assert result.evidence == []
-    tool_span = next(e.span_id for e in result.state.events
-                     if e.kind == "tool.started")
-    auxiliary = [e for e in result.state.events if e.kind == "model.started"
-                 and e.data["purpose"].startswith("knowledge.")]
+    tool_span = next(
+        e.span_id for e in result.state.events if e.kind == "tool.started"
+    )
+    auxiliary = [
+        e
+        for e in result.state.events
+        if e.kind == "model.started"
+        and e.data["purpose"].startswith("knowledge.")
+    ]
     assert {e.data["purpose"] for e in auxiliary} == {
-        "knowledge.query_planning", "knowledge.keyword_extraction",
+        "knowledge.query_planning",
+        "knowledge.keyword_extraction",
     }
     assert all(e.parent_span_id == tool_span for e in auxiliary)
 
 
 def test_shared_model_limit_blocks_auxiliary_before_provider_execution():
     retrieval = Retrieval()
-    model = ScriptedModel(respond=lambda messages, calls: tool_call(
-        "search_knowledge", {"query": "translate this", "rewrite": True}))
+    model = ScriptedModel(
+        respond=lambda messages, calls: tool_call(
+            "search_knowledge",
+            {"query": "decompose this question", "rewrite": True},
+        )
+    )
 
     async def completion(*args, **kwargs):
         raise AssertionError("shared model budget exhausted")
 
-    result = asyncio.run(service(
-        model, retrieval, knowledge_completion=completion,
-        limits=RunLimits(model_calls=1),
-    ).diagnose_with_evidence(INCIDENT, start=START, end=END))
+    result = asyncio.run(
+        service(
+            model,
+            retrieval,
+            knowledge_completion=completion,
+            limits=RunLimits(model_calls=1),
+        ).diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
     assert result.state.stop_reason is StopReason.MODEL_BUDGET
     assert result.state.model_calls == 1
     assert retrieval.queries == []
 
 
-@pytest.mark.parametrize("failure", [RuntimeError("private body"),
-                                     OSError("private connection")])
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("private body"), OSError("private connection")]
+)
 def test_retrieval_failure_degrades_and_allows_the_agent_to_finish(failure):
-    model = ScriptedModel(respond=lambda messages, calls: (
-        tool_call("search_knowledge", {"query": "RPC timeout"}) if calls == 1
-        else answer(messages)))
-    result = asyncio.run(service(model, Retrieval(error=failure))
-                         .diagnose_with_evidence(
-                             INCIDENT, start=START, end=END))
+    model = ScriptedModel(
+        respond=lambda messages, calls: (
+            tool_call("search_knowledge", {"query": "RPC timeout"})
+            if calls == 1
+            else answer(messages)
+        )
+    )
+    result = asyncio.run(
+        service(model, Retrieval(error=failure)).diagnose_with_evidence(
+            INCIDENT, start=START, end=END
+        )
+    )
     assert result.state.stop_reason is StopReason.INSUFFICIENT_EVIDENCE
     assert result.state.model_calls == 2
     assert result.state.knowledge == []
@@ -478,9 +647,14 @@ def test_invalid_query_plan_returns_a_tool_error_without_retrieval():
     state = run_state()
     _, tools = tools_for(state, retrieval, completion)
     with pytest.raises(ToolUnavailable):
-        asyncio.run(tools["search_knowledge"].ainvoke({
-            "query": "translate", "rewrite": True,
-        }))
+        asyncio.run(
+            tools["search_knowledge"].ainvoke(
+                {
+                    "query": "Explain the observed failure",
+                    "rewrite": True,
+                }
+            )
+        )
     assert state.model_calls == 1
     assert state.usage.unreported_model_calls == 1
     assert retrieval.queries == []
@@ -488,8 +662,11 @@ def test_invalid_query_plan_returns_a_tool_error_without_retrieval():
 
 def test_auxiliary_context_limit_blocks_hidden_model_calls():
     async def retrieval(queries, *, question, snapshot, completion):
-        await completion([{"role": "user", "content": "x" * 5000}],
-                         max_tokens=512, keyword_extraction=True)
+        await completion(
+            [{"role": "user", "content": "x" * 5000}],
+            max_tokens=512,
+            keyword_extraction=True,
+        )
         raise AssertionError("oversize internal prompt must be rejected")
 
     async def completion(*args, **kwargs):
@@ -498,9 +675,13 @@ def test_auxiliary_context_limit_blocks_hidden_model_calls():
     state = run_state(limits=RunLimits(context_tokens=2000))
     _, tools = tools_for(state, retrieval, completion)
     with pytest.raises(ToolUnavailable) as caught:
-        asyncio.run(tools["search_knowledge"].ainvoke({
-            "query": "RPC timeout",
-        }))
+        asyncio.run(
+            tools["search_knowledge"].ainvoke(
+                {
+                    "query": "RPC timeout",
+                }
+            )
+        )
     assert caught.value.failure.category == "knowledge_context_limit"
     assert state.model_calls == 0
 
@@ -511,14 +692,18 @@ def test_tool_timeout_does_not_retry_or_leave_retained_hits():
     async def retrieval(query, **kwargs):
         calls.append(query)
         await asyncio.sleep(1)
-        return [hit()]
+        return RetrievalResponse(snapshot=kwargs["snapshot"], hits=[hit()])
 
-    state = run_state(limits=RunLimits(tool_timeout_seconds=.01))
+    state = run_state(limits=RunLimits(tool_timeout_seconds=0.01))
     _, tools = tools_for(state, retrieval)
     with pytest.raises(ToolUnavailable):
-        asyncio.run(tools["search_knowledge"].ainvoke({
-            "query": "RPC timeout",
-        }))
+        asyncio.run(
+            tools["search_knowledge"].ainvoke(
+                {
+                    "query": "RPC timeout",
+                }
+            )
+        )
     assert calls == [["RPC timeout"]]
     assert state.knowledge == []
     assert state.tool_calls == {"search_knowledge": 1}
@@ -534,9 +719,13 @@ def test_cancellation_closes_nested_model_and_tool_spans():
 
         state = run_state()
         _, tools = tools_for(state, Retrieval(keywords=True), completion)
-        task = asyncio.create_task(tools["search_knowledge"].ainvoke({
-            "query": "RPC timeout",
-        }))
+        task = asyncio.create_task(
+            tools["search_knowledge"].ainvoke(
+                {
+                    "query": "RPC timeout",
+                }
+            )
+        )
         await entered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -551,32 +740,43 @@ def test_cancellation_closes_nested_model_and_tool_spans():
 
 
 def test_capacity_excludes_unretained_references_and_bounds_context():
-    state = run_state(knowledge_policy=POLICY.model_copy(update={
-        "retention_bytes": 1,
-    }))
+    state = run_state(
+        knowledge_policy=POLICY.model_copy(
+            update={
+                "retention_bytes": 1,
+            }
+        )
+    )
     _, tools = tools_for(state, Retrieval())
     result = asyncio.run(tools["search_knowledge"].ainvoke({"query": "RPC"}))
     assert result == [{"omitted_count": 1}]
     assert state.knowledge == []
-    state.knowledge = [KnowledgeReference(snapshot=POLICY.snapshot,
-                                          hit=hit("x" * 5000))]
+    state.knowledge = [
+        KnowledgeReference(snapshot=POLICY.snapshot, hit=hit("x" * 5000))
+    ]
     state.knowledge_policy.context_bytes = 100
     context = knowledge_context(state)
     assert len(context.encode()) <= 100
     assert json.loads(context)["omitted"] == 1
 
 
-@pytest.mark.parametrize("refs,complete,code", [
-    (["unknown"], False, "unknown_knowledge"),
-    (["known", "known"], False, "duplicate_knowledge"),
-    (["known"], True, "missing_evidence"),
-])
+@pytest.mark.parametrize(
+    "refs,complete,code",
+    [
+        (["unknown"], False, "unknown_knowledge"),
+        (["known", "known"], False, "duplicate_knowledge"),
+        (["known"], True, "missing_evidence"),
+    ],
+)
 def test_knowledge_citations_are_validated_separately(refs, complete, code):
     reference = KnowledgeReference(snapshot=POLICY.snapshot, hit=hit())
     selected = [reference.id if ref == "known" else ref for ref in refs]
-    draft = DiagnosisDraft(status="complete" if complete else "inconclusive",
-                           confidence=.1, root_cause="Documented mechanism",
-                           knowledge_refs=selected)
+    draft = DiagnosisDraft(
+        status="complete" if complete else "inconclusive",
+        confidence=0.1,
+        root_cause="Documented mechanism",
+        knowledge_refs=selected,
+    )
     with pytest.raises(DiagnosisValidationError) as caught:
         validate_draft(draft, [], start=START, end=END, knowledge=[reference])
     assert caught.value.code == code
@@ -585,11 +785,18 @@ def test_knowledge_citations_are_validated_separately(refs, complete, code):
 
 
 def test_documentation_alone_cannot_complete_a_real_graph_diagnosis():
-    model = ScriptedModel(respond=lambda messages, calls: (
-        tool_call("search_knowledge", {"query": "RPC timeout"}) if calls == 1
-        else answer(messages, complete=True)))
-    result = asyncio.run(service(model, Retrieval()).diagnose_with_evidence(
-        INCIDENT, start=START, end=END))
+    model = ScriptedModel(
+        respond=lambda messages, calls: (
+            tool_call("search_knowledge", {"query": "RPC timeout"})
+            if calls == 1
+            else answer(messages, complete=True)
+        )
+    )
+    result = asyncio.run(
+        service(model, Retrieval()).diagnose_with_evidence(
+            INCIDENT, start=START, end=END
+        )
+    )
     assert result.state.stop_reason is StopReason.INVALID_DIAGNOSIS
     assert len(result.state.knowledge) == 1
     assert result.evidence == []
@@ -614,35 +821,51 @@ def test_explanation_restores_references_without_new_retrieval(tmp_path):
     reference = KnowledgeReference(snapshot=POLICY.snapshot, hit=parent_hit())
     original.knowledge = [reference]
     original.diagnosis = Diagnosis(
-        incident_id=INCIDENT.id, status=DiagnosisStatus.INCONCLUSIVE,
-        root_cause="Documented mechanism remains unconfirmed", confidence=.1,
+        incident_id=INCIDENT.id,
+        status=DiagnosisStatus.INCONCLUSIVE,
+        root_cause="Documented mechanism remains unconfirmed",
+        confidence=0.1,
         knowledge_refs=[reference.id],
     )
     original.status = RunStatus.INCONCLUSIVE
     original.stop_reason = StopReason.INSUFFICIENT_EVIDENCE
     repository.finish(original.id, claim.owner, original, [])
     follow = repository.follow_up(
-        parent.investigation_id, message="Explain the documentation",
-        purpose=RunPurpose.EXPLAIN, limits=RunLimits(), allowed_tools=GRANTS,
+        parent.investigation_id,
+        message="Explain the documentation",
+        purpose=RunPurpose.EXPLAIN,
+        limits=RunLimits(),
+        allowed_tools=GRANTS,
         request_hash="explain",
     )
     assert follow.state.allowed_tools == ("read_knowledge",)
     assert follow.state.knowledge[0].id == reference.id
 
-    model = ScriptedModel(respond=lambda messages, calls: (
-        tool_call("read_knowledge", {"reference_id": reference.id})
-        if calls == 1 else answer(messages)))
+    model = ScriptedModel(
+        respond=lambda messages, calls: (
+            tool_call("read_knowledge", {"reference_id": reference.id})
+            if calls == 1
+            else answer(messages)
+        )
+    )
     retrieval = Retrieval(error=AssertionError("explanation cannot retrieve"))
     selected = service(model, retrieval)
     claim = repository.claim_next()
-    result = asyncio.run(selected.run_persisted(
-        claim.run.state, [],
-        persist=lambda state, evidence: repository.save_progress(
-            state.id, claim.owner, state, evidence),
-        is_cancelled=lambda: False, resume=False, graph_resume=False,
-    ))
-    repository.finish(result.state.id, claim.owner,
-                      result.state, result.evidence)
+    result = asyncio.run(
+        selected.run_persisted(
+            claim.run.state,
+            [],
+            persist=lambda state, evidence: repository.save_progress(
+                state.id, claim.owner, state, evidence
+            ),
+            is_cancelled=lambda: False,
+            resume=False,
+            graph_resume=False,
+        )
+    )
+    repository.finish(
+        result.state.id, claim.owner, result.state, result.evidence
+    )
     restored = repository.get(result.state.id)
     assert restored.result.diagnosis.knowledge_refs == [reference.id]
     assert restored.state.knowledge[0].hit.chunk == reference.hit.chunk
@@ -654,9 +877,13 @@ def test_explanation_restores_references_without_new_retrieval(tmp_path):
 def test_old_snapshots_have_empty_knowledge_and_no_implicit_grants():
     from tracemind.config import Settings
 
-    old = run_state().model_dump(mode="json", exclude={
-        "knowledge", "knowledge_policy",
-    })
+    old = run_state().model_dump(
+        mode="json",
+        exclude={
+            "knowledge",
+            "knowledge_policy",
+        },
+    )
     restored = RunState.model_validate(old)
     assert restored.knowledge == []
     assert restored.knowledge_policy is None
@@ -670,8 +897,11 @@ def test_injected_local_tools_are_filtered_before_mcp_discovery():
         harness, local = tools_for(state, Retrieval())
         state.allowed_tools = ("read_knowledge",)
         tools = await create_mcp_tools(
-            NoRemoteTools(), start=START, end=END,
-            collector=EvidenceCollector(), harness=harness,
+            NoRemoteTools(),
+            start=START,
+            end=END,
+            collector=EvidenceCollector(),
+            harness=harness,
             local_tools=list(local.values()),
         )
         assert [t.name for t in tools] == ["read_knowledge"]
@@ -689,21 +919,32 @@ def test_parallel_internal_calls_keep_distinct_tool_span_parents():
             if len(calls) == 2:
                 both_entered.set()
             await both_entered.wait()
-            return AIMessage(content="{}", usage_metadata={
-                "input_tokens": 7, "output_tokens": 3, "total_tokens": 10,
-            })
+            return AIMessage(
+                content="{}",
+                usage_metadata={
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "total_tokens": 10,
+                },
+            )
 
         state = run_state()
         _, tools = tools_for(state, Retrieval(keywords=True), completion)
-        await asyncio.gather(*[tools["search_knowledge"].ainvoke({"query": q})
-                               for q in ("RPC timeout", "slow dependency")])
+        await asyncio.gather(
+            *[
+                tools["search_knowledge"].ainvoke({"query": q})
+                for q in ("RPC timeout", "slow dependency")
+            ]
+        )
         assert state.model_calls == 2
         assert state.usage.reported_total_tokens == 20
         assert len(state.knowledge) == 1
-        tool_spans = {e.span_id for e in state.events
-                      if e.kind == "tool.started"}
-        parents = {e.parent_span_id for e in state.events
-                   if e.kind == "model.started"}
+        tool_spans = {
+            e.span_id for e in state.events if e.kind == "tool.started"
+        }
+        parents = {
+            e.parent_span_id for e in state.events if e.kind == "model.started"
+        }
         assert len(tool_spans) == 2
         assert parents == tool_spans
 
@@ -714,13 +955,21 @@ def test_optional_model_failure_keeps_attempts_and_allows_diagnosis():
     async def completion(*args, **kwargs):
         raise httpx.ConnectError("private provider body")
 
-    model = ScriptedModel(respond=lambda messages, calls: (
-        tool_call("search_knowledge", {"query": "RPC timeout"}) if calls == 1
-        else answer(messages)))
-    result = asyncio.run(service(
-        model, Retrieval(keywords=True), knowledge_completion=completion,
-        limits=RunLimits(retry_attempts=0),
-    ).diagnose_with_evidence(INCIDENT, start=START, end=END))
+    model = ScriptedModel(
+        respond=lambda messages, calls: (
+            tool_call("search_knowledge", {"query": "RPC timeout"})
+            if calls == 1
+            else answer(messages)
+        )
+    )
+    result = asyncio.run(
+        service(
+            model,
+            Retrieval(keywords=True),
+            knowledge_completion=completion,
+            limits=RunLimits(retry_attempts=0),
+        ).diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
     assert result.state.stop_reason is StopReason.INSUFFICIENT_EVIDENCE
     assert result.state.model_calls == 3
     assert result.state.usage.unreported_model_calls == 1
@@ -751,9 +1000,11 @@ def test_knowledge_and_observations_can_be_cited_together_in_the_graph():
         if calls == 1:
             metrics = tool_call("query_metrics", {"expression": "up"})
             knowledge = tool_call("search_knowledge", {"query": "RPC timeout"})
-            return metrics.model_copy(update={
-                "tool_calls": [*metrics.tool_calls, *knowledge.tool_calls],
-            })
+            return metrics.model_copy(
+                update={
+                    "tool_calls": [*metrics.tool_calls, *knowledge.tool_calls],
+                }
+            )
         observations, refs = [], []
         for message in messages:
             if isinstance(message, ToolMessage) and message.status != "error":
@@ -762,22 +1013,30 @@ def test_knowledge_and_observations_can_be_cited_together_in_the_graph():
                         observations.append(item["id"])
                     if "knowledge_ref" in item:
                         refs.append(item["knowledge_ref"])
-        return tool_call("DiagnosisProposal", {
-            "status": "complete", "confidence": .8,
-            "root_cause": (
-                "Observed payment errors; documentation informs checks"),
-            "evidence_ids": observations, "knowledge_refs": refs,
-        })
+        return tool_call(
+            "DiagnosisProposal",
+            {
+                "status": "complete",
+                "confidence": 0.8,
+                "root_cause": (
+                    "Observed payment errors; documentation informs checks"
+                ),
+                "evidence_ids": observations,
+                "knowledge_refs": refs,
+            },
+        )
 
     telemetry = Telemetry()
     selected = DiagnosisService(
         LangChainAgentRunner(ScriptedModel(respond=respond)),
         tool_client=FixtureToolClient(telemetry, telemetry, telemetry),
-        allowed_tools=("query_metrics", *GRANTS), knowledge_policy=POLICY,
+        allowed_tools=("query_metrics", *GRANTS),
+        knowledge_policy=POLICY,
         knowledge_search=Retrieval(),
     )
-    result = asyncio.run(selected.diagnose_with_evidence(
-        INCIDENT, start=START, end=END))
+    result = asyncio.run(
+        selected.diagnose_with_evidence(INCIDENT, start=START, end=END)
+    )
     assert result.state.status is RunStatus.SUCCEEDED
     assert result.diagnosis.evidence_ids == [result.evidence[0].id]
     assert result.diagnosis.knowledge_refs == [result.state.knowledge[0].id]

@@ -81,20 +81,31 @@ def clean_text(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.splitlines()).strip()
 
 
-def _convert(data: bytes, fmt: str, *, pdf_pipeline: str = "standard",
-             artifacts_path: Path | None = None):
+def _convert(
+    data: bytes,
+    fmt: str,
+    *,
+    pdf_pipeline: str = "standard",
+    artifacts_path: Path | None = None,
+):
     """Use Docling's converters; PDF processing mode is explicit."""
     from docling.document_converter import (
-        DocumentConverter, NativePdfFormatOption, PdfFormatOption,
+        DocumentConverter,
+        NativePdfFormatOption,
+        PdfFormatOption,
     )
     from docling.datamodel.base_models import (
-        ConversionStatus, DocumentStream, InputFormat,
+        ConversionStatus,
+        DocumentStream,
+        InputFormat,
     )
     from docling.datamodel.pipeline_options import PdfPipelineOptions
 
-    formats = {"markdown": (InputFormat.MD, "md"),
-               "html": (InputFormat.HTML, "html"),
-               "pdf": (InputFormat.PDF, "pdf")}
+    formats = {
+        "markdown": (InputFormat.MD, "md"),
+        "html": (InputFormat.HTML, "html"),
+        "pdf": (InputFormat.PDF, "pdf"),
+    }
     kind, extension = formats[fmt]
     options = {}
     if kind is InputFormat.PDF:
@@ -103,16 +114,22 @@ def _convert(data: bytes, fmt: str, *, pdf_pipeline: str = "standard",
         else:
             if artifacts_path is None or not artifacts_path.exists():
                 raise RuntimeError(
-                    "Docling PDF models missing; run rag.py models")
+                    "Docling PDF models missing; run rag.py models"
+                )
             options[kind] = PdfFormatOption(
                 pipeline_options=PdfPipelineOptions(
-                    artifacts_path=artifacts_path, do_ocr=False))
+                    artifacts_path=artifacts_path, do_ocr=False
+                )
+            )
     converter = DocumentConverter(
-        allowed_formats=[kind],
-        format_options=options)
-    result = converter.convert(DocumentStream(
-        name="document." + extension, stream=BytesIO(data),
-    ))
+        allowed_formats=[kind], format_options=options
+    )
+    result = converter.convert(
+        DocumentStream(
+            name="document." + extension,
+            stream=BytesIO(data),
+        )
+    )
     if result.status is not ConversionStatus.SUCCESS:
         raise ValueError(f"document conversion is incomplete: {result.status}")
     return result.document
@@ -130,9 +147,16 @@ def _sections(structure, title: str) -> tuple[Section, ...]:
         texts, refs = groups.setdefault(path, ([], []))
         texts.append(chunk.text)
         refs.extend(item.self_ref for item in chunk.meta.doc_items)
-    sections = tuple(Section(" / ".join(path), "\n\n".join(texts), path,
-                             tuple(dict.fromkeys(refs)))
-                     for path, (texts, refs) in groups.items() if texts)
+    sections = tuple(
+        Section(
+            " / ".join(path),
+            "\n\n".join(texts),
+            path,
+            tuple(dict.fromkeys(refs)),
+        )
+        for path, (texts, refs) in groups.items()
+        if texts
+    )
     if not sections:
         raise ValueError("document contains no extractable text")
     return sections
@@ -148,8 +172,13 @@ def markdown_sections(text: str, title: str) -> tuple[Section, ...]:
     return _sections(_convert(text.encode(), "markdown"), title)
 
 
-def parse_document(data: bytes, entry: dict, *, pdf_pipeline="standard",
-                   artifacts_path: Path | None = None) -> Document:
+def parse_document(
+    data: bytes,
+    entry: dict,
+    *,
+    pdf_pipeline="standard",
+    artifacts_path: Path | None = None,
+) -> Document:
     """Convert one verified representation; retain framework provenance."""
     fmt = entry["format"]
     if fmt == "json":
@@ -169,11 +198,18 @@ def parse_document(data: bytes, entry: dict, *, pdf_pipeline="standard",
             if not separator:
                 raise ValueError("unterminated Markdown frontmatter")
         data = text.encode()
-    structure = _convert(data, fmt, pdf_pipeline=pdf_pipeline,
-                         artifacts_path=artifacts_path)
+    structure = _convert(
+        data, fmt, pdf_pipeline=pdf_pipeline, artifacts_path=artifacts_path
+    )
     sections = _sections(structure, entry["title"])
     extracted = "\n\n".join(f"{s.heading}\n{s.text}" for s in sections)
-    return Document(entry, sections, digest(extracted.encode()), structure)
+    document = Document(entry, sections, digest(extracted.encode()), structure)
+    if (
+        entry.get("content_hash_basis") == "docling-normalized-text-v2"
+        and digest(document.text.encode()) != entry["content_sha256"]
+    ):
+        raise ValueError("normalized authored content hash mismatch")
+    return document
 
 
 def verify_source(source: dict, repositories: dict[str, Path]) -> dict:
@@ -213,8 +249,12 @@ def verify_source(source: dict, repositories: dict[str, Path]) -> dict:
 
 
 def load_corpus(
-    root: Path, *, profile: str, repositories: dict[str, Path],
-    pdf_pipeline: str = "standard", artifacts_path: Path | None = None,
+    root: Path,
+    *,
+    profile: str,
+    repositories: dict[str, Path],
+    pdf_pipeline: str = "standard",
+    artifacts_path: Path | None = None,
 ) -> Corpus:
     """Validate explicit profile files and provenance before model
     execution.
@@ -258,9 +298,14 @@ def load_corpus(
             if ref not in sources:
                 sources[ref] = registry["sources"][ref]
                 checks[ref] = verify_source(sources[ref], repositories)
-        documents.append(parse_document(
-            data, entry, pdf_pipeline=pdf_pipeline,
-            artifacts_path=artifacts_path))
+        documents.append(
+            parse_document(
+                data,
+                entry,
+                pdf_pipeline=pdf_pipeline,
+                artifacts_path=artifacts_path,
+            )
+        )
     return Corpus(
         tuple(documents),
         profile,

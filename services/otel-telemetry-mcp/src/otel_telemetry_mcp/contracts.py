@@ -3,7 +3,11 @@
 from typing import Annotated
 
 from pydantic import (
-    AwareDatetime, BaseModel, ConfigDict, Field, model_validator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
 )
 
 from otel_telemetry_mcp.observations import Evidence
@@ -19,9 +23,11 @@ class Window(Arguments):
     """Carry the application-selected timezone-aware investigation window."""
 
     start: AwareDatetime = Field(
-        json_schema_extra={"x-investigation-context": "start"})
+        json_schema_extra={"x-investigation-context": "start"}
+    )
     end: AwareDatetime = Field(
-        json_schema_extra={"x-investigation-context": "end"})
+        json_schema_extra={"x-investigation-context": "end"}
+    )
 
     @model_validator(mode="after")
     def validate_window(self) -> "Window":
@@ -36,7 +42,8 @@ class MetricQuery(Arguments):
 
     expression: str
     at: AwareDatetime = Field(
-        json_schema_extra={"x-investigation-context": "end"})
+        json_schema_extra={"x-investigation-context": "end"}
+    )
 
 
 class MetricDiscovery(Window):
@@ -51,17 +58,26 @@ class TraceSearch(Window):
     """Select one service's trace summaries."""
 
     service: str
+    operation: str | None = Field(default=None, max_length=240)
     min_duration_ms: float | None = Field(
-        default=None, gt=0, allow_inf_nan=False)
+        default=None, gt=0, allow_inf_nan=False
+    )
     errors_only: bool = False
 
 
 class TraceDetail(Arguments):
     """Require an actual Jaeger trace ID rather than an evidence UUID."""
 
-    trace_id: Annotated[str, Field(
-        pattern=r"^(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32})$",
-    )]
+    trace_id: Annotated[
+        str,
+        Field(
+            pattern=r"^(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32})$",
+        ),
+    ]
+    service: str | None = Field(default=None, max_length=120)
+    operation: str | None = Field(default=None, max_length=240)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=25, ge=1, le=100)
 
 
 class LogSearch(Window):
@@ -69,6 +85,7 @@ class LogSearch(Window):
 
     service: str
     text: str | None = None
+    trace_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{16,32}$")
 
 
 TOOL_ARGUMENTS = {
@@ -101,8 +118,16 @@ class TelemetryReply(BaseModel):
     @model_validator(mode="after")
     def validate_payload(self) -> "TelemetryReply":
         """Prevent metadata or failure records from becoming observations."""
-        if sum(item is not None for item in (
-            self.evidence, self.metadata, self.error,
-        )) != 1:
+        if (
+            sum(
+                item is not None
+                for item in (
+                    self.evidence,
+                    self.metadata,
+                    self.error,
+                )
+            )
+            != 1
+        ):
             raise ValueError("reply requires exactly one payload")
         return self

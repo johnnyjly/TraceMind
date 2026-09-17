@@ -763,7 +763,8 @@ def test_large_results_compress_and_omitted_counterevidence_is_retrievable(
         content = json.loads(last.content)
         if calls == 2:
             assert last.artifact is not None
-            assert content[-1]["omitted_count"] == 10
+            assert next(p["omitted_count"] for p in content
+                        if "omitted_count" in p) == 10
             assert content[0]["truncated"] is True
             return tool_call("read_evidence", {"offset": 40})
         if calls == 3:
@@ -826,6 +827,7 @@ def test_accumulating_logs_continue_after_bounded_index_compression(tmp_path):
     model = ScriptedModel(respond=respond)
     run = run_service(make_service(
         model, LargeTelemetry(), tmp_path, recursion_limit=50,
+        limits=RunLimits(context_tokens=36_864),
     ))
     assert run.state.status is RunStatus.SUCCEEDED
     assert model.calls == 6

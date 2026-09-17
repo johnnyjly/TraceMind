@@ -3,6 +3,7 @@
 import asyncio
 
 from tracemind.rag.config import RagSettings
+from tracemind.rag.errors import RetrievalInputTooLong
 from tracemind.async_utils import run_io
 
 
@@ -91,7 +92,10 @@ class LocalModels:
             if any(
                 len(ids) > self.settings.reranker_max_tokens for ids in lengths
             ):
-                raise ValueError("reranker input exceeds tokenizer limit")
+                raise RetrievalInputTooLong(
+                    "reranker input exceeds tokenizer limit; "
+                    "shorten the question"
+                )
             values = await run_io(
                 self.reranker.predict,
                 [(query, text) for text in texts],

@@ -5,13 +5,33 @@
     "title": "Checkout is slow for customers with international addresses",
     "description": "Customers shipping outside the United States report much slower checkout, while US-address orders appear normal. Requests may still succeed. Investigate the source of the latency.",
     "severity": "medium",
-    "affected_services": ["checkout"]
+    "affected_services": [
+      "checkout"
+    ]
   },
-  "fault": {"feature_flag": "intlShippingSlowdown", "variant": "5sec"},
+  "fault": {
+    "feature_flag": "intlShippingSlowdown",
+    "variant": "5sec"
+  },
   "ground_truth": {
     "root_cause_service": "shipping",
-    "root_cause_terms": ["delay", "slowdown", "international", "5sec"],
-    "required_evidence_source": "log"
+    "root_cause_terms": [
+      "delay",
+      "slowdown",
+      "international",
+      "5sec"
+    ],
+    "required_evidence_source": "log",
+    "diagnostic_reference": {
+      "version": "demo-rca-v2",
+      "operation": "Shipping POST /ship-order (fulfillment)",
+      "observable_mechanism": "The logged international-shipment path introduces approximately five seconds of delay; observations associate the delay with intlShippingSlowdown.",
+      "propagation": "A linked checkout request inherits the shipping fulfillment delay and can still succeed.",
+      "exclusions": [
+        "Do not substitute get-quote latency for ship-order latency.",
+        "Do not generalize a bounded sample to every foreign or US request. Exact destination or variant claims need retained observations."
+      ]
+    }
   },
   "max_tool_calls": 12
 }

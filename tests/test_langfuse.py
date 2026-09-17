@@ -87,6 +87,37 @@ def scores(items):
     return {item.name: item.value for item in items}
 
 
+def test_multi_agent_spans_and_campaign_budget_cover_every_role(
+    sdk, monkeypatch
+):
+    from langfuse.langchain import CallbackHandler
+    from test_multi_agent import service_for, run
+
+    client, exporter = sdk
+    service, _, reviewer, _ = service_for(monkeypatch)
+    budget = ModelCallBudget(5)
+    callbacks = [
+        budget,
+        CallbackHandler(public_key=client._resources.public_key),
+    ]
+    service._langfuse = client
+    service._runner._langfuse = client
+    service._runner._callbacks = callbacks
+    service._verifier.client = client
+    service._verifier.callbacks = callbacks
+    result = run(service)
+    client.flush()
+    assert result.state.status is RunStatus.SUCCEEDED
+    assert result.state.model_calls == budget.calls == 5
+    assert reviewer.calls == 1
+    names = {span.name for span in exporter.get_finished_spans()}
+    assert {
+        "agent.coordinator",
+        "agent.telemetry",
+        "diagnosis.verification",
+    } <= names
+
+
 def test_real_sdk_missing_items_or_evaluators_cannot_pass(sdk):
     client, _ = sdk
 
@@ -212,12 +243,24 @@ class FakeModel(BaseChatModel):
 
 def valid_review(observed, **updates):
     result = {
-        "assessments": [{"item_id": "F1", "kind": "diagnostic",
-                         "verdict": "supported", "supporting_refs": ["E1"],
-                         "rationale": "error span"}, *[
-            {"item_id": f"P{i}", "kind": "proposal", "verdict": "supported",
-             "rationale": "Proposed check"}
-            for i, _ in enumerate(observed.diagnosis.remediation, 1)]],
+        "assessments": [
+            {
+                "item_id": "F1",
+                "kind": "diagnostic",
+                "verdict": "supported",
+                "supporting_refs": ["E1"],
+                "rationale": "error span",
+            },
+            *[
+                {
+                    "item_id": f"P{i}",
+                    "kind": "proposal",
+                    "verdict": "supported",
+                    "rationale": "Proposed check",
+                }
+                for i, _ in enumerate(observed.diagnosis.remediation, 1)
+            ],
+        ],
         "root_cause_correctness": None,
         "rationale": "Observed error supports the whole item",
     }
@@ -225,20 +268,23 @@ def valid_review(observed, **updates):
     return result
 
 
-def test_judge_validates_references_and_does_not_retry(monkeypatch, sdk):
+def test_judge_validates_references_with_one_bounded_format_repair(
+    monkeypatch,
+    sdk,
+):
     observed = saved()
     body = valid_review(observed)
     body["assessments"][0]["supporting_refs"] = [str(uuid4())]
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
         "tracemind.evaluation.judge.create_review_model",
-        lambda settings: model
+        lambda settings: model,
     )
     budget = ModelCallBudget(2)
     evaluate = diagnosis_judge(Settings(_env_file=None), sdk[0], budget)
     result = asyncio.run(evaluate(output=observed.model_dump(mode="json")))
     assert scores(result) == {"judge_completed": False}
-    assert budget.calls == len(model.entered) == 1
+    assert budget.calls == len(model.entered) == 2
 
 
 def test_judge_keeps_unknown_correctness_unknown_and_rejects_oversized_input(
@@ -248,7 +294,7 @@ def test_judge_keeps_unknown_correctness_unknown_and_rejects_oversized_input(
     model = FakeModel(response=json.dumps(valid_review(observed)))
     monkeypatch.setattr(
         "tracemind.evaluation.judge.create_review_model",
-        lambda settings: model
+        lambda settings: model,
     )
     budget = ModelCallBudget(2)
     evaluate = diagnosis_judge(Settings(_env_file=None), sdk[0], budget)
@@ -396,7 +442,7 @@ def test_qualified_answer_can_support_uncertainty_without_inventing_a_cause(
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
         "tracemind.evaluation.judge.create_review_model",
-        lambda settings: model
+        lambda settings: model,
     )
     result = scores(
         asyncio.run(
@@ -428,96 +474,149 @@ def test_mixed_label_dataset_still_enforces_each_labeled_status(sdk):
     assert not accepted(result)
 
 
-@pytest.mark.parametrize('reference,passes', [
-    ({}, True),
-    ({'root_cause_service': 'payment', 'required_evidence_source': 'trace'},
-     True),
-    ({'expected_status': 'complete'}, False),
-    ({'root_cause_service': 'checkout', 'required_evidence_source': 'trace'},
-     False),
-])
+@pytest.mark.parametrize(
+    "reference,passes",
+    [
+        ({}, True),
+        (
+            {
+                "root_cause_service": "payment",
+                "required_evidence_source": "trace",
+            },
+            True,
+        ),
+        ({"expected_status": "complete"}, False),
+        (
+            {
+                "root_cause_service": "checkout",
+                "required_evidence_source": "trace",
+            },
+            False,
+        ),
+    ],
+)
 def test_reviewed_partial_findings_can_pass_without_claiming_completion(
-        monkeypatch, sdk, reference, passes):
+    monkeypatch, sdk, reference, passes
+):
     from test_verifier import make_service, diagnose, ReviewModel, review
 
     from test_verifier import FIXTURE
+
     script = json.loads(json.dumps(FIXTURE.script))
     script[-1]["args"]["remediation"] = [
-        "Restarting payment will restore every request."]
+        "Restarting payment will restore every request."
+    ]
     body = review()
-    body["assessments"].append({
-        "item_id": "P1", "kind": "diagnostic", "verdict": "insufficient",
-        "missing_observations": ["Post-restart recovery observations"],
-        "rationale": "Unverified repair promise",
-    })
+    body["assessments"].append(
+        {
+            "item_id": "P1",
+            "kind": "diagnostic",
+            "verdict": "insufficient",
+            "missing_observations": ["Post-restart recovery observations"],
+            "rationale": "Unverified repair promise",
+        }
+    )
     service, _ = make_service(
-        monkeypatch, ReviewModel(body=body), script=script)
+        monkeypatch, ReviewModel(body=body), script=script
+    )
     run = diagnose(service)
     observed = ExperimentOutput(
-        diagnosis=run.diagnosis, evidence=run.evidence, run_state=run.state,
+        diagnosis=run.diagnosis,
+        evidence=run.evidence,
+        run_state=run.state,
         investigation_start=run.state.investigation_start,
-        investigation_end=run.state.investigation_end)
+        investigation_end=run.state.investigation_end,
+    )
     result = run_experiment(
-        Settings(_env_file=None), sdk[0],
-        [{'input': observed.model_dump(mode='json'),
-          'expected_output': reference}],
-        kind='saved', name='partial-findings', budget=ModelCallBudget(1))
+        Settings(_env_file=None),
+        sdk[0],
+        [
+            {
+                "input": observed.model_dump(mode="json"),
+                "expected_output": reference,
+            }
+        ],
+        kind="saved",
+        name="partial-findings",
+        budget=ModelCallBudget(1),
+    )
     metrics = scores(result.item_results[0].evaluations)
-    assert metrics['grounded_findings']
-    assert metrics['supported_finding_count'] == 1
-    assert metrics['diagnosis_status'] == 'inconclusive'
-    assert 'runtime_verification' not in metrics
+    assert metrics["grounded_findings"]
+    assert metrics["supported_finding_count"] == 1
+    assert metrics["diagnosis_status"] == "inconclusive"
+    assert "runtime_verification" not in metrics
     assert accepted(result) is passes
 
 
 def test_rejected_candidate_without_supported_findings_cannot_pass(
-        monkeypatch, sdk):
+    monkeypatch, sdk
+):
     from test_verifier import make_service, diagnose, ReviewModel, review
 
     service, _ = make_service(
-        monkeypatch, ReviewModel(body=review('insufficient')))
+        monkeypatch, ReviewModel(body=review("insufficient"))
+    )
     run = diagnose(service)
     observed = ExperimentOutput(
-        diagnosis=run.diagnosis, evidence=run.evidence, run_state=run.state,
+        diagnosis=run.diagnosis,
+        evidence=run.evidence,
+        run_state=run.state,
         investigation_start=run.state.investigation_start,
-        investigation_end=run.state.investigation_end)
+        investigation_end=run.state.investigation_end,
+    )
     result = run_experiment(
-        Settings(_env_file=None), sdk[0],
-        [{'input': observed.model_dump(mode='json')}],
-        kind='saved', name='no-findings', budget=ModelCallBudget(1))
+        Settings(_env_file=None),
+        sdk[0],
+        [{"input": observed.model_dump(mode="json")}],
+        kind="saved",
+        name="no-findings",
+        budget=ModelCallBudget(1),
+    )
     metrics = scores(result.item_results[0].evaluations)
-    assert metrics['execution_success']
-    assert metrics['grounded_findings'] is False
-    assert metrics['supported_finding_count'] == 0
+    assert metrics["execution_success"]
+    assert metrics["grounded_findings"] is False
+    assert metrics["supported_finding_count"] == 0
     assert not accepted(result)
 
 
-@pytest.mark.parametrize('has_finding', [True, False])
+@pytest.mark.parametrize("has_finding", [True, False])
 def test_judge_separates_partial_usefulness_from_root_cause_correctness(
-        monkeypatch, sdk, has_finding):
+    monkeypatch, sdk, has_finding
+):
     observed = saved()
     observed.diagnosis.status = DiagnosisStatus.INCONCLUSIVE
     body = valid_review(observed, root_cause_correctness=False)
     if not has_finding:
-        observed.diagnosis.root_cause = 'The internal mechanism is unknown'
-        body['assessments'][0].update(
-            kind='uncertainty',
-            supporting_refs=[], missing_observations=['Mechanism telemetry'])
+        observed.diagnosis.root_cause = "The internal mechanism is unknown"
+        body["assessments"][0].update(
+            kind="uncertainty",
+            supporting_refs=[],
+            missing_observations=["Mechanism telemetry"],
+        )
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
-        'tracemind.evaluation.judge.create_review_model',
-        lambda settings: model)
+        "tracemind.evaluation.judge.create_review_model",
+        lambda settings: model,
+    )
     result = run_experiment(
-        Settings(_env_file=None), sdk[0],
-        [{'input': observed.model_dump(mode='json'),
-          'expected_output': {'root_cause_service': 'payment'}}],
-        kind='saved', name='judge-partial', judge=True,
-        budget=ModelCallBudget(1))
+        Settings(_env_file=None),
+        sdk[0],
+        [
+            {
+                "input": observed.model_dump(mode="json"),
+                "expected_output": {"root_cause_service": "payment"},
+            }
+        ],
+        kind="saved",
+        name="judge-partial",
+        judge=True,
+        budget=ModelCallBudget(1),
+    )
     metrics = scores(result.item_results[0].evaluations)
-    assert metrics['judge_completed'] and metrics['evidence_support'] == 1
-    assert metrics['root_cause_correctness'] is False
-    assert metrics['false_completion'] is False
-    assert metrics['grounded_findings'] is has_finding
+    assert metrics["judge_completed"] and metrics["evidence_support"] == 1
+    assert metrics["root_cause_correctness"] is False
+    assert metrics["false_completion"] is False
+    assert metrics["grounded_findings"] is has_finding
     assert accepted(result) is has_finding
 
 
@@ -586,7 +685,7 @@ def test_judge_timeout_does_not_retry_or_pass(monkeypatch, sdk):
     model = SlowModel()
     monkeypatch.setattr(
         "tracemind.evaluation.judge.create_review_model",
-        lambda settings: model
+        lambda settings: model,
     )
     budget = ModelCallBudget(2)
     evaluate = diagnosis_judge(
@@ -663,16 +762,18 @@ def test_process_claim_uses_execution_events_without_claiming_incident_support(
         if event.kind == "tool.completed"
     )
     observed.diagnosis.root_cause += (
-        "; The trace query returned an observation")
+        "; The trace query returned an observation"
+    )
     # This test intentionally edits a saved free-text diagnosis.
     observed.run_state.candidate_items = []
     body = valid_review(observed)
     body["assessments"][0].update(
-        kind="process", supporting_event_sequences=[sequence])
+        kind="process", supporting_event_sequences=[sequence]
+    )
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
         "tracemind.evaluation.judge.create_review_model",
-        lambda settings: model
+        lambda settings: model,
     )
     evaluate = diagnosis_judge(
         Settings(_env_file=None), sdk[0], ModelCallBudget(2)
@@ -693,7 +794,7 @@ def test_first_runtime_callback_initializes_its_project_before_generation(
     exporter = InMemorySpanExporter()
     clients = []
 
-    def initialize(public_key, secret_key, base_url, environment):
+    def initialize(public_key, secret_key, base_url, environment, timeout):
         client = Langfuse(
             public_key=public_key,
             secret_key=secret_key,
@@ -771,48 +872,70 @@ def test_vector_only_retrieval_does_not_require_a_provider_key(
 
 
 def test_mixed_saved_dataset_cannot_disable_an_existing_items_trace_gate(
-        sdk, tmp_path):
+    sdk, tmp_path
+):
     from replay_support import run_replay_evaluation
-    observed = asyncio.run(run_replay_evaluation(
-        ReplayFixture.load(Path("evals/replays/payment_failure.json")),
-        Settings(_env_file=None, agent_trace_directory=tmp_path),
-    )).model_dump(mode="json")
+
+    observed = asyncio.run(
+        run_replay_evaluation(
+            ReplayFixture.load(Path("evals/replays/payment_failure.json")),
+            Settings(_env_file=None, agent_trace_directory=tmp_path),
+        )
+    ).model_dump(mode="json")
     observed["run_state"]["events"] = []
     result = run_experiment(
-        Settings(_env_file=None), sdk[0],
+        Settings(_env_file=None),
+        sdk[0],
         [{"input": observed}, {"input": dict(observed, run_state=None)}],
-        kind="saved", name="mixed-trace-regression", budget=ModelCallBudget(1),
+        kind="saved",
+        name="mixed-trace-regression",
+        budget=ModelCallBudget(1),
     )
-    assert scores(result.item_results[0].evaluations)[
-        "trace_integrity"] is False
+    assert (
+        scores(result.item_results[0].evaluations)["trace_integrity"] is False
+    )
     assert not accepted(result)
 
 
 def test_verification_accepts_correct_rejection_with_held_out_labels(
-        monkeypatch, sdk):
+    monkeypatch, sdk
+):
     observed = saved()
     incident = Incident(
         id=observed.diagnosis.incident_id,
         title="synthetic",
-        description="synthetic")
+        description="synthetic",
+    )
     body = valid_review(observed)
-    body["assessments"][0].update(verdict="insufficient", supporting_refs=[],
-                                  missing_observations=["A linked operation"])
+    body["assessments"][0].update(
+        verdict="insufficient",
+        supporting_refs=[],
+        missing_observations=["A linked operation"],
+    )
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
         "tracemind.agent.verification.create_review_model",
-        lambda settings: model)
-    supplied = {"incident": incident.model_dump(mode="json"),
-                "diagnosis": observed.diagnosis.model_dump(mode="json"),
-                "evidence": [e.model_dump(mode="json")
-                             for e in observed.evidence],
-                "start": observed.investigation_start.isoformat(),
-                "end": observed.investigation_end.isoformat()}
+        lambda settings: model,
+    )
+    supplied = {
+        "incident": incident.model_dump(mode="json"),
+        "diagnosis": observed.diagnosis.model_dump(mode="json"),
+        "evidence": [e.model_dump(mode="json") for e in observed.evidence],
+        "start": observed.investigation_start.isoformat(),
+        "end": observed.investigation_end.isoformat(),
+    }
     result = run_experiment(
-        Settings(_env_file=None), sdk[0],
-        [{"input": supplied, "expected_output": {"verdict": "insufficient"},
-          "metadata": {"private_label": "HELD_OUT_LABEL"}}],
-        kind="verification", name="correct-rejection",
+        Settings(_env_file=None),
+        sdk[0],
+        [
+            {
+                "input": supplied,
+                "expected_output": {"verdict": "insufficient"},
+                "metadata": {"private_label": "HELD_OUT_LABEL"},
+            }
+        ],
+        kind="verification",
+        name="correct-rejection",
         budget=ModelCallBudget(1),
     )
     assert accepted(result)
@@ -832,60 +955,265 @@ def test_judge_preserves_items_without_runtime_review(
     from tracemind.agent.verification import parse_review, partial_draft
     from tracemind.agent.workflow.validation import render_items
     from tracemind.models.verification import (
-        ReviewItem, ReviewSubject, VerificationRecord,
+        ReviewItem,
+        ReviewSubject,
+        VerificationRecord,
     )
     from replay_support import run_replay_evaluation
 
-    observed = asyncio.run(run_replay_evaluation(
-        ReplayFixture.load(Path("evals/replays/payment_failure.json")),
-        Settings(_env_file=None, verifier_enabled=False,
-                 agent_trace_directory=tmp_path),
-    ))
-    items = [ReviewItem(
-        id=f"F{i}", section="finding", text=f"Payment observation {i}",
-        evidence_ids=[observed.evidence[0].id],
-    ) for i in (1, 2)]
-    draft = render_items(items, observed.diagnosis.status,
-                         observed.diagnosis.confidence)
+    observed = asyncio.run(
+        run_replay_evaluation(
+            ReplayFixture.load(Path("evals/replays/payment_failure.json")),
+            Settings(
+                _env_file=None,
+                verifier_enabled=False,
+                agent_trace_directory=tmp_path,
+            ),
+        )
+    )
+    items = [
+        ReviewItem(
+            id=f"F{i}",
+            section="finding",
+            text=f"Payment observation {i}",
+            evidence_ids=[observed.evidence[0].id],
+        )
+        for i in (1, 2)
+    ]
+    draft = render_items(
+        items, observed.diagnosis.status, observed.diagnosis.confidence
+    )
     observed.diagnosis = Diagnosis(
-        incident_id=observed.diagnosis.incident_id, **draft.model_dump())
+        incident_id=observed.diagnosis.incident_id, **draft.model_dump()
+    )
     observed.run_state.candidate_items = items
     body = valid_review(observed)
-    body["assessments"].append({
-        **body["assessments"][0], "item_id": "F2",
-    })
+    body["assessments"].append(
+        {
+            **body["assessments"][0],
+            "item_id": "F2",
+        }
+    )
     if runtime_review != "off":
         subject = ReviewSubject(
-            diagnosis=observed.diagnosis, evidence=observed.evidence,
-            items=items, start=observed.investigation_start,
+            diagnosis=observed.diagnosis,
+            evidence=observed.evidence,
+            items=items,
+            start=observed.investigation_start,
             end=observed.investigation_end,
         )
         runtime_body = json.loads(json.dumps(body))
         if runtime_review == "rejected":
             runtime_body["assessments"][1].update(
-                verdict="insufficient", supporting_refs=[],
+                verdict="insufficient",
+                supporting_refs=[],
                 missing_observations=["Missing linked observation"],
             )
         review = parse_review(
-            AIMessage(content=json.dumps(runtime_body)), subject)
+            AIMessage(content=json.dumps(runtime_body)), subject
+        )
         observed.run_state.verification = VerificationRecord(
-            candidate=observed.diagnosis, items=items,
-            rubric_version="test", input_sha256="test",
+            candidate=observed.diagnosis,
+            items=items,
+            rubric_version="test",
+            input_sha256="test",
             review=review,
         )
         if runtime_review == "rejected":
             partial = partial_draft(items, review)
             observed.diagnosis = Diagnosis(
                 incident_id=observed.diagnosis.incident_id,
-                **partial.model_dump())
+                **partial.model_dump(),
+            )
             body = valid_review(observed)
     model = FakeModel(response=json.dumps(body))
-    monkeypatch.setattr("tracemind.evaluation.judge.create_review_model",
-                        lambda settings: model)
-    evaluate = diagnosis_judge(Settings(_env_file=None), sdk[0],
-                               ModelCallBudget(1))
+    monkeypatch.setattr(
+        "tracemind.evaluation.judge.create_review_model",
+        lambda settings: model,
+    )
+    evaluate = diagnosis_judge(
+        Settings(_env_file=None), sdk[0], ModelCallBudget(1)
+    )
     result = scores(asyncio.run(evaluate(output=observed)))
     assert result["judge_completed"]
     packet = json.loads(model.entered[0][1].content)
     assert [item["id"] for item in packet["items"]] == (
-        ["F1"] if runtime_review == "rejected" else ["F1", "F2"])
+        ["F1"] if runtime_review == "rejected" else ["F1", "F2"]
+    )
+
+
+def test_http_retrieval_preserves_trace_across_process_boundary(
+    sdk, monkeypatch
+):
+    from opentelemetry.context import Context, attach, detach
+    from tracemind.observability.langfuse import observation
+    from tracemind.rag.config import RagSettings
+    from tracemind.rag.query_client import HttpSnapshotRetriever
+    from tracemind.rag.query_service import create_app
+    from test_rag_query_service import Runtime
+
+    client, exporter = sdk
+    stages = ("knowledge.vector_graph", "knowledge.bm25", "knowledge.rerank")
+
+    class TracedRuntime(Runtime):
+        async def search(self, question, **kwargs):
+            with observation(client, "knowledge.search", as_type="retriever"):
+                for name in stages:
+                    with observation(client, name, as_type="retriever"):
+                        await asyncio.sleep(0)
+                return await super().search(question, **kwargs)
+
+    class ProcessBoundaryTransport(httpx.AsyncBaseTransport):
+        def __init__(self, app):
+            self.delegate = httpx.ASGITransport(app=app)
+            self.requests = []
+
+        async def handle_async_request(self, request):
+            self.requests.append(
+                (request.url.path, request.headers.get("traceparent"))
+            )
+            # Remove implicit ASGI inheritance to simulate a separate process.
+            token = attach(Context())
+            try:
+                return await self.delegate.handle_async_request(request)
+            finally:
+                detach(token)
+
+        async def aclose(self):
+            await self.delegate.aclose()
+
+    settings = RagSettings(
+        _env_file=None, snapshot="test", mode="naive", service_url="http://rag"
+    )
+    runtime = TracedRuntime()
+    monkeypatch.setattr(
+        "tracemind.rag.query_service.verify_snapshot",
+        lambda _: {"snapshot": "test"},
+    )
+    app = create_app(settings, runtime=runtime, langfuse_client=client)
+    transport = ProcessBoundaryTransport(app)
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(**kwargs, transport=transport),
+    )
+    retriever = HttpSnapshotRetriever(settings, langfuse_client=client)
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("naive retrieval must not call a model")
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            with observation(client, "diagnosis", as_type="agent"):
+                with observation(client, "search_knowledge", as_type="tool"):
+                    result = await retriever(
+                        ["payment Charge failed"],
+                        question="Why did checkout fail?",
+                        snapshot="test",
+                        completion=forbidden,
+                    )
+                    assert result.snapshot == "test" and not result.hits
+
+    asyncio.run(exercise())
+    client.flush()
+    spans = exporter.get_finished_spans()
+    names = {s.name: s for s in spans}
+    expected = {
+        "diagnosis",
+        "search_knowledge",
+        "knowledge.http",
+        "knowledge.search",
+        *stages,
+    }
+    assert set(names) == expected and len(spans) == len(expected)
+    assert all(s.end_time is not None for s in spans)
+    root = names["diagnosis"]
+    assert root.parent is None
+    assert {s.context.trace_id for s in spans} == {root.context.trace_id}
+    parents = {
+        "search_knowledge": "diagnosis",
+        "knowledge.http": "search_knowledge",
+        "knowledge.search": "knowledge.http",
+        **{s: "knowledge.search" for s in stages},
+    }
+    for name, parent in parents.items():
+        assert names[name].parent.span_id == names[parent].context.span_id
+    tool = names["search_knowledge"]
+    assert transport.requests == [
+        ("/ready", None),
+        (
+            "/search",
+            f"00-{root.context.trace_id:032x}-{tool.context.span_id:016x}-01",
+        ),
+    ]
+
+
+def test_nested_tool_model_has_one_generation_for_inherited_callbacks(
+    sdk, monkeypatch
+):
+    from langchain_core.tools import tool
+    from tracemind.observability.langfuse import callbacks_for
+
+    client, exporter = sdk
+    settings = Settings(
+        _env_file=None,
+        langfuse_enabled=True,
+        langfuse_public_key=client._resources.public_key,
+        langfuse_secret_key="sk-test",
+    )
+    monkeypatch.setattr(
+        "tracemind.observability.langfuse.client_for", lambda settings: client
+    )
+    outer, inner = callbacks_for(settings), callbacks_for(settings)
+    assert outer[0] is inner[0]
+
+    @tool
+    async def retrieve_document(query: str) -> str:
+        """Retrieve one document using a controlled model."""
+        return (
+            await FakeModel()
+            .bind(response_format={"type": "json_object"})
+            .ainvoke(query, config={"callbacks": inner})
+        ).text
+
+    asyncio.run(
+        retrieve_document.ainvoke(
+            {"query": "test"}, config={"callbacks": outer}
+        )
+    )
+    client.flush()
+    spans = exporter.get_finished_spans()
+    generations = [
+        s
+        for s in spans
+        if s.attributes.get("langfuse.observation.type") == "generation"
+    ]
+    tools = [
+        s
+        for s in spans
+        if s.attributes.get("langfuse.observation.type") == "tool"
+    ]
+    assert len(generations) == len(tools) == 1
+    assert generations[0].parent.span_id == tools[0].context.span_id
+
+
+def test_judge_overlapping_counterevidence_completes_without_repair(
+    monkeypatch, sdk,
+):
+    observed = saved()
+    body = valid_review(observed)
+    body["assessments"][0].update(
+        verdict="contradicted", conflicting_refs=["E1"],
+    )
+    model = FakeModel(response=json.dumps(body))
+    monkeypatch.setattr(
+        "tracemind.evaluation.judge.create_review_model", lambda _: model,
+    )
+    budget = ModelCallBudget(2)
+    evaluate = diagnosis_judge(Settings(_env_file=None), sdk[0], budget)
+    result = scores(asyncio.run(evaluate(output=observed)))
+    assert result["judge_completed"] is True
+    assert result["support_verdict"] == "contradicted"
+    assert result["false_completion"] is True
+    assert budget.calls == len(model.entered) == 1

@@ -29,6 +29,9 @@ services:
     volumes:
       - ${TRACEMIND_FLAGD_CONFIG}:/etc/flagd/demo.flagd.json:ro
   jaeger:
+    volumes:
+      - ${TRACEMIND_JAEGER_CONFIG:?use scripts/demo_scenario.py}:/etc/jaeger/config.yml:ro
+      - jaeger-data:/tmp
     ports:
       - "16686:16686"
   opensearch:
@@ -75,3 +78,9 @@ services:
       resources:
         limits:
           memory: 64M
+
+# External ownership keeps ordinary Demo teardown from deleting trace history.
+volumes:
+  jaeger-data:
+    external: true
+    name: tracemind-jaeger-data

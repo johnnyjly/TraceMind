@@ -27,12 +27,17 @@ def build_runner(settings: Settings, *, checkpointer=None, callbacks=None):
         fallback_model=create_fallback_model(settings),
         checkpointer=checkpointer,
         callbacks=[*(callbacks or []), *callbacks_for(settings)],
+        langfuse_client=client_for(settings),
     )
 
 
 def build_service(
-    settings: Settings, runner: AgentRunner, tool_client: ToolClient, *,
-    limits: RunLimits | None = None, memory_policy: MemoryPolicy | None = None,
+    settings: Settings,
+    runner: AgentRunner,
+    tool_client: ToolClient,
+    *,
+    limits: RunLimits | None = None,
+    memory_policy: MemoryPolicy | None = None,
     memory_lookup: MemoryLookup | None = None,
     guidance_lookup: GuidanceLookup | None = None,
     knowledge_policy: KnowledgePolicy | None = None,
@@ -52,19 +57,27 @@ def build_service(
                 from tracemind.rag.query_client import (
                     HttpSnapshotRetriever,
                 )
-                knowledge_search = HttpSnapshotRetriever(rag)
+
+                knowledge_search = HttpSnapshotRetriever(
+                    rag, langfuse_client=client_for(settings)
+                )
             else:
                 from tracemind.rag.retriever import get_snapshot_retriever
+
                 knowledge_search = get_snapshot_retriever(
-                    rag.model_dump_json())
-        knowledge_completion = (
-            knowledge_completion or create_rag_completion(
-                settings, rag,
-                **({"callbacks": all_callbacks} if all_callbacks else {})))
+                    rag.model_dump_json()
+                )
+        knowledge_completion = knowledge_completion or create_rag_completion(
+            settings,
+            rag,
+            purpose="retrieval",
+            **({"callbacks": all_callbacks} if all_callbacks else {}),
+        )
         if knowledge_model_name == "rag-auxiliary":
             knowledge_model_name = rag.llm_model or settings.llm_model
     return DiagnosisService(
         runner,
+        agent_mode=settings.agent_mode,
         tool_client=tool_client,
         recursion_limit=settings.agent_recursion_limit,
         limits=limits or settings.run_limits,
@@ -79,6 +92,7 @@ def build_service(
         knowledge_model_name=knowledge_model_name,
         langfuse_client=client_for(settings),
         verification_policy=settings.verification_policy,
-        verifier=DiagnosisVerifier(settings, callbacks=all_callbacks,
-                                   client=client_for(settings)),
+        verifier=DiagnosisVerifier(
+            settings, callbacks=all_callbacks, client=client_for(settings)
+        ),
     )

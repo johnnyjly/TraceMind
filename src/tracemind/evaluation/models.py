@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from tracemind.models import (
     Diagnosis,
@@ -23,6 +23,17 @@ class FaultInjection(BaseModel):
     variant: str
 
 
+class DiagnosticReference(BaseModel):
+    """Held-out observable mechanism, separate from injection internals."""
+
+    model_config = ConfigDict(extra="forbid")
+    version: Literal["demo-rca-v2"] = "demo-rca-v2"
+    operation: str = Field(min_length=1)
+    observable_mechanism: str = Field(min_length=1)
+    propagation: str = Field(min_length=1)
+    exclusions: list[str] = Field(min_length=1)
+
+
 class GroundTruth(BaseModel):
     """Held-out localization checks and explicit diagnostic status targets."""
 
@@ -30,6 +41,7 @@ class GroundTruth(BaseModel):
     root_cause_terms: list[str] = Field(min_length=1)
     required_evidence_source: EvidenceSource
     expected_status: DiagnosisStatus = DiagnosisStatus.COMPLETE
+    diagnostic_reference: DiagnosticReference | None = None
 
 
 class EvaluationCase(BaseModel):

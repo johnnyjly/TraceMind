@@ -21,7 +21,7 @@ def test_example_covers_all_settings_and_loads_diagnostic_profile():
     assert settings.agent_recursion_limit == 50
     assert settings.run_limits.context_tokens == 131072
     assert settings.run_limits.output_tokens == 8192
-    assert settings.run_limits.duration_seconds == 300
+    assert settings.run_limits.duration_seconds == 600
     assert settings.run_limits.model_calls == 15
     assert settings.run_limits.tool_calls == 25
     assert settings.llm_provider == "deepseek"

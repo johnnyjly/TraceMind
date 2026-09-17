@@ -289,6 +289,7 @@ def test_jaeger_search_scopes_mixed_age_spans_to_inclusive_window():
     assert attrs["error_span_count"] == 1
     assert attrs["excluded_span_count"] == 2
     assert attrs["summary_scope"] == "spans_started_in_window"
+    assert attrs["timestamp_source"] == "earliest_selected_span_startTime"
     assert attrs["duration_ms"] == 3_600_100
     assert "selected span extent" in evidence[0].summary
 

@@ -765,7 +765,7 @@ def test_repair_messages_reach_deepseek_with_valid_pairs(
             transport=httpx.MockTransport(respond)
         ) as http:
             monkeypatch.setattr(
-                "tracemind.agent.runtime.llm.BaseChatOpenAI",
+                "tracemind.agent.runtime.llm.DeepSeekChat",
                 lambda **kwargs: BaseChatOpenAI(
                     http_async_client=http, **kwargs
                 ),

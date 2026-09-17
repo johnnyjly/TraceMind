@@ -1,53 +1,70 @@
 # TraceMind
 
 TraceMind investigates microservice incidents using metrics, traces and logs,
-then returns a structured diagnosis with supporting evidence. It runs against
-reproducible faults in the OpenTelemetry Demo.
+then produces a structured diagnosis with supporting evidence, hypotheses and
+explicit gaps. It runs against reproducible faults in the OpenTelemetry Demo.
 
-The current baseline is one bounded LangGraph agent with context management,
-recovery, persistent queued runs and readable progress. Telemetry comes from
-an independent read-only HTTP MCP service. Snapshot-based RAG and feedback
-memory are optional and disabled by default.
+A bounded LangGraph agent is the default. An opt-in multi-agent workflow adds a
+coordinator, up to two concurrent investigators and bounded verifier feedback.
+Both modes share permissions, model/tool budgets, retained evidence and durable
+run state. Telemetry comes from an independent read-only HTTP MCP service.
+
+## What is implemented
+
+- Fixed investigation windows, evidence references and source validation.
+- Context limits, bounded retries, optional fallback and controlled finalization.
+- Persistent queued runs, worker leases, checkpoints, cancellation and recovery.
+- Durable SSE progress and incident follow-up questions.
+- Completion verification, enabled by default, with explicit partial/failure outcomes.
+- Optional snapshot-based RAG and feedback memory, disabled by default.
+- Langfuse tracing and evaluation, scripted regression replays and live fault cases.
+
+The supported deployment is local with one worker. Parallel investigation tasks
+run inside that worker; distributed workers, shared-service authentication,
+automatic alert ingestion and remediation tools are outside the current scope.
+Recovery does not guarantee exactly-once external model or tool execution.
 
 ## Requirements
 
-- Python 3.12+, `uv`, and a model API key for diagnoses.
-- Docker Desktop with Compose for the Demo and telemetry MCP service.
-- A sibling OpenTelemetry Demo checkout pinned to commit
+- Python 3.12+, `uv`, and credentials for the configured diagnosis and review models.
+- Docker with Compose for the Demo, telemetry MCP and optional supporting services.
+- A sibling OpenTelemetry Demo checkout pinned to
   `dedc0178918e260823323b8d95005a8cb924b007` (version 3.1.0).
 
-Commands below run from this repository root. See
-[Demo and evaluation](docs/evaluation.md) for cloning and scenario details.
+Commands below run from the repository root. See
+[Demo setup](docs/evaluation.md) for checkout and fault scenario instructions.
 
 ## Quick start
 
 ### 1. Install and configure
 
 ```bash
-uv sync --dev
+uv sync --locked --dev
 cp .env.example .env
 ```
 
-Set the provider, model and matching key in your local `.env`:
+The example configuration uses Google for diagnosis and DeepSeek for verification:
 
 ```dotenv
 TRACEMIND_LLM_PROVIDER=google
 TRACEMIND_LLM_MODEL=gemini-3.7-flash
-TRACEMIND_GOOGLE_API_KEY=your-key
+TRACEMIND_GOOGLE_API_KEY=your-google-key
+TRACEMIND_VERIFIER_ENABLED=true
+TRACEMIND_VERIFIER_PROVIDER=deepseek
+TRACEMIND_VERIFIER_MODEL=deepseek-v4-pro
+TRACEMIND_DEEPSEEK_API_KEY=your-deepseek-key
 ```
 
-Other supported configurations:
+Diagnosis supports `google`, `openai` and `deepseek`; set the matching model and
+`TRACEMIND_GOOGLE_API_KEY`, `TRACEMIND_OPENAI_API_KEY` or
+`TRACEMIND_DEEPSEEK_API_KEY`. Review has its own provider/model settings. The
+values above are repository configuration examples, not availability guarantees.
+To explicitly disable review in single-agent mode, set
+`TRACEMIND_VERIFIER_ENABLED=false`; multi-agent mode requires review.
 
-| Provider | Example model | Key variable |
-| --- | --- | --- |
-| `openai` | `gpt-5.6-luna` | `TRACEMIND_OPENAI_API_KEY` |
-| `deepseek` | `deepseek-flash` | `TRACEMIND_DEEPSEEK_API_KEY` |
-
-Never commit a populated `.env`. [.env.example](.env.example) lists settings
-and the local diagnostic budget profile. Restart API and worker after changes;
-existing queued runs retain their saved limits and permissions.
-Why: Keep credentials local and make configuration changes explicit without altering
-admitted work.
+[.env.example](.env.example) documents settings and diagnostic budgets. Keep populated
+environment files local. Restart API and worker after configuration changes;
+admitted runs retain their saved limits and policies.
 
 ### 2. Start the Demo and telemetry service
 
@@ -60,35 +77,15 @@ docker compose -f deploy/compose.telemetry-mcp.yaml up -d --build
 uv run python scripts/check_mcp.py
 ```
 
-The default scenario enables `paymentFailure=100%`. Allow the load generator
-to produce checkout failures before starting a diagnosis. Generated flags live
-under ignored `artifacts/`; the upstream Demo checkout is preserved.
-
-The MCP endpoint defaults to `http://127.0.0.1:8012/mcp`. Its backend URLs belong
-to the independent [telemetry service](services/otel-telemetry-mcp/README.md).
+The default scenario enables `paymentFailure=100%`. Allow the load generator to
+produce checkout failures before investigating. Generated configuration lives
+under ignored `artifacts/`. The telemetry MCP endpoint defaults to
+`http://127.0.0.1:8012/mcp`; its backend configuration belongs to the independent
+[telemetry service](services/otel-telemetry-mcp/README.md).
 
 ### 3. Start API and worker
 
-If online knowledge is enabled and `TRACEMIND_RAG_SERVICE_URL` is set, first
-start the independent retrieval process in its own terminal:
-Why: The configured HTTP path needs a ready owner for its models and stores.
-
-```bash
-uv run --extra rag python scripts/run_rag_service.py
-curl --fail http://127.0.0.1:8011/ready
-```
-
-`TRACEMIND_RAG_SNAPSHOT` must name an existing published snapshot and match
-`TRACEMIND_AGENT_KNOWLEDGE_SNAPSHOT`. The process loads and warms the local
-models before accepting queries. It binds localhost, uses two inference threads,
-and retains its model/store lifetime independently of API and worker restarts.
-Why: Matching published snapshots prevents references from silently pointing to another
-corpus.
-Qdrant remains in `deploy/compose.rag.yaml`. See
-[service operation](docs/rag-online-integration.md#independent-query-service).
-
-In separate terminals with the same `.env`:
-Why: API admission and worker execution need consistent provider and policy settings.
+Run these in separate terminals with the same environment:
 
 ```bash
 uv run uvicorn tracemind.api.app:app --reload
@@ -98,31 +95,53 @@ uv run uvicorn tracemind.api.app:app --reload
 uv run python scripts/run_worker.py
 ```
 
-When online knowledge is enabled, add `--extra rag` to both startup commands.
-The HTTP client also imports the pinned LightRAG keyword prompt, so API and worker
-still need the optional dependencies when using the independent service.
+`GET /health` requires no model key. Interactive API schemas are available at
+`http://127.0.0.1:8000/docs`. Queued runs require the worker to execute.
 
-`GET /health` works without a model key. Interactive API schemas are available
-at `http://127.0.0.1:8000/docs`. Queued runs require the worker to execute.
-
-### 4. Run a diagnosis
-
-From another terminal:
+### 4. Investigate and follow up
 
 ```bash
 uv run python scripts/demo_investigation.py --lookback-minutes 10
 ```
 
-This makes real model calls, submits an investigation, streams progress and
-prints the diagnosis. Keep its investigation ID for follow-up questions:
+This submits an investigation, makes real model calls, streams progress and
+prints a diagnosis. Keep the investigation ID for follow-up questions:
 
 ```bash
 uv run python scripts/demo_investigation.py --investigation-id <id> \
   --purpose explain --message "Why is payment the root cause?"
 ```
 
-Explanation reads retained evidence and knowledge. Use `--purpose investigate`
-for fresh telemetry queries; each round receives its own run and budgets.
+Explanation uses retained evidence and knowledge. `--purpose investigate`
+permits fresh telemetry queries; each round has its own run and budgets.
+
+## Optional capabilities
+
+**Multi-agent investigation:** set `TRACEMIND_AGENT_MODE=multi`. The `graph-v6`
+workflow delegates at most two tasks per batch and performs bounded synthesis
+and verification rounds. Partial task results and original observations survive
+recoverable interruptions. See [multi-agent architecture](docs/multi-agent.md)
+for admission requirements, context limits and recovery boundaries.
+
+**Knowledge retrieval:** install the `rag` extra, prepare and publish a snapshot,
+then configure knowledge permissions and snapshot settings. RAG combines graph,
+vector and BM25 candidates, rank fusion and reranking. With
+`TRACEMIND_RAG_SERVICE_URL` configured, start the independent service first:
+
+```bash
+uv run --extra rag python scripts/run_rag_service.py
+curl --fail http://127.0.0.1:8011/ready
+```
+
+`TRACEMIND_RAG_SNAPSHOT` must match `TRACEMIND_AGENT_KNOWLEDGE_SNAPSHOT`.
+API and worker also need `--extra rag` when knowledge is enabled. Qdrant is
+configured in `deploy/compose.rag.yaml`. See [RAG setup](docs/rag.md) and
+[service operation](docs/rag-online-integration.md#independent-query-service).
+
+**Feedback memory:** single-agent mode can retain scoped, human-confirmed
+incidents and durable guidance. It requires explicit environment/deployment
+scope. Multi-agent mode currently rejects enabled feedback memory. See
+[operations](docs/operations.md) for configuration and retention rules.
 
 ## API overview
 
@@ -132,13 +151,14 @@ for fresh telemetry queries; each round receives its own run and budgets.
 | `POST /api/v1/runs` | Queue a persistent run; returns 202 |
 | `GET /api/v1/runs/{id}` | Read run status |
 | `GET /api/v1/runs/{id}/result` | Read diagnosis and evidence |
-| `POST /api/v1/runs/{id}/cancel` or `/resume` | Cancel or requeue an interrupted run |
+| `POST /api/v1/runs/{id}/cancel` or `/resume` | Cancel or requeue a run |
 | `GET /api/v1/runs/{id}/events` | Subscribe to durable SSE progress |
-| `POST /api/v1/investigations` | Create an incident and its first queued run |
+| `POST /api/v1/investigations` | Create an incident and its first run |
 | `POST /api/v1/investigations/{id}/messages` | Ask a follow-up question |
 
-Creation accepts an incident and a fixed, timezone-aware investigation window.
-Request examples and lifecycle details are in [Running TraceMind](docs/operations.md).
+Creation requires a timezone-aware investigation window. Synchronous responses
+expose `X-TraceMind-Run-ID` and `X-TraceMind-Stop-Reason`. Request examples and
+lifecycle rules are in [operations](docs/operations.md).
 
 ## Tests and evaluation
 
@@ -147,15 +167,12 @@ uv run pytest
 uv run --extra rag pytest --require-rag
 ```
 
-The base installation skips optional RAG modules. The full RAG acceptance command
-requires the extra and fails early if its dependencies are missing.
-Why: A passing base test run must not be mistaken for validation of optional retrieval.
+Base installations skip optional RAG modules. The second command requires all
+RAG dependencies. Scripted tests and replays check workflow behavior, not model
+diagnosis quality. Live evaluations require separate controlled faults, model
+credentials and explicit call budgets.
 
-The replay suite needs no Docker or model credentials. Scripted replay measures
-workflow behavior; live diagnosis quality requires separate controlled cases.
-Why: Fixed answers test execution controls without measuring model judgment.
-Evaluation uses local Langfuse; deployment and dataset setup are described in
-[Evaluation](docs/evaluation.md). For a scored live payment-failure run:
+After configuring local Langfuse, a scored payment-failure experiment can run as:
 
 ```bash
 uv run python scripts/run_experiment.py --task agent --name payment-baseline \
@@ -163,28 +180,30 @@ uv run python scripts/run_experiment.py --task agent --name payment-baseline \
   --env-file .env --env-file deploy/.env.langfuse --judge --max-model-calls 20
 ```
 
-Online completion verification is opt-in with `TRACEMIND_VERIFIER_ENABLED=true`.
-It reviews application-numbered findings, hypotheses, limits and proposed checks,
-including inconclusive answers. One format repair is allowed. Rejection
-returns an inconclusive report retaining review-supported findings and citations;
-review failure fails the run. It never automatically repairs the diagnosis.
-An unknown underlying mechanism does not erase evidence-backed localization.
-See [verification](docs/evaluation.md#online-completion-verification).
-Why: Keep review costs and failure outcomes explicit before enabling the saved
-completion gate.
+The completion verifier reviews numbered assertions against retained evidence.
+In single-agent mode, rejection retains supported partial findings without an
+automatic investigation revision; multi-agent mode can use bounded feedback to
+revise or investigate again. Review failures cannot approve an unreviewed draft.
+Unknown mechanisms do not erase evidence-backed service localization.
+
+Evaluate multi-agent quality with controlled comparisons. Keep failed,
+inconclusive and timeout attempts in evaluation records. See
+[evaluation](docs/evaluation.md) for the evaluation method.
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
-| [Design](DESIGN.md) | Current architecture, contracts and limitations |
-| [Running TraceMind](docs/operations.md) | API, budgets, persistence, progress and memory |
-| [Demo and evaluation](docs/evaluation.md) | Fault scenarios, replay, live and memory evaluation |
-| [RAG setup](docs/rag.md) | Models, ingestion, snapshots and retrieval evaluation |
-| [Online RAG integration](docs/rag-online-integration.md) | Module ownership, callback and lifetime contracts |
-| [Telemetry MCP service](services/otel-telemetry-mcp/README.md) | Independent deployment and tool protocol |
+| [Design](DESIGN.md) | Architecture, contracts and limitations |
+| [Operations](docs/operations.md) | API, budgets, persistence, progress and memory |
+| [Multi-agent diagnosis](docs/multi-agent.md) | Coordination, budgets and recovery |
+| [Demo and evaluation](docs/evaluation.md) | Fault scenarios, live tests and scoring |
+| [RAG setup](docs/rag.md) | Ingestion, snapshots and retrieval evaluation |
+| [Online RAG integration](docs/rag-online-integration.md) | Service and lifetime contracts |
+| [Telemetry MCP service](services/otel-telemetry-mcp/README.md) | Deployment and protocol |
 | [Changelog](CHANGELOG.md) | Feature changes |
 
-TraceMind targets a local, single-worker deployment. Shared-service authentication,
-distributed workers, automatic alert ingestion, mutation tools, multi-agent
-orchestration and reinforcement learning remain outside the current baseline.
+The Python distribution and import package are both `tracemind`; application
+settings use `TRACEMIND_`. Existing local deployments must update their environment
+keys, import paths and response-header consumers. Renamed Compose projects and
+named volumes do not automatically migrate existing local service data.

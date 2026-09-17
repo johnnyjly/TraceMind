@@ -6,15 +6,16 @@ from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langchain_openai import ChatOpenAI
-from langchain_openai.chat_models.base import BaseChatOpenAI
-from openai import APIError
+from tracemind.agent.runtime.deepseek import DeepSeekChat
+from openai import APIError, LengthFinishReasonError
 
 from tracemind.agent.errors import ModelConfigurationError
 from tracemind.config import Settings
 
 
 MODEL_SERVICE_ERRORS = (
-    ModelError, APIError, ChatGoogleGenerativeAIError, httpx.HTTPError,
+    ModelError, APIError, LengthFinishReasonError,
+    ChatGoogleGenerativeAIError, httpx.HTTPError,
 )
 
 
@@ -49,12 +50,15 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
                 "TRACEMIND_DEEPSEEK_API_KEY is required "
                 "when LLM provider is deepseek"
             )
-        return BaseChatOpenAI(
+        return DeepSeekChat(
             model=settings.llm_model,
             api_key=settings.deepseek_api_key,
             base_url="https://api.deepseek.com",
             use_responses_api=False,
-            extra_body={"thinking": {"type": "disabled"}},
+            extra_body={"thinking": {"type": (
+                "enabled" if settings.deepseek_thinking else "disabled")}},
+            reasoning_effort=(settings.deepseek_reasoning_effort
+                              if settings.deepseek_thinking else None),
             profile={"tool_calling": True, "structured_output": False},
             max_retries=0,
         )

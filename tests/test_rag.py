@@ -336,3 +336,43 @@ def test_retrieval_fuses_bm25_reranks_and_rejects_unregistered_chunks(
             await runtime.close()
 
     asyncio.run(exercise())
+
+
+def test_shutdown_flushes_pending_vectors_before_stopping_embeddings(tmp_path):
+    from types import SimpleNamespace
+    from tracemind.rag.engine import RagRuntime
+    from tracemind.rag.config import RagSettings
+
+    events = []
+
+    class Queue:
+        def __init__(self, name):
+            self.name = name
+            self.stopped = False
+
+        async def shutdown(self, **kwargs):
+            self.stopped = True
+            events.append(self.name)
+
+    llm, embedding = Queue("llm_stopped"), Queue("embedding_stopped")
+
+    class Store:
+        async def finalize(self):
+            assert llm.stopped
+            assert not embedding.stopped
+            events.append("vectors_flushed")
+
+    async def finalize_storages():
+        assert embedding.stopped
+        events.append("stores_closed")
+
+    runtime = RagRuntime(RagSettings(_env_file=None, directory=tmp_path))
+    runtime.rag = SimpleNamespace(
+        role_llm_funcs={"extract": llm},
+        embedding_func=SimpleNamespace(func=embedding),
+        vector_storage="AsyncQdrantVectorDBStorage", chunks_vdb=Store(),
+        entities_vdb=Store(), relationships_vdb=Store(),
+        finalize_storages=finalize_storages)
+    asyncio.run(runtime.close())
+    assert events == ["llm_stopped", *["vectors_flushed"] * 3,
+                      "embedding_stopped", "stores_closed"]

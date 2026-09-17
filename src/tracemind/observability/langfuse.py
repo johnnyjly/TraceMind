@@ -10,13 +10,13 @@ from tracemind.config import Settings
 
 
 @lru_cache(maxsize=4)
-def _client(public_key, secret_key, base_url, environment):
+def _client(public_key, secret_key, base_url, environment, timeout):
     return Langfuse(
         public_key=public_key,
         secret_key=secret_key,
         base_url=base_url,
         environment=environment,
-        timeout=5,
+        timeout=timeout,
         additional_headers={"x-langfuse-ingestion-version": "4"},
     )
 
@@ -38,13 +38,21 @@ def client_for(settings: Settings, *, required=False):
         settings.langfuse_secret_key.get_secret_value(),
         str(settings.langfuse_base_url).rstrip("/"),
         settings.environment,
+        settings.langfuse_timeout_seconds,
     )
+
+
+@lru_cache(maxsize=4)
+def _callback(public_key):
+    # Nested graph/tools/models must inherit the same handler identity so
+    # LangChain deduplicates explicit and inherited callbacks per call.
+    return CallbackHandler(public_key=public_key)
 
 
 def callbacks_for(settings):
     if client_for(settings) is None:
         return []
-    return [CallbackHandler(public_key=settings.langfuse_public_key)]
+    return [_callback(settings.langfuse_public_key)]
 
 
 def observation(client, name, *, as_type="span", **kwargs):
