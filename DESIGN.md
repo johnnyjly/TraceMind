@@ -60,7 +60,7 @@ Why: Preserve independent deployment and keep diagnosis attributable to TraceMin
 
 ## Collaborative multi-agent mode
 
-The `graph-v6` LangGraph workflow dynamically assigns at most two concurrent
+The `graph-v7` LangGraph workflow dynamically assigns at most two concurrent
 telemetry/knowledge tasks. Atomic reports retain E/K provenance, support,
 counterevidence and gaps. Coordinator synthesis and item-addressed verification
 can trigger at most two bounded feedback rounds. The shared harness owns budgets,

@@ -268,6 +268,40 @@ def valid_review(observed, **updates):
     return result
 
 
+def incomplete_objective():
+    return [
+        {"criterion_id": key, "met": False, "item_ids": [],
+         "missing_requirements": ["Not established by this routing fixture"],
+         "rationale": "Claim support is independent of task completion"}
+        for key in ("owner", "operation", "mechanism", "symptom_link")
+    ]
+
+
+def test_judge_false_completion_and_acceptance_use_objective(monkeypatch, sdk):
+    from test_dynamic_tools import state
+    from test_handoffs import unmet_completion
+
+    observed = saved()
+    observed.run_state = state(())
+    model = FakeModel(response=json.dumps(valid_review(
+        observed, completion=unmet_completion(),
+    )))
+    monkeypatch.setattr("tracemind.evaluation.judge.create_review_model",
+                        lambda settings: model)
+    evaluate = diagnosis_judge(
+        Settings(_env_file=None), sdk[0], ModelCallBudget(1),
+    )
+    evaluations = asyncio.run(evaluate(output=observed))
+    result = scores(evaluations)
+    assert result["judge_completed"] and result["evidence_support"] == 1
+    assert result["task_completed"] is False
+    assert result["false_completion"] is True
+    evaluations.append(Evaluation(name="diagnosis_status", value="complete"))
+    item = SimpleNamespace(evaluations=evaluations, item={"input": {}})
+    acceptance = acceptance_evaluator(1, {}, judge=True)(item_results=[item])
+    assert scores(acceptance)["acceptance"] is False
+
+
 def test_judge_validates_references_with_one_bounded_format_repair(
     monkeypatch,
     sdk,
@@ -770,6 +804,7 @@ def test_process_claim_uses_execution_events_without_claiming_incident_support(
     body["assessments"][0].update(
         kind="process", supporting_event_sequences=[sequence]
     )
+    body["completion"] = incomplete_objective()
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
         "tracemind.evaluation.judge.create_review_model",
@@ -1026,6 +1061,7 @@ def test_judge_preserves_items_without_runtime_review(
                 **partial.model_dump(),
             )
             body = valid_review(observed)
+    body["completion"] = incomplete_objective()
     model = FakeModel(response=json.dumps(body))
     monkeypatch.setattr(
         "tracemind.evaluation.judge.create_review_model",

@@ -250,7 +250,7 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v6-rca3"
+                "multi-agent-graph-v7-contracts"
                 if settings.agent_mode == "multi"
                 else "single-agent-v12"
             ),
@@ -369,7 +369,7 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v6-rca3"
+                "multi-agent-graph-v7-contracts"
                 if settings.agent_mode == "multi"
                 else "single-agent-v12"
             ),

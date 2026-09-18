@@ -16,12 +16,13 @@ from tracemind.agent.runtime.middleware import (
     HarnessMiddleware,
     TaskBudgetExhausted,
     TaskReportInvalid,
+    TaskContextExceeded,
 )
 from tracemind.agent.runtime.runner import INVESTIGATION_PROMPT, SYSTEM_PROMPT
 from tracemind.agent.runtime.knowledge import knowledge_context
 from tracemind.agent.workflow.validation import resolve_proposal
+from tracemind.agent.workflow.handoffs import freeze_task_input, role_tools
 from tracemind.agent.workflow.context import (
-    collaboration_context,
     json_text,
     _evidence_preview,
     _prioritized_evidence,
@@ -36,7 +37,6 @@ from tracemind.models.collaboration import (
     TaskRecord,
 )
 from tracemind.models.result import DiagnosisDraft, DiagnosisProposal
-from tracemind.models.run import TOOL_NAMES
 from tracemind.observability.langfuse import observation
 
 
@@ -61,6 +61,10 @@ Choose investigate for one or two independent bounded tasks when a missing
 observation could change the diagnosis. Telemetry checks incident facts;
 knowledge checks documented contracts and mechanisms when available. Use
 hypothesis_ids from your board; an initial discovery task may have none.
+Specify acceptance_criteria for each task, context_refs for the retained E/K
+records it needs, and requested_tools only to narrow the role's grants.
+An empty requested_tools list uses the application's role grants. You cannot
+expand permissions. Workers get frozen task packets, not your conversation.
 Knowledge questions should use observed operations/errors when available.
 When a report identifies a slow/failing owner but leaves competing mechanisms,
 prefer a complementary owner-scoped investigation to another broad trace
@@ -110,8 +114,11 @@ different assertions; do not duplicate references in one list. Explicitly
 label hypotheses. Record gaps in missing_observations; findings may be empty
 when nothing is supported. Do not return a diagnosis status. Compare
 successful and failing operations where relevant. Do not conclude a fleet-wide
-outage from sampled failures. Tool results from other tasks are available in
-the shared evidence catalogue; reuse them before repeating queries.
+outage from sampled failures. Return the exact C IDs you answered in
+answered_criteria. Use answered only when all criteria are answered with
+findings; otherwise use partial or blocked with a reason_code and concrete
+missing_observations. Tool results from other tasks are available by explicit
+read from the shared evidence catalogue; reuse them before repeating queries.
 """
 )
 
@@ -131,8 +138,39 @@ class GraphState(TypedDict, total=False):
     task_id: str
 
 
-def validate_report(report, state, harness):
+def validate_report(report, state, harness, record=None):
     """Check provenance per finding without conflating two assertions."""
+    if record is not None:
+        answered = report.answered_criteria
+        criteria = set(record.inputs.criteria)
+        if (len(answered) != len(set(answered))
+                or not set(answered) <= criteria):
+            raise DiagnosisValidationError(
+                "Use each assigned criterion ID at most once.",
+                code="task_criteria",
+            )
+        if report.outcome == "answered":
+            if set(answered) != criteria or not report.findings:
+                raise DiagnosisValidationError(
+                    "Answered requires findings and every assigned criterion. "
+                    "Otherwise return partial or blocked with concrete gaps.",
+                    code="task_incomplete",
+                )
+            if report.reason_code is not None:
+                raise DiagnosisValidationError(
+                    "Answered cannot have a blocking reason.",
+                    code="task_outcome",
+                )
+        elif not report.missing_observations or report.reason_code is None:
+            raise DiagnosisValidationError(
+                "Partial or blocked needs a reason and missing observations.",
+                code="task_outcome",
+            )
+        if report.outcome == "blocked" and answered:
+            raise DiagnosisValidationError(
+                "Blocked cannot mark criteria answered; use partial.",
+                code="task_outcome",
+            )
     for finding in report.findings:
         for refs, prefix in (
             (finding.evidence_refs, "E"),
@@ -197,6 +235,10 @@ def coordinator_context(state, evidence):
             "question": r.task.question,
             "role": r.task.role,
             "status": r.status,
+            "acceptance_criteria": r.inputs.criteria if r.inputs else {},
+            "input_refs": list(r.inputs.context_refs) if r.inputs else [],
+            "input_sha256": r.inputs.sha256 if r.inputs else None,
+            "report_sha256": r.report_sha256,
             "report": r.report.model_dump(),
         }
         for r in records
@@ -248,6 +290,12 @@ def coordinator_context(state, evidence):
         "review_feedback": [
             c.model_dump(mode="json") for c in state.collaboration.feedback
         ],
+        "completion_feedback": [
+            c.model_dump(mode="json")
+            for c in (state.collaboration.reviews[-1].review.completion or [])
+            if not c.met
+        ] if state.collaboration.reviews
+        and state.collaboration.reviews[-1].review else [],
         "hypotheses": [h.model_dump() for h in state.collaboration.hypotheses],
         "candidate": (
             state.collaboration.draft.model_dump(mode="json")
@@ -310,7 +358,7 @@ class MultiAgentRunner:
             raise ValueError("multi-agent does not support memory writes")
         if state.collaboration is None:
             state.collaboration = CollaborationState()
-            state.prompt_version = "multi-agent-graph-v6-rca3"
+            state.prompt_version = "multi-agent-graph-v7-contracts"
             await harness.checkpoint()
         workflow = state.collaboration
         if workflow.phase == "completed":
@@ -369,6 +417,9 @@ class MultiAgentRunner:
                 + 2 * state.limits.diagnosis_repairs
                 + harness.verification_calls
                 and batch_tool_budget() >= tasks
+                and (harness.investigation_token_pool is None
+                     or harness.investigation_token_pool >=
+                     tasks * state.limits.context_tokens)
                 and harness.finalization_reason is None
             )
 
@@ -381,6 +432,7 @@ class MultiAgentRunner:
                 knowledge_available=knowledge_available,
                 can_investigate=can_investigate(upcoming_call=1),
                 batch_tool_budget=batch_tool_budget(),
+                batch_token_budget=harness.investigation_token_pool,
                 max_parallel_tasks=(2 if can_investigate(2, 1)
                                     else int(can_investigate(1, 1))),
                 task_history=[
@@ -434,6 +486,27 @@ class MultiAgentRunner:
                             code="investigation_closed",
                         )
                     for task in value.tasks:
+                        refs = task.context_refs
+                        if (len(refs) != len(set(refs))
+                                or any(r not in state.reference_map
+                                       or not r.startswith(("E", "K"))
+                                       for r in refs)):
+                            raise DiagnosisValidationError(
+                                "Context needs unique retained E/K handles.",
+                                code="task_context",
+                            )
+                        grants = {t.name for t in role_tools(tools, task.role)}
+                        if not set(task.requested_tools) <= grants:
+                            raise DiagnosisValidationError(
+                                "Requested tools exceed this role's grants.",
+                                code="task_permissions",
+                            )
+                        if any(not c.strip()
+                               for c in task.acceptance_criteria):
+                            raise DiagnosisValidationError(
+                                "Acceptance criteria cannot be blank.",
+                                code="task_criteria",
+                            )
                         if not set(task.hypothesis_ids) <= set(ids):
                             raise DiagnosisValidationError(
                                 "Use board hypothesis IDs.",
@@ -448,12 +521,9 @@ class MultiAgentRunner:
                                 code="unavailable_role",
                             )
                 else:
-                    remote_telemetry = available & {
-                        "query_metrics",
-                        "discover_metrics",
-                        "search_traces",
-                        "get_trace_detail",
-                        "search_logs",
+                    remote_telemetry = {
+                        t.name for t in role_tools(tools, "telemetry")
+                        if t.name != "read_evidence"
                     }
                     if (
                         can_investigate()
@@ -511,6 +581,9 @@ class MultiAgentRunner:
                 pending = sum(t is None for t in previous_tasks)
                 pool = batch_tool_budget()
                 share, extra = divmod(pool, pending) if pending else (0, 0)
+                token_pool = harness.investigation_token_pool
+                token_share = (token_pool // pending
+                               if token_pool is not None and pending else 0)
                 ids = []
                 for number, (task, previous) in enumerate(
                     zip(decision.tasks, previous_tasks)
@@ -526,8 +599,18 @@ class MultiAgentRunner:
                         task=task,
                         input_revision=revision,
                         tool_limit=allowance,
+                        token_limit=(token_share if previous is None else 0)
+                        if token_pool is not None else None,
                         status="completed" if previous else "pending",
                         report=previous.report if previous else None,
+                        report_sha256=(previous.report_sha256
+                                       if previous else None),
+                        inputs=freeze_task_input(
+                            state, key, task, harness.evidence(),
+                            [t.name for t in role_tools(tools, task.role)
+                             if not task.requested_tools
+                             or t.name in task.requested_tools],
+                        ),
                     )
                     ids.append(key)
                 workflow.active_tasks = ids
@@ -559,16 +642,15 @@ class MultiAgentRunner:
             record = workflow.tasks[data["task_id"]]
             if record.status in {"completed", "incomplete", "failed"}:
                 return {
-                    "completed": {record.id: record.report.model_dump_json()}
+                    "completed": {record.id: record.report_sha256}
                 }
             record.status = "running"
-            await harness.checkpoint()
-            names = (
-                set(TOOL_NAMES)
-                if record.task.role == "telemetry"
-                else {"search_knowledge", "read_knowledge", "read_evidence"}
-            )
+            names = set(record.inputs.allowed_tools)
             exposed = [t for t in tools if t.name in names]
+            if (sha256(record.inputs.prompt.encode()).hexdigest()
+                    != record.inputs.sha256
+                    or {t.name for t in exposed} != names):
+                raise ValueError("task input or tool contract changed")
 
             def reserve():
                 return (
@@ -587,34 +669,25 @@ class MultiAgentRunner:
                     record.id,
                     record.task.role,
                     INVESTIGATOR_PROMPT,
-                    prompt
-                    + "\nAssigned task:\n"
-                    + record.task.model_dump_json()
-                    + "\nAssigned hypotheses:\n"
-                    + json_text(
-                        [
-                            h.model_dump()
-                            for h in workflow.hypotheses
-                            if h.id in record.task.hypothesis_ids
-                        ]
-                    )
-                    + "\nRetained context:\n"
-                    + collaboration_context(state, harness.evidence())
-                    + "\nKnowledge:\n"
-                    + knowledge_context(state),
+                    record.inputs.prompt,
                     InvestigationReport,
                     exposed,
                     reserved_calls=reserve,
                     validator=lambda value: validate_report(
-                        value, state, harness
+                        value, state, harness, record
                     ),
                 )
-            except (TaskBudgetExhausted, TaskReportInvalid) as exc:
+            except (TaskBudgetExhausted, TaskReportInvalid,
+                    TaskContextExceeded) as exc:
                 outcome = "incomplete"
                 report = InvestigationReport(
                     findings=[],
+                    outcome="blocked",
+                    reason_code=("context_limit" if isinstance(
+                        exc, TaskContextExceeded) else "invalid_report"
+                        if isinstance(exc, TaskReportInvalid) else "budget"),
                     missing_observations=[
-                        "Task output allocation or schema repairs "
+                        "Task context, output allocation or schema repairs "
                         "exhausted before a valid "
                         "report. Inspect retained original evidence; no "
                         "specialist finding was accepted."
@@ -627,14 +700,20 @@ class MultiAgentRunner:
                         "reason": (
                             "model_budget_reserved"
                             if isinstance(exc, TaskBudgetExhausted)
+                            else "context_limit" if isinstance(
+                                exc, TaskContextExceeded)
                             else "invalid_specialist_report"
                         ),
                     },
                 )
             except ModelCallFailed as exc:
-                outcome = "failed"
+                outcome = ("incomplete" if exc.failure.category
+                           == "token_budget" else "failed")
                 report = InvestigationReport(
                     findings=[],
+                    outcome="blocked",
+                    reason_code=("budget" if exc.failure.category
+                                 == "token_budget" else "model_failure"),
                     missing_observations=[
                         "Specialist model failed after bounded retries: "
                         + exc.failure.category
@@ -650,9 +729,13 @@ class MultiAgentRunner:
                 )
             # No await between result publication and task status update.
             record.report = report
-            record.status = outcome
+            record.status = ("incomplete" if outcome == "completed"
+                             and report.outcome != "answered" else outcome)
+            record.report_sha256 = sha256(
+                report.model_dump_json().encode()
+            ).hexdigest()
             await harness.checkpoint()
-            return {"completed": {record.id: report.model_dump_json()}}
+            return {"completed": {record.id: record.report_sha256}}
 
         async def join(_):
             if workflow.phase != "investigate":
@@ -684,7 +767,7 @@ class MultiAgentRunner:
             ):
                 gaps = [c for c in result.claims if c.kind == "uncertainty"]
             can_continue = (
-                gaps
+                (gaps or not result.task_completed)
                 and workflow.round < 2
                 and workflow.decision < 6
                 and state.limits.model_calls - state.model_calls
@@ -722,7 +805,7 @@ class MultiAgentRunner:
         )
         app = graph.compile(checkpointer=self.checkpointer)
         config = {
-            "configurable": {"thread_id": f"{state.id}:collaboration-v6"},
+            "configurable": {"thread_id": f"{state.id}:collaboration-v7"},
             "max_concurrency": 2,
             "recursion_limit": 30,
         }

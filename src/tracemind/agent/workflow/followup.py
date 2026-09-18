@@ -68,7 +68,7 @@ def plan_follow_up(
         parent_run_id=parent.state.id,
         purpose=purpose,
         prompt_version=(
-            "multi-agent-graph-v6-rca3"
+            "multi-agent-graph-v7-contracts"
             if (
                 parent.state.agent_mode == "multi"
                 and purpose is RunPurpose.INVESTIGATE

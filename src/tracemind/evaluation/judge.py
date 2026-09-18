@@ -45,6 +45,12 @@ def diagnosis_judge(settings, client, budget):
                 metric("judge_completed", False),
             ]
         subject = ReviewSubject(
+            incident=(observed.run_state.incident
+                      if observed.run_state else None),
+            purpose=(observed.run_state.purpose.value
+                     if observed.run_state else None),
+            user_message=(observed.run_state.user_message
+                          if observed.run_state else None),
             diagnosis=observed.diagnosis,
             evidence=observed.evidence,
             items=(
@@ -171,6 +177,9 @@ def diagnosis_judge(settings, client, budget):
             "judge_provider": settings.eval_judge_provider,
             "judge_model": settings.eval_judge_model,
             "claims": [c.model_dump(mode="json") for c in review.claims],
+            "completion": [c.model_dump(mode="json")
+                           for c in review.completion]
+            if review.completion is not None else None,
             "reference_version": (
                 "demo-rca-v2"
                 if review.reference_assessment
@@ -197,6 +206,8 @@ def diagnosis_judge(settings, client, budget):
             and observed.run_state.verification_policy is not None
         ):
             scores.extend(finding_scores(observed.diagnosis, review))
+        if review.completion is not None:
+            scores.append(metric("task_completed", review.task_completed))
         scores.append(
             metric(
                 "false_completion",
@@ -205,6 +216,8 @@ def diagnosis_judge(settings, client, budget):
                     verdict != "supported"
                     or not review.uncertainty_appropriate
                     or review.root_cause_correctness is False
+                    or (review.completion is not None
+                        and not review.task_completed)
                 ),
                 **details,
             )

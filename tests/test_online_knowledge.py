@@ -564,13 +564,15 @@ def test_planning_and_keyword_calls_share_usage_budget_and_trace():
             retrieval,
             knowledge_completion=completion,
             knowledge_model_name="fixture-auxiliary",
-            limits=RunLimits(model_calls=5),
+            limits=RunLimits(model_calls=5, total_tokens=1000000),
         ).diagnose_with_evidence(INCIDENT, start=START, end=END)
     )
     assert auxiliary_calls == [False, True]
     assert result.state.model_calls == 4
     assert result.state.usage.reported_model_calls == 4
     assert result.state.usage.reported_total_tokens == 50
+    assert result.state.tokens.used == 50
+    assert result.state.tokens.reserved == result.state.tokens.unknown == 0
     assert result.state.usage.unreported_model_calls == 0
     assert result.diagnosis.knowledge_refs == [result.state.knowledge[0].id]
     assert result.evidence == []

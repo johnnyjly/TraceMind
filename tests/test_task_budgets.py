@@ -205,11 +205,10 @@ def test_graph_keeps_followup_tools_after_initial_reports(monkeypatch):
                 ]})
             return submit(DRAFT)
         if not any(isinstance(m, ToolMessage) for m in messages):
-            task = json.loads(messages[1].text.split("Assigned task:\n")[1]
-                              .split("\nAssigned hypotheses:")[0])
-            count = 1 if task["question"] == "mechanism" else 6
+            task = json.loads(messages[1].text)
+            count = 1 if task["goal"] == "mechanism" else 6
             calls = [tool_call(arguments={
-                "expression": f"{task['question']}-{i}",
+                "expression": f"{task['goal']}-{i}",
             }).tool_calls[0] for i in range(count)]
             return AIMessage(content="", tool_calls=calls)
         return tool_call("InvestigationReport", REPORT)

@@ -151,7 +151,7 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
         if diagnosis and diagnosis.status is DiagnosisStatus.COMPLETE:
             scores.append(metric("runtime_verification", bool(
                 record and record.status == "completed" and record.review
-                and record.review.accepted)))
+                and record.review.accepted and record.review.task_completed)))
         if record is not None:
             scores.extend([
                 metric("verification_status", record.status),
@@ -310,6 +310,9 @@ def acceptance_evaluator(
                 required.setdefault("tool_budget", 1.0)
             if "runtime_verification" in scores:
                 required.setdefault("runtime_verification", 1.0)
+            if (scores.get("diagnosis_status") == "complete"
+                    and "task_completed" in scores):
+                required.setdefault("task_completed", 1.0)
             present = all(name in scores for name in required)
             covered += present
             accepted = (

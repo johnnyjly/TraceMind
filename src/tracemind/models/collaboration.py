@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from tracemind.models.diagnosis import Diagnosis
+from tracemind.models.budget import TokenLedger
 from tracemind.models.verification import VerificationRecord, Claim
 
 
@@ -17,6 +18,21 @@ class InvestigationTask(BaseModel):
     distinguishing_observations: list[str] = Field(
         default_factory=list, max_length=3
     )
+    acceptance_criteria: list[str] = Field(default_factory=list, max_length=4)
+    context_refs: list[str] = Field(default_factory=list, max_length=16)
+    requested_tools: list[str] = Field(default_factory=list, max_length=12)
+
+
+class TaskInput(BaseModel):
+    """Application-frozen handoff, never a parent's conversation history."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    task_id: str
+    criteria: dict[str, str]
+    allowed_tools: tuple[str, ...]
+    context_refs: tuple[str, ...]
+    prompt: str
+    sha256: str
 
 
 class Finding(BaseModel):
@@ -49,6 +65,13 @@ class InvestigationReport(BaseModel):
 
     findings: list[Finding] = Field(max_length=6)
     missing_observations: list[str] = Field(max_length=5)
+    outcome: Literal["answered", "partial", "blocked"] = "answered"
+    answered_criteria: list[str] = Field(default_factory=list, max_length=4)
+    reason_code: Literal[
+        "missing_data", "permission", "budget", "context_limit",
+        "tool_failure",
+        "model_failure", "invalid_report",
+    ] | None = None
 
 
 class TaskRecord(BaseModel):
@@ -60,12 +83,16 @@ class TaskRecord(BaseModel):
     ] = "pending"
     report: InvestigationReport | None = None
     input_revision: str = ""
+    inputs: TaskInput | None = None
+    report_sha256: str | None = None
     tool_limit: int = Field(ge=0)
     tool_calls: int = Field(default=0, ge=0)
+    token_limit: int | None = Field(default=None, ge=0)
+    tokens: TokenLedger = Field(default_factory=TokenLedger)
 
 
 class CollaborationState(BaseModel):
-    version: Literal["graph-v6"] = "graph-v6"
+    version: Literal["graph-v7"] = "graph-v7"
     phase: Literal["coordinate", "investigate", "review", "completed"] = (
         "coordinate"
     )

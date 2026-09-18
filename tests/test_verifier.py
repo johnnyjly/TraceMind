@@ -95,6 +95,19 @@ class ReviewModel(BaseChatModel):
         invalid = self.mode == "invalid" or (
             self.mode == "repair" and self.calls == 1
         )
+        if packet.get("objective") and "completion" not in body:
+            # This fixture is a routing oracle, not a semantic judge. Tests
+            # of incomplete diagnoses pass explicit unmet criteria instead.
+            diagnostic = [a["item_id"] for a in body.get("assessments", [])
+                          if a["kind"] == "diagnostic"
+                          and a["verdict"] == "supported"]
+            body["completion"] = [
+                {"criterion_id": key, "met": bool(diagnostic),
+                 "item_ids": diagnostic,
+                 "missing_requirements": [] if diagnostic else ["Evidence"],
+                 "rationale": "Scripted completion assessment"}
+                for key in packet["objective"]["criteria"]
+            ]
         message = AIMessage(
             content="invalid json" if invalid else json.dumps(body),
             response_metadata=metadata,

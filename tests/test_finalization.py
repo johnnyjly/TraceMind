@@ -110,6 +110,59 @@ def test_finalization_repairs_fake_citation_without_tools(tmp_path):
     assert model.calls == 3
 
 
+@pytest.mark.parametrize("unknown_usage", [False, True])
+def test_token_watermark_leaves_single_agent_a_final_response(
+    tmp_path, unknown_usage,
+):
+    def respond(messages, calls):
+        if calls == 1:
+            assert "query_metrics" in model.bindings[-1]
+            return tool_call().model_copy(update={"usage_metadata": (
+                None if unknown_usage else {
+                    "input_tokens": 17500, "output_tokens": 500,
+                    "total_tokens": 18000,
+                }
+            )})
+        assert model.bindings[-1] == ["DiagnosisProposal"]
+        assert "Investigation is closed (token_budget)" in messages[-1].text
+        return tool_call("DiagnosisProposal", {
+            "status": "complete", "root_cause": "Payment Charge failed",
+            "confidence": .8, "evidence_ids": [citation(messages)],
+        })
+
+    model, telemetry = ScriptedModel(respond=respond), Telemetry()
+    result = run_service(make_service(
+        model, telemetry, tmp_path, limits=RunLimits(total_tokens=100000),
+    ))
+    assert result.state.status is RunStatus.SUCCEEDED
+    assert model.calls == 2
+    assert len(telemetry.calls) == 1
+    assert result.state.tokens.committed <= 100000
+    assert bool(result.state.tokens.unknown) is unknown_usage
+
+
+def test_one_token_above_synthesis_reserve_cannot_fund_exploration(tmp_path):
+    def respond(messages, calls):
+        assert model.bindings[-1] == ["DiagnosisProposal"]
+        return tool_call("DiagnosisProposal", {
+            "status": "inconclusive", "confidence": 0,
+            "findings": [], "hypotheses": [], "proposed_checks": [],
+            "limitations": [{"text": "Cause not established within budget"}],
+        })
+
+    model, telemetry = ScriptedModel(respond=respond), Telemetry()
+    result = run_service(make_service(
+        model, telemetry, tmp_path,
+        limits=RunLimits(total_tokens=32769, diagnosis_repairs=0),
+    ))
+    assert result.state.status is RunStatus.INCONCLUSIVE
+    assert model.calls == 1
+    assert telemetry.calls == []
+    assert any(e.kind == "policy.finalizing"
+               and e.data["reason"] == "token_budget"
+               for e in result.state.events)
+
+
 def test_finalization_cannot_exceed_remaining_model_attempts(tmp_path):
     model = ScriptedModel(respond=lambda messages, calls: tool_call())
     telemetry = Telemetry()

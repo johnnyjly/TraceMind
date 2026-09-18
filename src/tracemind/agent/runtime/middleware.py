@@ -23,7 +23,9 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from tracemind.agent.workflow.context import json_text, select_context
+from tracemind.agent.workflow.context import (
+    estimate_input, json_text, select_context,
+)
 from tracemind.agent.workflow.validation import resolve_proposal
 from tracemind.agent.workflow.references import (
     normalize_reference_handles, register_references,
@@ -42,6 +44,10 @@ class TaskBudgetExhausted(Exception):
 
 class TaskReportInvalid(Exception):
     """A specialist exhausted repairs; its siblings and evidence survive."""
+
+
+class TaskContextExceeded(Exception):
+    """Only this specialist's request cannot fit; other tasks may finish."""
 
 
 class HarnessMiddleware(AgentMiddleware):
@@ -139,6 +145,12 @@ class HarnessMiddleware(AgentMiddleware):
             def prepare():
                 """Rebind before each attempt, including transport retries."""
                 nonlocal prepared, request
+                if (self._output_name in {"DiagnosisProposal",
+                                          "CoordinatorDecision"}
+                        and self.harness.tokens_remaining is not None
+                        and self.harness.investigation_token_pool
+                        < state.limits.context_tokens):
+                    self.harness.begin_finalization(StopReason.TOKEN_BUDGET)
                 if state.limits.model_calls - state.model_calls <= (
                     self.harness.verification_calls + self._reserved_calls
                 ):
@@ -183,6 +195,13 @@ class HarnessMiddleware(AgentMiddleware):
                     invoke,
                     model_name=str(model_name),
                     before_attempt=prepare,
+                    estimated_tokens=lambda: (
+                        estimate_input(prepared) + state.limits.output_tokens
+                    ),
+                    protected_tokens=(
+                        (lambda: self.harness.verification_token_reserve)
+                        if self._output_name != "InvestigationReport" else 0
+                    ),
                     purpose=self._role,
                     required=self._output_name != "InvestigationReport",
                     reserved_calls=(
@@ -584,6 +603,15 @@ class HarnessMiddleware(AgentMiddleware):
             "observations and state gaps."
         )
         task_remaining = self.harness.task_tools_remaining()
+        if self.harness.tokens_remaining is not None:
+            budget += (f"\nRun token admission balance: "
+                       f"{self.harness.tokens_remaining}. Input estimates "
+                       "plus maximum output are reserved before each attempt; "
+                       "unreported usage remains charged.")
+            record = self.harness.current_investigation_task()
+            if record is not None and record.token_limit is not None:
+                budget += (f" Task token balance: "
+                           f"{record.token_limit - record.tokens.committed}.")
         if task_remaining is not None:
             budget += (
                 f"\nThis task has {task_remaining} tool attempts remaining. "
@@ -648,6 +676,8 @@ class HarnessMiddleware(AgentMiddleware):
             },
         )
         if not selection.fits:
+            if self._output_name == "InvestigationReport":
+                raise TaskContextExceeded
             self.harness.stop(StopReason.CONTEXT_LIMIT)
         output_key = (
             "max_output_tokens"
@@ -688,12 +718,12 @@ class HarnessMiddleware(AgentMiddleware):
             except TaskToolBudgetExhausted as exc:
                 own_task = exc.task_id == self.harness._task_id.get()
                 if own_task:
-                    self._local_finalization = StopReason.TOOL_BUDGET
+                    self._local_finalization = exc.reason
                 self.harness.emit(
                     "tool.skipped",
                     parent_span_id=self.harness.state.id,
                     data={"tool": request.tool_call["name"],
-                          "reason": "task_tool_budget",
+                          "reason": exc.reason.value,
                           "executing_task_id": exc.task_id},
                 )
                 message = (

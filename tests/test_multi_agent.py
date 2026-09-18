@@ -54,6 +54,7 @@ TASK = {
     "distinguishing_observations": ["Linked payment errors or successes"],
 }
 REPORT = {
+    "answered_criteria": ["C1"],
     "findings": [
         {
             "text": "Payment Charge failed",
@@ -567,6 +568,7 @@ def test_knowledge_agent_uses_pinned_snapshot_and_separate_citations(
                         }
                     ],
                     "missing_observations": [],
+                    "answered_criteria": ["C1"],
                 },
             )
         if coordinator_packet(
@@ -799,6 +801,7 @@ def test_invalid_specialist_at_reserve_preserves_synthesis(monkeypatch):
                         }
                     ],
                     "missing_observations": [],
+                    "answered_criteria": ["C1"],
                 },
             )
         if coordinator_packet(
@@ -931,10 +934,8 @@ def test_two_parallel_specialists_preserve_success_after_sibling_timeout(
             )
         if "You are an investigator" in messages[0].text:
             question = json.loads(
-                messages[1]
-                .text.split("Assigned task:\n")[1]
-                .split("\nAssigned hypotheses:")[0]
-            )["question"]
+                messages[1].text
+            )["goal"]
             if not any(isinstance(m, ToolMessage) for m in messages):
                 barrier = barrier or asyncio.Event()
                 entered.add(question)
@@ -1456,7 +1457,7 @@ def test_later_review_outage_reuses_only_current_prior_support(
                 "findings": [{
                     "text": "Later counterevidence", "kind": "observation",
                     "evidence_refs": ["E2"],
-                }], "missing_observations": [],
+                }], "missing_observations": [], "answered_criteria": ["C1"],
             })
         return response(messages, calls)
 

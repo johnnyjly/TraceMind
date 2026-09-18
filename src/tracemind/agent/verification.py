@@ -24,11 +24,12 @@ from tracemind.models.verification import (
     ReviewSubject,
     VerificationRecord,
     ReferenceAssessment,
+    CompletionAssessment,
 )
 from tracemind.models.run import StopReason
 from tracemind.observability.langfuse import observation
 
-VERSION = "diagnosis-review-v28-rca"
+VERSION = "diagnosis-review-v29-completion"
 RUBRIC = """
 Review EVERY numbered item against ALL supplied observations, including
 uncited
@@ -124,6 +125,17 @@ item, not merely a proposed check. A scoped likely mechanism can match a
 reference that explicitly permits uncertainty. Gold is never incident evidence.
 root_cause_correctness must equal the conjunction of these five matches.
 Without diagnostic_reference, reference_assessment must be null.
+Separately assess EVERY objective.criteria entry in completion. Truth of the
+submitted statements does not establish that the task was answered. Never let
+the candidate's status or its own scope redefine the objective. A true failure
+observation with an unknown mechanism does not complete an automatic RCA.
+An observable incident-level mechanism suffices; do not demand hidden source
+code or configuration when the task does not require it. For follow-up and
+explanation tasks assess the current request, not a new full investigation.
+Each met criterion needs supported item_ids and no missing_requirements.
+Unmet criteria need specific missing_requirements. Do not reject supported
+claims just because a completion criterion is unmet. Without objective,
+completion is null; task completion is then unknown.
 """.strip()
 
 
@@ -159,6 +171,23 @@ class ReviewResponse(BaseModel):
     root_cause_correctness: bool | None
     reference_assessment: ReferenceAssessment | None = None
     rationale: str = Field(min_length=1, max_length=1000)
+    completion: list[CompletionAssessment] | None = None
+
+
+def completion_criteria(subject):
+    if subject.purpose == "automatic":
+        return {
+            "owner": "Identify the owner of the observed failure.",
+            "operation": "Identify the failing operation.",
+            "mechanism": "Explain the observable failure mechanism.",
+            "symptom_link": "Connect that failure to the incident symptom.",
+        }
+    if subject.purpose in {"investigate", "explain"}:
+        return {
+            "request": "Answer the current user request within its scope.",
+            "evidence_link": "Explain support and relevant uncertainty.",
+        }
+    return {}
 
 
 def create_review_model(settings):
@@ -183,6 +212,20 @@ def create_review_model(settings):
 
 def review_schema(packet):
     schema = ReviewResponse.model_json_schema()
+    criteria = (packet.get("objective") or {}).get("criteria", {})
+    if criteria:
+        schema["properties"]["completion"] = {
+            "type": "array", "items": {"$ref": "#/$defs/CompletionAssessment"},
+            "minItems": len(criteria), "maxItems": len(criteria),
+        }
+        schema.setdefault("required", []).append("completion")
+        completion = schema["$defs"]["CompletionAssessment"]["properties"]
+        completion["criterion_id"]["enum"] = list(criteria)
+        completion["item_ids"]["items"]["enum"] = [
+            item["id"] for item in packet["items"]
+        ]
+    else:
+        schema["properties"]["completion"] = {"type": "null"}
     schema["properties"]["root_cause_correctness"] = {
         "type": "boolean" if packet.get("reference") else "null",
     }
@@ -372,6 +415,11 @@ def review_packet(subject, expected=None):
             "end": subject.end.isoformat(),
         },
         "status": subject.diagnosis.status.value,
+        "objective": ({
+            "purpose": subject.purpose,
+            "request": subject.user_message,
+            "criteria": completion_criteria(subject),
+        } if subject.purpose is not None else None),
         "items": [
             {
                 "id": item.id,
@@ -502,6 +550,30 @@ def validate_review(review, subject, expected=None):
             else claim.conflicting_ids
         ):
             raise ValueError("contradiction_requires_observations")
+    criteria = completion_criteria(subject)
+    if criteria:
+        assessments = review.completion or []
+        ids = [c.criterion_id for c in assessments]
+        if len(ids) != len(set(ids)) or set(ids) != set(criteria):
+            raise ValueError("completion_coverage: assess each criterion once")
+        supported = {c.item_id: c for c in review.claims
+                     if c.verdict == "supported"}
+        for assessment in assessments:
+            ids = assessment.item_ids
+            if len(ids) != len(set(ids)) or not set(ids) <= set(items):
+                raise ValueError("invalid_completion_items")
+            if assessment.met:
+                if (not ids or assessment.missing_requirements
+                        or not set(ids) <= set(supported)):
+                    raise ValueError("completion_requires_supported_items")
+                if subject.purpose == "automatic" and not any(
+                    supported[i].kind == "diagnostic" for i in ids
+                ):
+                    raise ValueError("rca_completion_requires_diagnostic_item")
+            elif not assessment.missing_requirements:
+                raise ValueError("incomplete_requires_specific_gap")
+    elif review.completion is not None:
+        raise ValueError("completion_requires_objective")
     referenced = bool(held_out_reference(expected))
     if referenced != (review.root_cause_correctness is not None):
         raise ValueError("correctness_requires_held_out_reference")
@@ -581,6 +653,7 @@ def parse_review(response, subject, expected=None, *, reference_repairs=None):
         root_cause_correctness=result.root_cause_correctness,
         reference_assessment=result.reference_assessment,
         rationale=result.rationale,
+        completion=result.completion,
     )
     validate_review(review, subject, expected)
     return review
@@ -589,6 +662,8 @@ def parse_review(response, subject, expected=None, *, reference_repairs=None):
 def subject_for(state, candidate, evidence):
     return ReviewSubject(
         incident=state.incident,
+        purpose=state.purpose.value,
+        user_message=state.user_message,
         diagnosis=candidate,
         evidence=evidence,
         items=state.candidate_items,
@@ -658,6 +733,12 @@ def partial_draft(items, review):
         for c in review.claims
         if c.verdict == "supported" and c.kind in {"diagnostic", "uncertainty"}
     ]
+    retained.extend(
+        ReviewItem(id=f"completion-{c.criterion_id}", section="limitation",
+                   text="Task completion criterion not established: "
+                   + c.criterion_id + ".")
+        for c in (review.completion or []) if not c.met
+    )
     return render_items(retained)
 
 
@@ -765,8 +846,6 @@ class DiagnosisVerifier:
                             record.error_code = "input_limit"
                             break
                         record.attempts += 1
-                        # The reservation must be durable before paid work.
-                        await harness.checkpoint()
 
                         async def invoke():
                             return await model.ainvoke(
@@ -781,6 +860,10 @@ class DiagnosisVerifier:
                             purpose="verification",
                             required=False,
                             retry_attempts=0,
+                            estimated_tokens=(
+                                review_input_bytes(messages, policy.provider)
+                                + 1024 + policy.output_tokens
+                            ),
                         )
                         reference_repairs = []
                         try:

@@ -72,6 +72,9 @@ class EvidenceCollector:
         for item in items:
             data = item.model_dump(mode="json", exclude={"id"})
             fingerprint = hashlib.sha256(json_text(data).encode()).hexdigest()
+            existing = self._evidence.get(str(item.id))
+            if existing is not None and existing != item:
+                raise ValueError("Evidence ID already has different content")
             evidence_id = self._fingerprints.get(fingerprint)
             if evidence_id is None:
                 evidence_id = str(item.id)
@@ -454,6 +457,7 @@ def bind_mcp_tools(
         return StructuredTool.from_function(
             coroutine=invoke, name=name, description=description,
             args_schema=schema, response_format="content_and_artifact",
+            metadata={"tracemind_role": "investigation"} if telemetry else {},
         )
 
     try:

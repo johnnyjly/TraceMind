@@ -145,7 +145,7 @@ class DiagnosisService:
         state = RunState(
             agent_mode=self._agent_mode,
             prompt_version=(
-                "multi-agent-graph-v6-rca3"
+                "multi-agent-graph-v7-contracts"
                 if (self._agent_mode == "multi")
                 else "single-agent-v12"
             ),
@@ -357,9 +357,17 @@ class DiagnosisService:
                         collector.evidence,
                         harness,
                     )
-                    if not review.accepted:
+                    if not review.accepted or (
+                        draft.status is DiagnosisStatus.COMPLETE
+                        and not review.task_completed
+                    ):
                         state.feedback_updates = []
                         harness.stop(StopReason.VERIFICATION_REJECTED)
+                    if not review.task_completed:
+                        draft = partial_draft(
+                            state.verification.items, review
+                        )
+                        state.candidate_items = []
                 harness.emit(
                     "diagnosis.accepted",
                     parent_span_id=state.id,
@@ -442,6 +450,7 @@ class DiagnosisService:
                 )
             elif reason in {
                 StopReason.MODEL_BUDGET,
+                StopReason.TOKEN_BUDGET,
                 StopReason.TOOL_BUDGET,
                 StopReason.REPEATED_TOOL_CALL,
                 StopReason.RECURSION_LIMIT,

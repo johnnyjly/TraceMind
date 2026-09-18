@@ -164,6 +164,13 @@ def create_knowledge_tools(
             model_name=model_name,
             purpose=purpose,
             required=False,
+            estimated_tokens=estimate_payload(messages) + output,
+            protected_tokens=(
+                0 if harness.current_investigation_task() is not None
+                else harness.verification_token_reserve
+                + (1 + state.limits.diagnosis_repairs)
+                * state.limits.context_tokens
+            ),
             reserved_calls=max(
                 policy.reserved_model_calls, harness.auxiliary_reserve
             ),

@@ -15,6 +15,7 @@ Current behavior is in [README](README.md) and [DESIGN](DESIGN.md).
 
 | Change |
 | --- |
+| `graph-v7` task-scoped handoff contracts, cumulative run/task token ledgers with synthesis/review reserves, and objective-based completion review; synchronized from upstream master |
 | Evidence-grounded multi-agent `graph-v6`: bounded parallel investigations, atomic reports, shared budgets, query reuse and durable recovery; richer Demo telemetry, retrieval calibration and tracing; refreshed current README and complete TraceMind naming |
 | Verifier evidence/claim boundaries and bounded review behavior corrected |
 | More stable prompt prefixes and provider-reported cache usage accounting |

@@ -117,11 +117,17 @@ permits fresh telemetry queries; each round has its own run and budgets.
 
 ## Optional capabilities
 
-**Multi-agent investigation:** set `TRACEMIND_AGENT_MODE=multi`. The `graph-v6`
+**Multi-agent investigation:** set `TRACEMIND_AGENT_MODE=multi`. The `graph-v7`
 workflow delegates at most two tasks per batch and performs bounded synthesis
 and verification rounds. Partial task results and original observations survive
 recoverable interruptions. See [multi-agent architecture](docs/multi-agent.md)
 for admission requirements, context limits and recovery boundaries.
+
+Each task receives a frozen input with acceptance criteria, explicit evidence
+references and narrowed tool grants. `TRACEMIND_AGENT_MAX_TOTAL_TOKENS`
+optionally caps cumulative model-token admission across roles, retries and
+review; it is separate from per-request context limits. Completion review
+checks whether the original task criteria were met as well as claim support.
 
 **Knowledge retrieval:** install the `rag` extra, prepare and publish a snapshot,
 then configure knowledge permissions and snapshot settings. RAG combines graph,

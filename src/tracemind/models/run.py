@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from tracemind.models.diagnosis import Diagnosis
+from tracemind.models.budget import TokenLedger
 from tracemind.models.incident import Incident
 from tracemind.models.collaboration import CollaborationState
 from tracemind.models.verification import (
@@ -37,6 +38,7 @@ class RunLimits(BaseModel):
 
     context_tokens: int = Field(default=32768, ge=1)
     output_tokens: int = Field(default=4096, ge=1)
+    total_tokens: int | None = Field(default=None, ge=1)
     observation_bytes: int = Field(default=8_388_608, ge=1)
     model_calls: int = Field(default=8, ge=1)
     tool_calls: int = Field(default=12, ge=1)
@@ -86,6 +88,7 @@ class StopReason(StrEnum):
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     CONTEXT_LIMIT = "context_limit"
     MODEL_BUDGET = "model_budget"
+    TOKEN_BUDGET = "token_budget"
     TOOL_BUDGET = "tool_budget"
     REPEATED_TOOL_CALL = "repeated_tool_call"
     DEADLINE = "deadline"
@@ -198,4 +201,5 @@ class RunState(BaseModel):
     candidate_items: list[ReviewItem] = Field(default_factory=list)
     verification: VerificationRecord | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
+    tokens: TokenLedger = Field(default_factory=TokenLedger)
     events: list[RunEvent] = Field(default_factory=list)

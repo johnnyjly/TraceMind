@@ -80,6 +80,15 @@ class ReferenceAssessment(BaseModel):
         return all(getattr(self, k).matches for k in type(self).model_fields)
 
 
+class CompletionAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    criterion_id: str
+    met: bool
+    item_ids: list[str] = Field(max_length=12)
+    missing_requirements: list[str] = Field(max_length=4)
+    rationale: str = Field(min_length=1, max_length=500)
+
+
 class DiagnosisReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     claims: list[Claim] = Field(
@@ -101,6 +110,11 @@ class DiagnosisReview(BaseModel):
     process_quality: float | None = Field(default=None, ge=0, le=1)
     reference_assessment: ReferenceAssessment | None = None
     rationale: str = Field(min_length=1)
+    completion: list[CompletionAssessment] | None = None
+
+    @property
+    def task_completed(self) -> bool:
+        return bool(self.completion) and all(c.met for c in self.completion)
 
     @property
     def verdict(self) -> str:
@@ -118,6 +132,8 @@ class ReviewSubject(BaseModel):
     """Only observed diagnostic data; no held-out labels or model history."""
 
     incident: Incident | None = None
+    purpose: Literal["automatic", "investigate", "explain"] | None = None
+    user_message: str | None = None
     diagnosis: Diagnosis
     evidence: list[Evidence]
     items: list[ReviewItem] = Field(default_factory=list)

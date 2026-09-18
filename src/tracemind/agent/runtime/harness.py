@@ -67,9 +67,10 @@ class InvestigationClosed(Exception):
 class TaskToolBudgetExhausted(Exception):
     """End only the executing task's tool allocation, not the run."""
 
-    def __init__(self, task_id: str):
+    def __init__(self, task_id: str, reason=StopReason.TOOL_BUDGET):
         super().__init__("Task tool allocation exhausted")
         self.task_id = task_id
+        self.reason = reason
 
 
 class RunHarness:
@@ -96,6 +97,11 @@ class RunHarness:
         """
         self.evidence = lambda: []
         self.state = state
+        if resume:
+            state.tokens.recover()
+            if state.collaboration:
+                for record in state.collaboration.tasks.values():
+                    record.tokens.recover()
         state.allowed_tools = resolve_tool_policy(
             state.allowed_tools,
             purpose=state.purpose,
@@ -104,6 +110,7 @@ class RunHarness:
         self._persist = persist
         self._is_cancelled = is_cancelled
         self._persistence_lock = asyncio.Lock()
+        self._persisted_digest = None
         self.resuming = resume
         self.graph_resuming = resume if graph_resume is None else graph_resume
         self._role = ContextVar("agent_role", default=None)
@@ -274,7 +281,13 @@ class RunHarness:
                 if await run_io(self._is_cancelled):
                     self.stop(StopReason.CANCELLED)
             if self._persist is not None:
-                await self._persist(self.state.model_copy(deep=True))
+                snapshot = self.state.model_copy(deep=True)
+                digest = hashlib.sha256(
+                    snapshot.model_dump_json().encode()
+                ).hexdigest()
+                if digest != self._persisted_digest:
+                    await self._persist(snapshot)
+                    self._persisted_digest = digest
         if check_cancel:
             self.check_active()
 
@@ -475,6 +488,8 @@ class RunHarness:
         reserved_calls: int = 0,
         before_attempt: Callable[[], None] | None = None,
         retry_attempts: int | None = None,
+        estimated_tokens: int | Callable[[], int] | None = None,
+        protected_tokens: int | Callable[[], int] = 0,
     ) -> T:
         """Retry transient calls within the shared call budget and deadline.
 
@@ -494,7 +509,14 @@ class RunHarness:
                     call,
                     model_name=model_name,
                     purpose=purpose,
+                    required=required,
                     reserved_calls=reserved_calls,
+                    estimated_tokens=(estimated_tokens()
+                                      if callable(estimated_tokens)
+                                      else estimated_tokens),
+                    protected_tokens=(protected_tokens()
+                                      if callable(protected_tokens)
+                                      else protected_tokens),
                 )
             except (TimeoutError, *MODEL_SERVICE_ERRORS) as exc:
                 failure = classify_failure(exc)
@@ -612,7 +634,10 @@ class RunHarness:
         *,
         model_name: str,
         purpose: str,
+        required: bool = True,
         reserved_calls: int = 0,
+        estimated_tokens: int | None = None,
+        protected_tokens: int = 0,
     ) -> T:
         """Reserve one model call, enforce its timeout, and record
         usage/events.
@@ -639,6 +664,9 @@ class RunHarness:
             raise ModelCallFailed(
                 Failure("model_budget_reserved"), timed_out=False
             )
+        reservation, task_record = self.reserve_tokens(
+            estimated_tokens, protected_tokens, required=required
+        )
         self.state.model_calls += 1
         call_number = self.state.model_calls
         self.state.active_model = model_name
@@ -661,6 +689,7 @@ class RunHarness:
         cache_reported = False
         reasoning_reported = False
         call_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        valid_usage = []
         try:
             async with asyncio.timeout(
                 self.state.limits.model_timeout_seconds
@@ -685,7 +714,16 @@ class RunHarness:
                         else None
                     )
                 item = getattr(message, "usage_metadata", None)
-                if item is not None:
+                if hasattr(message, "usage_metadata"):
+                    valid = (isinstance(item, dict)
+                             and all(type(item.get(k)) is int
+                                     and item[k] >= 0 for k in call_usage)
+                             and item["total_tokens"] == (
+                                 item["input_tokens"] + item["output_tokens"]))
+                    valid_usage.append(valid)
+                else:
+                    valid = False
+                if valid:
                     reported = True
                     for key in call_usage:
                         call_usage[key] += item.get(key, 0)
@@ -698,6 +736,7 @@ class RunHarness:
                     self.state.usage.reported_total_tokens += item.get(
                         "total_tokens", 0
                     )
+            reported = bool(valid_usage) and all(valid_usage)
             cache_reported = bool(cache_usage) and all(
                 item is not None for item in cache_usage
             )
@@ -769,6 +808,14 @@ class RunHarness:
             )
             raise
         finally:
+            actual = call_usage["total_tokens"] if reported else None
+            self.state.tokens.settle(reservation, actual)
+            if task_record is not None:
+                task_record.tokens.settle(reservation, actual)
+            if actual is not None and actual > reservation:
+                self.emit("budget.estimate_exceeded", data={
+                    "reserved_tokens": reservation, "actual_tokens": actual,
+                })
             if reasoning_reported:
                 self.state.usage.reported_reasoning_model_calls += 1
             else:
@@ -782,6 +829,55 @@ class RunHarness:
             else:
                 self.state.usage.unreported_model_calls += 1
             await self.checkpoint(check_cancel=False)
+
+    @property
+    def tokens_remaining(self):
+        limit = self.state.limits.total_tokens
+        return None if limit is None else max(
+            0, limit - self.state.tokens.committed
+        )
+
+    @property
+    def verification_token_reserve(self):
+        policy = self.state.verification_policy
+        return (self.verification_calls * (
+            policy.input_bytes + 1024 + policy.output_tokens
+        )) if policy else 0
+
+    @property
+    def investigation_token_pool(self):
+        remaining = self.tokens_remaining
+        if remaining is None:
+            return None
+        return max(0, remaining - self.verification_token_reserve
+                   - (1 + self.state.limits.diagnosis_repairs)
+                   * self.state.limits.context_tokens)
+
+    def reserve_tokens(self, estimate, protected, *, required=True):
+        """Reserve both ledgers without yielding to another parallel caller."""
+        if estimate is None:
+            if self.state.limits.total_tokens is not None:
+                raise ValueError("Capped model calls require a token estimate")
+            estimate = 0
+        if type(estimate) is not int or estimate < 0:
+            raise ValueError("Invalid model token estimate")
+        record = self.current_investigation_task()
+        remaining = self.tokens_remaining
+        if ((remaining is not None and estimate + protected > remaining)
+                or (record is not None and record.token_limit is not None
+                    and record.tokens.committed + estimate
+                    > record.token_limit)):
+            self.emit("model.skipped", data={
+                "reason": "token_budget", "estimated_tokens": estimate,
+                "protected_tokens": protected,
+            })
+            if record is not None or not required:
+                raise ModelCallFailed(Failure("token_budget"), timed_out=False)
+            self.stop(StopReason.TOKEN_BUDGET)
+        self.state.tokens.reserved += estimate
+        if record is not None:
+            record.tokens.reserved += estimate
+        return estimate, record
 
     def current_investigation_task(self):
         workflow = self.state.collaboration
@@ -814,13 +910,26 @@ class RunHarness:
         self.check_task_tool_budget()
         signature = hashlib.sha256(
             json.dumps(
-                [name, arguments], sort_keys=True, separators=(",", ":")
+                [name, arguments, *(
+                    [self._task_id.get(), self.role,
+                     self.state.reference_map
+                     if not (arguments.get("evidence_id")
+                             or arguments.get("reference_id")) else None]
+                    if self.state.collaboration is not None
+                    and name in {"read_evidence", "read_knowledge"}
+                    else []
+                )], sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
         if (
             self._signatures.get(signature, 0)
             >= self.state.limits.identical_tool_calls
         ):
+            record = self.current_investigation_task()
+            if record is not None:
+                raise TaskToolBudgetExhausted(
+                    record.id, StopReason.REPEATED_TOOL_CALL
+                )
             self.begin_finalization(StopReason.REPEATED_TOOL_CALL)
             raise InvestigationClosed()
         self._signatures[signature] = self._signatures.get(signature, 0) + 1
