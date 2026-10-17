@@ -1,13 +1,59 @@
+# Local credentials and configuration (keep distributable examples).
 .env
+.env.*
+*.env
+!.env.example
+!*.env.example
+
+# Local runs, evaluations, checkpoints, knowledge and model snapshots.
 artifacts/
+knowledge/
+/checkpoints/
+/snapshots/
+/logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python environments, caches, coverage and build output.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
-.tools/
-.venv/
-__pycache__/
-*.egg-info/
-*.py[cod]
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
 dist/
-knowledge/
+.tools/
 
-deploy/.env.langfuse
+# Local OS and editor files.
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Workstation-specific profiles and labels for unpublished local corpora.
+/deploy/deepseek-demo.env.example
+/deploy/deepseek-rca.env.example
+/evals/rag/smoke-relevance.json
+/evals/retrieval/diagnostic-v5-dev.json
+/evals/retrieval/diagnostic-v5-holdout.json

@@ -21,8 +21,8 @@ Diagnosis, run and investigation creation share this request shape:
 }
 ```
 
-The timestamps above are illustrative. Replace them with your actual fault window. Both require timezones and
-end must follow start.
+The timestamps above are illustrative. Replace them with your actual fault
+window. Both require timezones and end must follow start.
 Why: Explicit ordered times keep admission and evidence filtering on the same
 investigation window.
 
@@ -80,7 +80,8 @@ Why: Saved policy is an execution contract, so settings changes apply to newly
 admitted work.
 
 DeepSeek uses its OpenAI-compatible Chat Completions
-endpoint with thinking disabled and tool-based structured diagnoses.
+endpoint with configurable thinking and tool-based structured diagnoses.
+The example configuration enables thinking with high reasoning effort.
 
 ## Collaborative multi-agent mode
 
@@ -228,6 +229,7 @@ Runtime Langfuse tracing is separately opt-in through `TRACEMIND_LANGFUSE_*`;
 normal operation does not require the evaluation server. For model limits,
 local deployment and scored experiments, see
 [Evaluation](evaluation.md#online-completion-verification).
+
 
 ## Demo trace retention
 

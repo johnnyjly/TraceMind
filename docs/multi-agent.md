@@ -237,8 +237,8 @@ the agent trace and sit under the role observation.
 
 Synchronous evaluation calls the service directly. Its JSONL, usage admissions
 and final output are evaluation records; setting database filenames does not
-activate queued worker/checkpoint recovery. Validate recovery separately
-through SQLite/worker tests and controlled worker interruptions.
+activate queued worker/checkpoint recovery. Validate recovery separately through
+the SQLite/worker tests and controlled worker interruptions.
 
 Online verification tests evidence support without gold labels. The offline
 Judge alone receives `demo-rca-v2`: owner, operation, observable mechanism,
@@ -255,6 +255,7 @@ same validated window, models, snapshot, tool grants and budgets; separate
 development tuning from frozen comparisons. Repeated windows reduce sampling
 noise but five known scenarios do not establish general production accuracy.
 See [evaluation](evaluation.md) for experiment setup and comparison methods.
+
 
 ### Reference protocol and mechanism checks
 

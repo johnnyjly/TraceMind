@@ -168,10 +168,10 @@ Why: Reranker scores depend on the model and corpus and are not universal releva
 probabilities.
 
 Keep corpus-specific development and holdout labels under ignored `artifacts/`.
-The suites must identify the published snapshot and contain document IDs
-from that corpus. Select a cutoff using development questions, then evaluate
-it on separate holdout questions. A small corpus does not establish general
-retrieval quality.
+Both suites must name the published snapshot they label, and their document IDs
+must exist in that corpus. Select a cutoff using development questions, then
+evaluate it on the separate holdout set. Labels from one corpus cannot be reused
+for another merely by changing the snapshot name.
 
 Timing logs separate `rag.ready` lock wait, verification and initialization from
 `rag.search` retrieval and ranking. Retrieval includes embedding and any keyword
