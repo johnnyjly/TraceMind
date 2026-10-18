@@ -2,8 +2,6 @@
 
 [中文](#中文) | [English](#english)
 
-## 中文
-
 TraceMind 使用指标、链路追踪和日志调查微服务故障，输出包含证据、假设和明确缺口的结构化诊断。项目使用 OpenTelemetry Demo 中可复现的故障场景进行验证。
 
 默认采用受预算约束的 LangGraph 单 Agent。可选的多 Agent 工作流包含协调者、最多两个并发调查任务，以及有限轮次的验证反馈。两种模式共用权限控制、模型与工具调用预算、保留证据和持久化运行状态。遥测数据由独立的只读 HTTP MCP 服务提供。
@@ -175,8 +173,6 @@ uv run python scripts/run_experiment.py --task agent --name payment-baseline \
 Python 分发包和导入包均为 `tracemind`，应用配置前缀为 `TRACEMIND_`。旧部署需要更新环境变量名、导入路径及响应头使用方；Compose 项目和数据卷改名不会自动迁移现有本地服务数据。
 
 ---
-
-## English
 
 TraceMind investigates microservice incidents using metrics, traces and logs,
 then produces a structured diagnosis with supporting evidence, hypotheses and
