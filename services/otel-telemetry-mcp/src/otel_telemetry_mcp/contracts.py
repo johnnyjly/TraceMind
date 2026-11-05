@@ -76,6 +76,7 @@ class TraceDetail(Arguments):
     ]
     service: str | None = Field(default=None, max_length=120)
     operation: str | None = Field(default=None, max_length=240)
+    span_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{16}$")
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=25, ge=1, le=100)
 

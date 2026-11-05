@@ -785,3 +785,31 @@ def test_repair_messages_reach_deepseek_with_valid_pairs(
     assert run.state.usage.reported_total_tokens == 60
     assert run.state.stop_reason is (StopReason.COMPLETED if mixed else
                                      StopReason.INSUFFICIENT_EVIDENCE)
+
+
+@pytest.mark.parametrize("target", ["model", "tool"])
+def test_no_deadline_declines_excessive_retry_after(monkeypatch, target):
+    from tracemind.agent.runtime.recovery import ModelCallFailed, ToolUnavailable
+
+    run = harness(duration_seconds=None, retry_max_backoff_seconds=4)
+
+    async def no_sleep(delay):
+        raise AssertionError("oversized Retry-After must not sleep or retry")
+
+    async def call():
+        failure = http_failure(429, retry_after="86400")
+        if target == "tool":
+            raise TelemetryClientError("provider unavailable") from failure
+        raise failure
+
+    monkeypatch.setattr("tracemind.agent.runtime.harness.asyncio.sleep", no_sleep)
+    with pytest.raises(ModelCallFailed if target == "model" else ToolUnavailable):
+        asyncio.run(
+            run.model_call(call, model_name="test", required=False)
+            if target == "model" else run.tool_call("query_metrics", {}, call)
+        )
+    assert run.state.model_calls == (1 if target == "model" else 0)
+    assert sum(run.state.tool_calls.values()) == (1 if target == "tool" else 0)
+    skipped = [e for e in run.state.events if e.kind == "recovery.retry_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0].data["reason"] == "retry_after_exceeds_limit"

@@ -13,6 +13,7 @@ from tracemind.agent.storage.database import RunDatabase
 from tracemind.agent.workflow.followup import plan_follow_up
 from tracemind.agent.storage.run_codec import decode_run
 from tracemind.models import Evidence, Incident
+from tracemind.models.intake import InitialContext
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.result import DiagnosisRun
 from tracemind.models.run import (
@@ -144,6 +145,7 @@ class RunRepository:
         start: datetime | None = None, end: datetime | None = None,
         request_hash: str, idempotency_key: str | None = None,
         memory_policy: MemoryPolicy | None = None,
+        initial_context: InitialContext | None = None,
     ) -> StoredRun:
         """Append one round after the previous round commits its outcome.
 
@@ -187,6 +189,7 @@ class RunRepository:
                 investigation_id=investigation_id, message=message,
                 purpose=purpose, limits=limits, allowed_tools=allowed_tools,
                 start=start, end=end, memory_policy=memory_policy,
+                initial_context=initial_context,
             )
             self._insert_run(connection, state, evidence, request_hash,
                              idempotency_key, now)
@@ -258,8 +261,10 @@ class RunRepository:
                 state.status = RunStatus.RUNNING
                 if not resuming:
                     state.started_at = datetime.now(UTC)
-                    state.deadline_at = state.started_at + timedelta(
-                        seconds=state.limits.duration_seconds
+                    state.deadline_at = (
+                        state.started_at + timedelta(
+                            seconds=state.limits.duration_seconds
+                        ) if state.limits.duration_seconds is not None else None
                     )
                 connection.execute(
                     """UPDATE runs SET status='running',state_json=?,

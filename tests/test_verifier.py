@@ -59,6 +59,7 @@ class ReviewModel(BaseChatModel):
     mode: str = ""
     calls: int = 0
     captured: list = []
+    delay: float = 0
 
     @property
     def _llm_type(self):
@@ -70,12 +71,25 @@ class ReviewModel(BaseChatModel):
     async def _agenerate(self, messages, **kwargs):
         self.calls += 1
         self.captured.append((messages, kwargs))
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.mode == "timeout":
             await asyncio.Future()
         if self.mode == "unavailable":
             raise httpx.ConnectError("synthetic provider outage")
+        if self.mode == "sdk_truncated":
+            from openai import LengthFinishReasonError
+            from openai.types.chat import ChatCompletion
+
+            raise LengthFinishReasonError(completion=ChatCompletion(
+                id="truncated", choices=[], created=0,
+                model="synthetic-review", object="chat.completion",
+            ))
         metadata = (
-            {"finish_reason": "length"} if self.mode == "truncated" else {}
+            {"finish_reason": "length"} if self.mode == "truncated" else
+            {"status": "incomplete", "incomplete_details": {
+                "reason": "max_output_tokens"
+            }} if self.mode == "incomplete" else {}
         )
         packet = json.loads(messages[1].content)
         body = json.loads(json.dumps(self.body))
@@ -213,7 +227,9 @@ def test_exactly_one_format_repair_is_accounted(monkeypatch):
     "mode,attempts,code",
     [
         ("invalid", 2, "invalid_output"),
-        ("truncated", 2, "invalid_output"),
+        ("truncated", 1, "incomplete_output"),
+        ("incomplete", 1, "incomplete_output"),
+        ("sdk_truncated", 1, "incomplete_output"),
         ("tool", 2, "invalid_output"),
         ("timeout", 1, "timeout"),
         ("unavailable", 1, "model_unavailable"),
@@ -223,15 +239,28 @@ def test_failure_is_bounded_and_never_accepted(
     monkeypatch, mode, attempts, code
 ):
     model = ReviewModel(body=review(), mode=mode)
+    script = json.loads(json.dumps(FIXTURE.script))
+    script[-1]["args"]["remediation"] = ["Inspect the payment Charge exception"]
     service, _ = make_service(
-        monkeypatch, model, policy=VerificationPolicy(timeout_seconds=0.05)
+        monkeypatch, model, policy=VerificationPolicy(timeout_seconds=0.05),
+        script=script,
     )
-    with pytest.raises(DiagnosisError) as caught:
-        diagnose(service)
-    state = caught.value.state
+    result = diagnose(service)
+    state = result.state
     assert state.verification.error_code == code
     assert state.verification.attempts == model.calls == attempts
-    assert state.diagnosis is None
+    assert result.diagnosis.status.value == "inconclusive"
+    assert result.diagnosis.review_status == (
+        "timed_out" if code == "timeout" else "unavailable"
+    )
+    assert result.diagnosis.review_error_code == code
+    assert result.diagnosis.items
+    assert all(item.review_status == "unreviewed"
+               and item.evidence_support == "not_assessed"
+               for item in result.diagnosis.items)
+    assert result.diagnosis.remediation
+    assert "UNREVIEWED" in result.diagnosis.root_cause
+    assert not state.feedback_updates
     assert trace_issues(state) == []
 
 
@@ -251,9 +280,11 @@ def test_proof_obligations_are_still_strict(monkeypatch, problem):
         body["root_cause_correctness"] = True
     model = ReviewModel(body=body)
     service, _ = make_service(monkeypatch, model)
-    with pytest.raises(DiagnosisError) as caught:
-        diagnose(service)
-    assert caught.value.state.verification.error_code == "invalid_output"
+    result = diagnose(service)
+    assert result.state.verification.error_code == "invalid_output"
+    assert result.diagnosis.review_status == "unavailable"
+    assert all(item.evidence_support == "not_assessed"
+               for item in result.diagnosis.items)
     assert model.calls == 2
 
 
@@ -262,11 +293,11 @@ def test_oversize_does_not_drop_evidence_or_call_model(monkeypatch):
     service, _ = make_service(
         monkeypatch, model, policy=VerificationPolicy(input_bytes=1)
     )
-    with pytest.raises(DiagnosisError) as caught:
-        diagnose(service)
-    assert caught.value.state.verification.error_code == "input_limit"
+    result = diagnose(service)
+    assert result.state.verification.error_code == "input_limit"
+    assert result.diagnosis.review_status == "unavailable"
     assert model.calls == 0
-    assert len(caught.value.evidence) == 1
+    assert len(result.evidence) == 1
 
 
 def test_budget_reserves_two_calls_without_extending_limit(monkeypatch):
@@ -312,7 +343,10 @@ def test_packet_preserves_uncited_counterevidence_and_all_attributes():
     packet = review_packet(subject)
     assert len(packet["evidence"]) == len(subject.evidence)
     for row, original in zip(packet["evidence"], subject.evidence):
-        assert row["attributes"] == original.attributes
+        attributes = dict(row["attributes"])
+        for field, index in row.get("attribute_refs", {}).items():
+            attributes[field] = packet["shared_attributes"][field][index]
+        assert attributes == original.attributes
         assert row["summary"] == original.summary
         if original.query is not None:
             assert packet["queries"][row["query_index"]] == original.query
@@ -495,8 +529,8 @@ def test_no_global_boolean_can_veto_supported_items():
         parse_review(AIMessage(content=json.dumps(bad)), subject)
 
 
-def test_partial_result_keeps_only_retained_items_knowledge_citations():
-    from tracemind.agent.verification import partial_draft
+def test_triage_retains_rejected_claims_with_explicit_review_labels():
+    from tracemind.agent.workflow.triage import reviewed_draft
     from tracemind.models.verification import (
         Claim,
         DiagnosisReview,
@@ -517,8 +551,8 @@ def test_partial_result_keeps_only_retained_items_knowledge_citations():
             knowledge_refs=["knowledge-rejected"],
         ),
     ]
-    result = partial_draft(
-        items,
+    result = reviewed_draft(
+        seed().diagnosis, items,
         DiagnosisReview(
             claims=[
                 Claim(
@@ -543,9 +577,11 @@ def test_partial_result_keeps_only_retained_items_knowledge_citations():
             rationale="Retain supported finding",
         ),
     )
-    assert result.knowledge_refs == ["knowledge-kept"]
+    assert result.knowledge_refs == ["knowledge-kept", "knowledge-rejected"]
     assert result.evidence_ids == [EVIDENCE.id]
-    assert "Unsupported cause" not in result.root_cause
+    assert result.items[0].evidence_support == "supported"
+    assert result.items[1].evidence_support == "insufficient"
+    assert "[REVIEWED; insufficient evidence] Unsupported cause" in result.root_cause
 
 
 def test_legacy_checkpoint_is_readable_but_cannot_resume(monkeypatch):
@@ -742,3 +778,144 @@ def test_online_overlap_rejection_completes_without_format_retry(monkeypatch):
     assert run.diagnosis.status.value == "inconclusive"
     assert run.state.stop_reason is StopReason.VERIFICATION_REJECTED
     assert "diagnosis.accepted" not in [e.kind for e in run.state.events]
+
+
+def test_verifier_uses_own_timeout_instead_of_general_model_limit(monkeypatch):
+    model = ReviewModel(body=review(), delay=0.15)
+    service, _ = make_service(
+        monkeypatch, model, policy=VerificationPolicy(timeout_seconds=1)
+    )
+    service._limits.model_timeout_seconds = 0.05
+    run = diagnose(service)
+    assert run.state.verification.status == "completed"
+    event = next(e for e in run.state.events
+                 if e.kind == "model.started"
+                 and e.data["purpose"] == "verification")
+    assert event.data["timeout_seconds"] == 1
+    assert trace_issues(run.state) == []
+
+
+def test_verifier_repair_has_own_request_timeout(monkeypatch):
+    model = ReviewModel(body=review(), mode="repair", delay=0.15)
+    service, _ = make_service(
+        monkeypatch, model, policy=VerificationPolicy(timeout_seconds=0.25)
+    )
+    result = diagnose(service)
+    state = result.state
+    assert model.calls == state.verification.attempts == 2
+    assert state.verification.error_code is None
+    assert state.verification.status == "completed"
+    # The two scripted investigator responses omit usage; both reviews report it.
+    assert state.usage.unreported_model_calls == 2
+    assert state.usage.reported_model_calls == 2
+    assert state.diagnosis.review_status == "completed"
+    attempts = [e for e in state.events if e.kind == "model.started"
+                and e.data["purpose"] == "verification"]
+    assert [e.data["timeout_seconds"] for e in attempts] == [0.25, 0.25]
+    assert trace_issues(state) == []
+
+
+def test_wrapped_model_timeout_keeps_timeout_classification(monkeypatch):
+    from tracemind.agent.runtime.harness import RunHarness
+    from tracemind.agent.runtime.recovery import Failure, ModelCallFailed
+
+    original = RunHarness.model_call
+
+    async def timeout(self, *args, **kwargs):
+        if kwargs.get("purpose") == "verification":
+            raise ModelCallFailed(Failure("transient"), timed_out=True)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RunHarness, "model_call", timeout)
+    service, _ = make_service(monkeypatch, ReviewModel(body=review()))
+    result = diagnose(service)
+    assert result.state.verification.error_code == "timeout"
+    assert result.diagnosis.review_status == "timed_out"
+
+
+def test_shared_attributes_round_trip_preserves_distinct_coverage():
+    subject = seed()
+    original = subject.evidence[0]
+    original.attributes.update({
+        "resource": {"service.version": "3.1.0", "detail": "x" * 500},
+        "resource_metadata": {"code": {"file": "charge.js", "line": 48}},
+        "coverage": {"scope": "exact-span", "complete": False},
+    })
+    for scope in ("trace-page", "trace-page"):
+        extra = original.model_copy(deep=True)
+        extra.id = uuid4()
+        extra.attributes["coverage"] = {"scope": scope, "complete": True}
+        subject.evidence.append(extra)
+    before = subject.model_dump_json()
+    packet = review_packet(subject)
+    assert subject.model_dump_json() == before
+    for row, original in zip(packet["evidence"], subject.evidence):
+        attrs = dict(row["attributes"])
+        for field, index in row.get("attribute_refs", {}).items():
+            attrs[field] = packet["shared_attributes"][field][index]
+        assert attrs == original.attributes
+    assert len(packet["evidence"]) == len(subject.evidence)
+    assert len(packet["shared_attributes"]["resource"]) == 1
+    assert packet["evidence"][0]["attributes"]["coverage"]["scope"] == "exact-span"
+
+
+def test_total_deadline_returns_candidate_without_new_model_call(monkeypatch):
+    model = ReviewModel(body=review(), mode="timeout")
+    script = json.loads(json.dumps(FIXTURE.script))
+    script[-1]["args"]["remediation"] = ["Inspect the payment Charge exception"]
+    service, _ = make_service(
+        monkeypatch, model, policy=VerificationPolicy(timeout_seconds=10),
+        script=script,
+    )
+    service._limits.duration_seconds = .3
+    result = diagnose(service)
+    assert result.state.stop_reason is StopReason.DEADLINE
+    assert result.diagnosis.review_status == "timed_out"
+    assert result.diagnosis.review_error_code == "deadline"
+    assert result.diagnosis.items and result.diagnosis.remediation
+    assert result.state.deadline_at is not None
+    assert model.calls == 1
+    assert trace_issues(result.state) == []
+
+
+def test_review_context_admission_keeps_all_evidence_without_call(monkeypatch):
+    from tracemind.agent.verification import review_input_tokens
+    subject = seed()
+    messages = review_messages(subject, provider="deepseek")
+    assert review_input_tokens(messages, "deepseek") < review_input_bytes(
+        messages, "deepseek",
+    ) + 1024
+    model = ReviewModel(body=review())
+    # Investigation fits; the larger reviewer output reservation does not.
+    service, _ = make_service(
+        monkeypatch, model, policy=VerificationPolicy(output_tokens=65536),
+    )
+    result = diagnose(service)
+    assert result.state.verification.error_code == "context_limit"
+    assert result.state.verification.attempts == model.calls == 0
+    assert result.diagnosis.review_status == "unavailable"
+    assert len(result.evidence) == 1
+    assert result.diagnosis.items[0].evidence_ids == [result.evidence[0].id]
+
+
+def test_deadline_at_verifier_admission_returns_unreviewed_candidate(monkeypatch):
+    from tracemind.agent.runtime.harness import RunHarness
+
+    original = RunHarness.model_call
+
+    async def expire(self, *args, **kwargs):
+        if kwargs.get("purpose") == "verification":
+            self.stop(StopReason.DEADLINE)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RunHarness, "model_call", expire)
+    model = ReviewModel(body=review())
+    service, _ = make_service(monkeypatch, model)
+    result = diagnose(service)
+    assert result.state.stop_reason is StopReason.DEADLINE
+    assert result.state.verification.status == "failed"
+    assert result.diagnosis.review_status == "timed_out"
+    assert result.diagnosis.review_error_code == "deadline"
+    assert all(i.evidence_support == "not_assessed" for i in result.diagnosis.items)
+    assert model.calls == 0
+    assert trace_issues(result.state) == []

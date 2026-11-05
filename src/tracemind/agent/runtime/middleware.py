@@ -35,6 +35,7 @@ from tracemind.agent.runtime.harness import (
     InvestigationClosed, RunHarness, TaskToolBudgetExhausted,
 )
 from tracemind.agent.runtime.recovery import ModelCallFailed, ToolUnavailable
+from tracemind.agent.runtime.token_count import ESTIMATOR_VERSION
 from tracemind.models.run import StopReason
 
 
@@ -145,6 +146,8 @@ class HarnessMiddleware(AgentMiddleware):
             def prepare():
                 """Rebind before each attempt, including transport retries."""
                 nonlocal prepared, request
+                if self._investigation:
+                    self.harness.reserve_verification_time()
                 if (self._output_name in {"DiagnosisProposal",
                                           "CoordinatorDecision"}
                         and self.harness.tokens_remaining is not None
@@ -510,7 +513,9 @@ class HarnessMiddleware(AgentMiddleware):
             "valid DiagnosisProposal. Cite unique E handles available "
             "in this run within the investigation window, including retained "
             "observations. Use findings, hypotheses, limitations and "
-            "proposed_checks; apply the assigned task's completion rule."
+            "proposed_checks; apply the assigned task's completion rule. "
+            "Keep only key atomic findings and distinct checks; do not expand "
+            "the report to fill every schema slot."
         )
         if output_name == "InvestigationReport":
             feedback = (
@@ -593,15 +598,32 @@ class HarnessMiddleware(AgentMiddleware):
     def _prepare_request(self, request: ModelRequest) -> ModelRequest:
         """Rebuild bounded context and output settings for the model."""
         state = self.harness.state
+        remaining = self.harness.remaining_seconds
+        time_budget = (
+            "No overall time deadline; stop by call and progress budgets. "
+            if remaining is None else f"Run time remaining: {remaining:.1f}s. "
+        )
         budget = (
             "Application runtime snapshot. Earlier snapshots are historical; "
             "only the latest applies.\n"
+            f"{time_budget}"
             "Remaining budget including the next call: "
             f"{state.limits.model_calls - state.model_calls} model calls, "
             f"{state.limits.tool_calls - sum(state.tool_calls.values())} "
             f"tool calls. Return {self._output_name}; preserve supported "
             "observations and state gaps."
         )
+        if self._investigation:
+            reserved = self.harness.finalization_calls + self._reserved_calls
+            discovery = max(0, state.limits.model_calls - state.model_calls
+                            - reserved)
+            budget += (
+                f" At most {discovery} discovery model attempts remain; "
+                f"{reserved} calls are held for synthesis, repairs and review. "
+                "Failed attempts also consume this budget. Stop discovery "
+                "once the failure location and next discriminating check "
+                "are established; unused calls need not be spent."
+            )
         task_remaining = self.harness.task_tools_remaining()
         if self.harness.tokens_remaining is not None:
             budget += (f"\nRun token admission balance: "
@@ -632,7 +654,8 @@ class HarnessMiddleware(AgentMiddleware):
             )
             if self._output_name == "DiagnosisProposal":
                 budget += (
-                    "Preserve findings and state gaps in limitations. "
+                    "Preserve key atomic findings and essential gaps; "
+                    "omit duplicate observations and generic checks. "
                     "Apply the assigned task's completion rule."
                 )
             elif self._output_name == "InvestigationReport":
@@ -663,7 +686,7 @@ class HarnessMiddleware(AgentMiddleware):
             "context.selected",
             parent_span_id=state.id,
             data={
-                "estimator": "utf8-bytes-v1",
+                "estimator": ESTIMATOR_VERSION,
                 "estimated_input_before": selection.before,
                 "estimated_input_after": selection.after,
                 "reduced_messages": selection.reduced_messages,

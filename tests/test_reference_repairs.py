@@ -6,7 +6,6 @@ import json
 import pytest
 from langchain_core.messages import AIMessage
 
-from tracemind.agent.errors import DiagnosisError
 from tracemind.agent.runtime.collaboration import CoordinatorDecision
 from tracemind.agent.verification import parse_review, subject_hash
 from tracemind.agent.workflow.references import normalize_reference_handles
@@ -102,11 +101,13 @@ def test_invalid_review_keeps_normalization_audit_and_retry_bound(monkeypatch):
     body["assessments"][0]["supporting_refs"] = ["E1", "1"]
     model = ReviewModel(body=body)
     service, _ = make_service(monkeypatch, model)
-    with pytest.raises(DiagnosisError) as caught:
-        diagnose(service)
+    result = diagnose(service)
     assert model.calls == 2
-    assert caught.value.state.verification.error_code == "invalid_output"
-    assert len([e for e in caught.value.state.events
+    assert result.state.verification.error_code == "invalid_output"
+    assert result.diagnosis.review_status == "unavailable"
+    assert all(item.evidence_support == "not_assessed"
+               for item in result.diagnosis.items)
+    assert len([e for e in result.state.events
                 if e.kind == "reference.normalized"]) == 2
 
 

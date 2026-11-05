@@ -71,6 +71,7 @@ def test_blank_body_preserves_log_identity_and_observation_time(body):
         "body_empty": True, "original_body": body,
         "document_id": "blank-log", "severity_text": "Info",
         "severity_number": 9, "trace_id": "a" * 32, "span_id": "b" * 16,
+        "diagnostic": {},
     }
 
 

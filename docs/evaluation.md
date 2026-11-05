@@ -52,8 +52,11 @@ admission can count actual attempts.
 
 Reasoning tokens consume model output limits. Per-model, review and overall
 run deadlines must leave room for the enabled workflow. Judge and verifier
-also have input byte limits; oversized evidence is rejected rather than
-silently dropping observations or counterevidence.
+also have input byte limits and share `AGENT_CONTEXT_TOKENS` for estimated
+input plus output. Estimates use local `cl100k_base` tokens with 20%
+headroom and 1024 framing tokens, not UTF-8 bytes or exact provider counts.
+Oversized review evidence is rejected rather than silently dropping
+observations or counterevidence.
 
 Record usage when the provider reports it and retain unknown usage explicitly.
 A missing measurement is not zero. Cost estimates depend on configured pricing
@@ -223,7 +226,7 @@ usage and answer quality alongside cache statistics.
 Runtime verification is enabled by default. Single-agent deployments can set
 `TRACEMIND_VERIFIER_ENABLED=false`; multi-agent mode always requires verification.
 The reviewer uses independent `TRACEMIND_VERIFIER_*` settings. Its code defaults
-are a 180-second deadline, 131072 input bytes and 8192 output tokens; environment
+are a 180-second deadline, 524288 input bytes and 12288 output tokens; environment
 settings can override them for newly admitted runs.
 
 The investigator submits structured findings, hypotheses, limits and proposed
@@ -237,14 +240,29 @@ not establish service health.
 | Outcome | Behavior |
 | --- | --- |
 | Supported statements and satisfied completion criteria | The candidate can pass review |
-| Insufficient support or unmet criteria | Preserve supported findings and identify gaps |
+| Insufficient support or unmet criteria | Preserve all items with support labels, counterevidence, gaps and proposed checks |
 | Malformed review or invalid references | At most one format-repair attempt |
-| Timeout, provider failure, exhausted repair or oversized input | Explicit review failure; never approve an unchecked draft |
+| Timeout, provider failure, exhausted repair or oversized input | Deliver provenance-validated initial triage marked unreviewed; never count it as approved |
+
+Automatic completion criteria are `actionable_finding` and `next_check`.
+This measures initial triage, not proof of a unique root cause. Evidence
+requirements for each factual claim remain unchanged. Follow-up requests keep
+their own request/evidence criteria. `triage_status=ready` can coexist with
+`status=inconclusive` if useful findings/checks exist but another item is
+insufficient or contradicted.
+
+The offline Judge audits the immutable original candidate for structured
+triage output and reports `judge_subject=candidate`. Its semantic support and
+held-out correctness scores describe that candidate, not application-generated
+review labels. Useful retained findings and delivery completion are scored
+separately. Strict held-out root-cause/expected-status benchmarks remain strict;
+a timed-out review is retained as an unverified primary attempt, not a success
+in semantic verification.
 
 Single-agent rejection does not automatically revise the investigation.
 Collaborative mode can use bounded feedback to investigate or submit again.
 The verifier itself does not retry a semantic rejection. Review and format
-repair share the run's budgets and review deadline.
+repair share the run's call budgets. Each review request has its own timeout; an optional overall run deadline still caps both attempts.
 
 Run the verifier against manufactured cases with held-out expected decisions:
 

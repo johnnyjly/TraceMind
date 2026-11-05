@@ -11,7 +11,10 @@ from langchain_core.tools import BaseTool, StructuredTool, tool
 from mcp.types import Tool
 from pydantic import Field
 
-from tracemind.agent.workflow.context import json_text
+from tracemind.agent.workflow.context import _evidence_preview, json_text
+from tracemind.agent.workflow.observations import (
+    mark_exception_window, scope_status,
+)
 from tracemind.agent.workflow.references import (
     model_references, original_reference, register_references,
 )
@@ -100,15 +103,9 @@ class EvidenceCollector:
         document = self._documents[evidence_id]
         if len(document.encode()) <= 1200:
             return item.model_dump(mode="json")
-        return {
-            "id": evidence_id,
-            "source": item.source.value,
-            "service": item.service[:120] if item.service else None,
-            "observed_at": item.observed_at.isoformat(),
-            "summary": item.summary[:240],
-            "truncated": True,
-            "detail_chars": len(document),
-        }
+        preview = _evidence_preview(item, max_bytes=1200)
+        preview["detail_chars"] = len(document)
+        return preview
 
     def read(
         self, evidence_id: str | None, offset: int, *,
@@ -210,7 +207,20 @@ def _query_executor(
                     data={"tool": name, "received": len(observations),
                           "excluded_outside_window": excluded},
                 )
-            observations = retained
+            scope = (harness.state.initial_context.scope
+                     if harness.state.initial_context is not None else None)
+            scope_counts = {"scope_mismatch": 0, "scope_unknown": 0}
+            observations = []
+            for item in retained:
+                status = scope_status(item, scope)
+                if status != "matched":
+                    scope_counts[status] += 1
+                else:
+                    observations.append(
+                        mark_exception_window(item, start, end),
+                    )
+            if any(scope_counts.values()):
+                harness.emit("observations.scope_filtered", data=scope_counts)
             before = len(collector.evidence)
             try:
                 previews = collector.add(observations)
@@ -243,6 +253,17 @@ def _query_executor(
                         "Observations outside the investigation window were "
                         "excluded and cannot be cited. An empty remaining "
                         "result does not establish service health."
+                    ),
+                })
+            if any(scope_counts.values()):
+                result.append({
+                    **{f"excluded_{key}": count
+                       for key, count in scope_counts.items()},
+                    "guidance": (
+                        "Observations with conflicting or missing resource "
+                        "identity cannot establish this declared scope. "
+                        "This is a bounded result, not a scoped population "
+                        "search or proof of health."
                     ),
                 })
             added = len(collector.evidence) - before

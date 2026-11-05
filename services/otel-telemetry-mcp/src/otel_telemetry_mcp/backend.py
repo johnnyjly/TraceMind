@@ -53,6 +53,7 @@ class TelemetryBackend(Protocol):
         *,
         service: str | None = None,
         operation: str | None = None,
+        span_id: str | None = None,
         offset: int = 0,
         limit: int = 25,
     ) -> list[Evidence] | dict:
@@ -141,6 +142,7 @@ class DirectTelemetryBackend:
         *,
         service: str | None = None,
         operation: str | None = None,
+        span_id: str | None = None,
         offset: int = 0,
         limit: int = 25,
     ) -> list[Evidence] | dict:
@@ -149,6 +151,7 @@ class DirectTelemetryBackend:
             trace_id,
             service=service,
             operation=operation,
+            span_id=span_id,
             offset=offset,
             limit=limit,
         )

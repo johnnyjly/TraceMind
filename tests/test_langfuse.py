@@ -273,7 +273,7 @@ def incomplete_objective():
         {"criterion_id": key, "met": False, "item_ids": [],
          "missing_requirements": ["Not established by this routing fixture"],
          "rationale": "Claim support is independent of task completion"}
-        for key in ("owner", "operation", "mechanism", "symptom_link")
+        for key in ("actionable_finding", "next_check")
     ]
 
 
@@ -723,7 +723,7 @@ def test_judge_timeout_does_not_retry_or_pass(monkeypatch, sdk):
     )
     budget = ModelCallBudget(2)
     evaluate = diagnosis_judge(
-        Settings(_env_file=None, eval_judge_timeout_seconds=0.01),
+        Settings(_env_file=None, eval_judge_timeout_seconds=0.1),
         sdk[0],
         budget,
     )
@@ -983,99 +983,97 @@ def test_verification_accepts_correct_rejection_with_held_out_labels(
     assert scores(result.run_evaluations)["model_calls_admitted"] == 1
 
 
-@pytest.mark.parametrize("runtime_review", ["off", "accepted", "rejected"])
-def test_judge_preserves_items_without_runtime_review(
+@pytest.mark.parametrize("runtime_review", [
+    "off", "accepted", "rejected", "timed_out", "missing", "mismatched",
+])
+def test_judge_audits_candidate_separately_from_triage_delivery(
     monkeypatch, sdk, tmp_path, runtime_review
 ):
-    from tracemind.agent.verification import parse_review, partial_draft
+    from tracemind.agent.verification import parse_review
+    from tracemind.agent.workflow.triage import reviewed_draft, unreviewed_draft
     from tracemind.agent.workflow.validation import render_items
     from tracemind.models.verification import (
-        ReviewItem,
-        ReviewSubject,
-        VerificationRecord,
+        ReviewItem, ReviewSubject, VerificationRecord,
     )
     from replay_support import run_replay_evaluation
 
     observed = asyncio.run(
         run_replay_evaluation(
             ReplayFixture.load(Path("evals/replays/payment_failure.json")),
-            Settings(
-                _env_file=None,
-                verifier_enabled=False,
-                agent_trace_directory=tmp_path,
-            ),
+            Settings(_env_file=None, verifier_enabled=False,
+                     agent_trace_directory=tmp_path),
         )
     )
-    items = [
-        ReviewItem(
-            id=f"F{i}",
-            section="finding",
-            text=f"Payment observation {i}",
-            evidence_ids=[observed.evidence[0].id],
-        )
-        for i in (1, 2)
-    ]
-    draft = render_items(
-        items, observed.diagnosis.status, observed.diagnosis.confidence
-    )
-    observed.diagnosis = Diagnosis(
-        incident_id=observed.diagnosis.incident_id, **draft.model_dump()
-    )
+    items = [ReviewItem(
+        id=f"F{i}", section="finding", text=f"Payment observation {i}",
+        evidence_ids=[observed.evidence[0].id],
+    ) for i in (1, 2)]
+    draft = render_items(items, observed.diagnosis.status,
+                         observed.diagnosis.confidence)
+    candidate = Diagnosis(incident_id=observed.diagnosis.incident_id,
+                          **draft.model_dump())
+    observed.diagnosis = candidate
     observed.run_state.candidate_items = items
     body = valid_review(observed)
-    body["assessments"].append(
-        {
-            **body["assessments"][0],
-            "item_id": "F2",
-        }
-    )
+    body["assessments"].append({**body["assessments"][0], "item_id": "F2"})
     if runtime_review != "off":
         subject = ReviewSubject(
-            diagnosis=observed.diagnosis,
-            evidence=observed.evidence,
-            items=items,
-            start=observed.investigation_start,
-            end=observed.investigation_end,
+            diagnosis=candidate, evidence=observed.evidence, items=items,
+            start=observed.investigation_start, end=observed.investigation_end,
         )
         runtime_body = json.loads(json.dumps(body))
         if runtime_review == "rejected":
             runtime_body["assessments"][1].update(
-                verdict="insufficient",
-                supporting_refs=[],
+                verdict="insufficient", supporting_refs=[],
                 missing_observations=["Missing linked observation"],
             )
         review = parse_review(
             AIMessage(content=json.dumps(runtime_body)), subject
         )
         observed.run_state.verification = VerificationRecord(
-            candidate=observed.diagnosis,
-            items=items,
-            rubric_version="test",
-            input_sha256="test",
-            review=review,
+            candidate=candidate, items=items, rubric_version="test",
+            input_sha256="test", review=review, status="completed",
         )
-        if runtime_review == "rejected":
-            partial = partial_draft(items, review)
-            observed.diagnosis = Diagnosis(
-                incident_id=observed.diagnosis.incident_id,
-                **partial.model_dump(),
-            )
-            body = valid_review(observed)
+        if runtime_review in {"timed_out", "missing", "mismatched"}:
+            observed.run_state.verification.status = "failed"
+            observed.run_state.verification.review = None
+            observed.run_state.verification.error_code = "timeout"
+            delivered = unreviewed_draft(candidate, items, "timeout")
+        else:
+            delivered = reviewed_draft(candidate, items, review)
+        observed.diagnosis = Diagnosis(
+            incident_id=candidate.incident_id, **delivered.model_dump()
+        )
+        if runtime_review == "missing":
+            observed.run_state.verification = None
+        elif runtime_review == "mismatched":
+            observed.diagnosis.items[0].text = "An unrelated new claim."
+    before = candidate.model_dump_json()
     body["completion"] = incomplete_objective()
     model = FakeModel(response=json.dumps(body))
-    monkeypatch.setattr(
-        "tracemind.evaluation.judge.create_review_model",
-        lambda settings: model,
-    )
+    monkeypatch.setattr("tracemind.evaluation.judge.create_review_model",
+                        lambda settings: model)
     evaluate = diagnosis_judge(
         Settings(_env_file=None), sdk[0], ModelCallBudget(1)
     )
-    result = scores(asyncio.run(evaluate(output=observed)))
+    evaluations = asyncio.run(evaluate(output=observed))
+    result = scores(evaluations)
+    if runtime_review in {"missing", "mismatched"}:
+        assert result["judge_completed"] is False
+        assert result["judge_subject"] == "unavailable"
+        assert not model.entered
+        return
     assert result["judge_completed"]
+    expected_subject = "delivery" if runtime_review == "off" else "candidate"
+    assert result["judge_subject"] == expected_subject
     packet = json.loads(model.entered[0][1].content)
-    assert [item["id"] for item in packet["items"]] == (
-        ["F1"] if runtime_review == "rejected" else ["F1", "F2"]
-    )
+    assert [item["id"] for item in packet["items"]] == ["F1", "F2"]
+    assert all("UNREVIEWED" not in item["text"] for item in packet["items"])
+    support = next(e for e in evaluations if e.name == "evidence_support")
+    assert support.metadata["judge_subject"] == expected_subject
+    assert candidate.model_dump_json() == before
+    if runtime_review != "off":
+        assert result["false_completion"] is False
 
 
 def test_http_retrieval_preserves_trace_across_process_boundary(

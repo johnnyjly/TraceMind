@@ -2,13 +2,16 @@
 
 (Please scroll down for English version.)
 
-TraceMind 使用指标、链路追踪和日志调查微服务故障，输出包含证据、假设和明确缺口的结构化诊断。项目使用 OpenTelemetry Demo 中可复现的故障场景进行验证。
+TraceMind 的近期定位是**面向值班工程师的发布故障初查助手**：从已有故障线索出发，整理指标、链路追踪和日志，输出包含证据、假设和明确缺口的结构化诊断。项目使用 OpenTelemetry Demo 中可复现的故障场景进行验证；尚未证明在生产值班中比人工更快或更准确。
+
+第一阶段先补齐证据入口：让 Agent 接住已知 trace/span、异常位置和服务版本，减少重复寻找线索。后续再验证部署到源码的映射与变更关联；只有拿到真实运行版本对应的代码，才能进一步判断发布是否导致故障。
 
 默认采用受预算约束的 LangGraph 单 Agent。可选的多 Agent 工作流包含协调者、最多两个并发调查任务，以及有限轮次的验证反馈。两种模式共用权限控制、模型与工具调用预算、保留证据和持久化运行状态。遥测数据由独立的只读 HTTP MCP 服务提供。
 
 ### 已实现能力
 
 - 固定调查时间窗口、证据引用与来源校验。
+- 可选结构化初始线索、首轮模型前的有界 trace/span 读取，以及资源版本、代码位置和异常事件的保留；用法及边界见[证据入口](docs/operations.md#initial-evidence-ingress)。
 - 上下文限制、有界重试、可选备用模型与受控收尾。
 - 持久化任务队列、worker 租约、checkpoint、取消与恢复。
 - 持久化 SSE 进度事件与事件后续追问。
@@ -174,9 +177,16 @@ Python 分发包和导入包均为 `tracemind`，应用配置前缀为 `TRACEMIN
 
 ---
 
-TraceMind investigates microservice incidents using metrics, traces and logs,
-then produces a structured diagnosis with supporting evidence, hypotheses and
-explicit gaps. It runs against reproducible faults in the OpenTelemetry Demo.
+TraceMind is being narrowed to an **initial release-incident investigation
+assistant for on-call engineers**. It starts from supplied incident clues and
+organizes metrics, traces and logs into a structured diagnosis with supporting
+evidence, hypotheses and explicit gaps. It runs against reproducible faults in
+the OpenTelemetry Demo; a production speed or accuracy advantage over manual
+investigation has not been established.
+
+The first phase fills evidence-entry gaps so the agent can use known trace/span
+IDs, exception locations and observed service versions. Deployment-to-source
+mapping and change correlation remain later work.
 
 A bounded LangGraph agent is the default. An opt-in multi-agent workflow adds a
 coordinator, up to two concurrent investigators and bounded verifier feedback.
@@ -186,6 +196,7 @@ run state. Telemetry comes from an independent read-only HTTP MCP service.
 ### What is implemented
 
 - Fixed investigation windows, evidence references and source validation.
+- Optional structured initial hints, bounded trace/span lookups before the first model call, and retained resource, code and exception fields; see [evidence ingress](docs/operations.md#initial-evidence-ingress).
 - Context limits, bounded retries, optional fallback and controlled finalization.
 - Persistent queued runs, worker leases, checkpoints, cancellation and recovery.
 - Durable SSE progress and incident follow-up questions.
@@ -365,10 +376,14 @@ uv run python scripts/run_experiment.py --task agent --name payment-baseline \
 ```
 
 The completion verifier reviews numbered assertions against retained evidence.
-In single-agent mode, rejection retains supported partial findings without an
-automatic investigation revision; multi-agent mode can use bounded feedback to
-revise or investigate again. Review failures cannot approve an unreviewed draft.
-Unknown mechanisms do not erase evidence-backed service localization.
+Initial triage retains findings, hypotheses and proposed checks with per-item
+evidence support and review labels, including counterevidence and missing
+observations. A supported location/propagation finding plus a concrete next
+inspection can complete triage without proving a unique root cause. Verification
+timeout returns a marked, unreviewed initial result when the candidate's
+citations are valid; it does not count as verification success. Multi-agent
+mode can use bounded feedback when the triage objective remains incomplete.
+See [delivery semantics](docs/operations.md#online-verifier-and-optional-langfuse).
 
 Model quality claims require controlled evaluations that retain failed,
 inconclusive and timeout attempts. See [evaluation](docs/evaluation.md) for

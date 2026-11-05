@@ -1,10 +1,12 @@
 """Completed diagnosis and its execution evidence."""
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence
+from tracemind.models.diagnosis import TriageItem
 from tracemind.models.memory import FeedbackUpdate
 from tracemind.models.run import RunState
 
@@ -30,10 +32,19 @@ class DiagnosisDraft(BaseModel):
 
     status: DiagnosisStatus
     root_cause: str = Field(min_length=1)
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(
+        ge=0, le=1,
+        description="Legacy uncalibrated model estimate, not a probability.",
+    )
     evidence_ids: list[UUID] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
+    items: list[TriageItem] = Field(default_factory=list)
+    review_status: Literal[
+        "not_requested", "completed", "timed_out", "unavailable"
+    ] = "not_requested"
+    review_error_code: str | None = None
+    triage_status: Literal["ready", "partial", "no_findings"] | None = None
     feedback_updates: list[FeedbackUpdate] = Field(
         default_factory=list, max_length=3,
     )

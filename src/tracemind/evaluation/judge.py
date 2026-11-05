@@ -15,6 +15,7 @@ from tracemind.agent.verification import (
     create_review_model,
     parse_review,
     review_input_bytes,
+    review_input_tokens,
     review_messages,
     review_options,
 )
@@ -44,6 +45,34 @@ def diagnosis_judge(settings, client, budget):
                 metric("judge_applicable", False),
                 metric("judge_completed", False),
             ]
+        state = observed.run_state
+        record = state.verification if state else None
+        delivery = observed.diagnosis.triage_status is not None
+        subject_kind = "delivery"
+        diagnosis = observed.diagnosis
+        if delivery:
+            fields = {"id", "section", "text", "evidence_ids", "knowledge_refs"}
+            if (record is None
+                    or record.candidate.incident_id != diagnosis.incident_id
+                    or [i.model_dump(include=fields) for i in diagnosis.items]
+                    != [i.model_dump() for i in record.items]):
+                return [
+                    metric("judge_subject", "unavailable"),
+                    metric("judge_completed", False,
+                           "triage_delivery_has_no_matching_candidate"),
+                ]
+            # Delivery labels are application output, not new model claims.
+            # Audit the immutable candidate without scoring its labels as facts.
+            diagnosis = record.candidate
+            items = record.items
+            subject_kind = "candidate"
+        else:
+            items = (
+                state.candidate_items if state and (
+                    record is None
+                    or (record.review and record.review.accepted)
+                ) else []
+            )
         subject = ReviewSubject(
             incident=(observed.run_state.incident
                       if observed.run_state else None),
@@ -51,20 +80,10 @@ def diagnosis_judge(settings, client, budget):
                      if observed.run_state else None),
             user_message=(observed.run_state.user_message
                           if observed.run_state else None),
-            diagnosis=observed.diagnosis,
+            initial_context=(state.initial_context if state else None),
+            diagnosis=diagnosis,
             evidence=observed.evidence,
-            items=(
-                observed.run_state.candidate_items
-                if observed.run_state
-                and (
-                    observed.run_state.verification is None
-                    or (
-                        observed.run_state.verification.review
-                        and observed.run_state.verification.review.accepted
-                    )
-                )
-                else []
-            ),
+            items=items,
             start=observed.investigation_start,
             end=observed.investigation_end,
             knowledge=observed.knowledge,
@@ -80,6 +99,9 @@ def diagnosis_judge(settings, client, budget):
         if (
             review_input_bytes(messages, settings.eval_judge_provider)
             > settings.eval_judge_input_bytes
+            or review_input_tokens(messages, settings.eval_judge_provider)
+            + settings.eval_judge_output_tokens
+            > settings.agent_context_tokens
         ):
             return [
                 metric(
@@ -104,6 +126,10 @@ def diagnosis_judge(settings, client, budget):
                             messages, settings.eval_judge_provider
                         )
                         > settings.eval_judge_input_bytes
+                        or review_input_tokens(
+                            messages, settings.eval_judge_provider,
+                        ) + settings.eval_judge_output_tokens
+                        > settings.agent_context_tokens
                     ):
                         raise ValueError("input_limit; no evidence dropped")
                     response = await model.ainvoke(
@@ -172,6 +198,11 @@ def diagnosis_judge(settings, client, budget):
             ]
         verdict = review.verdict
         details = {
+            "judge_subject": subject_kind,
+            "semantic_scope": (
+                "Original candidate, not the labelled final triage delivery."
+                if delivery else "Delivered diagnosis."
+            ),
             "reference_repairs": reference_repairs,
             "rubric_version": VERSION,
             "judge_provider": settings.eval_judge_provider,
@@ -187,6 +218,7 @@ def diagnosis_judge(settings, client, budget):
             ),
         }
         scores = [
+            metric("judge_subject", subject_kind),
             metric("judge_completed", True, **details),
             metric("support_verdict", verdict, review.rationale, **details),
             metric(

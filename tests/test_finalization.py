@@ -132,7 +132,9 @@ def test_token_watermark_leaves_single_agent_a_final_response(
 
     model, telemetry = ScriptedModel(respond=respond), Telemetry()
     result = run_service(make_service(
-        model, telemetry, tmp_path, limits=RunLimits(total_tokens=100000),
+        model, telemetry, tmp_path, limits=RunLimits(
+            total_tokens=100000, context_tokens=32768, output_tokens=4096,
+        ),
     ))
     assert result.state.status is RunStatus.SUCCEEDED
     assert model.calls == 2
@@ -153,7 +155,8 @@ def test_one_token_above_synthesis_reserve_cannot_fund_exploration(tmp_path):
     model, telemetry = ScriptedModel(respond=respond), Telemetry()
     result = run_service(make_service(
         model, telemetry, tmp_path,
-        limits=RunLimits(total_tokens=32769, diagnosis_repairs=0),
+        limits=RunLimits(total_tokens=32769, diagnosis_repairs=0,
+                         context_tokens=32768, output_tokens=4096),
     ))
     assert result.state.status is RunStatus.INCONCLUSIVE
     assert model.calls == 1
@@ -233,12 +236,14 @@ def test_finalization_preserves_context_gate(tmp_path):
     def respond(messages, calls):
         # Grow non-reducible assistant content after the first admitted call.
         response = tool_call()
-        response.content = "x" * 40_000
+        response.content = "request_id=1234567890 " * 6000
         return response
 
     model = ScriptedModel(respond=respond)
     run = run_service(make_service(
-        model, Telemetry(), tmp_path, limits=RunLimits(tool_calls=1),
+        model, Telemetry(), tmp_path, limits=RunLimits(
+            tool_calls=1, context_tokens=32768, output_tokens=4096,
+        ),
     ))
     assert run.state.stop_reason is StopReason.CONTEXT_LIMIT
     assert model.calls == 1

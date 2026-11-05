@@ -70,7 +70,7 @@ ledger is recorded even when uncapped. It separates provider-reported `used`,
 in-flight `reserved`, and conservatively charged `unknown` amounts. This is
 separate from the per-request context/output limits and from currency pricing.
 
-Every actual attempt reserves the conservative UTF-8 input estimate plus its
+Every actual attempt reserves the local tokenizer input estimate plus its
 bound output maximum before calling the provider. All main-model, repair,
 retry, verifier and auxiliary retrieval calls use the same admission path.
 Parallel calls reserve both run and task allowances without yielding. Complete
@@ -82,7 +82,7 @@ further unaffordable calls; the estimator is not an exact tokenizer guarantee.
 
 Before dispatch, new tasks divide the available pool after protecting synthesis
 and review: `(1 + diagnosis_repairs) * context_tokens` for synthesis and repairs,
-plus `verification_calls * (verifier_input_bytes + 1024 + verifier_output_tokens)`
+plus `verification_calls * context_tokens`
 for review. Completed/reused tasks receive no new allocation; unspent terminal
 task allowances can fund later batches. Coordinator calls protect review, and
 optional retrieval rejection leaves final synthesis usable. These conservative
@@ -215,8 +215,10 @@ relevance threshold. Source validation and independent E/K types still apply.
 Diagnosis, fallback, verification and retrieval use independently configured
 model roles. Retrieval preparation assumes English input and preserves exact
 identifiers without translating the query. Thinking tokens consume provider
-output limits. Context admission uses a conservative UTF-8-byte estimate rather
-than an exact provider tokenizer; configure limits using [.env.example](../.env.example).
+output limits. Every role uses the shared context envelope. Admission uses
+local `cl100k_base` tokens with 20% headroom and 1024 framing tokens, a proxy
+for provider tokenizers. Byte limits remain separate payload guards;
+configure limits using [.env.example](../.env.example).
 
 SDK retries are disabled; harness attempts own retries and budgets. Evaluation
 call admission also counts auxiliary retrieval, verification, offline Judge and
@@ -259,7 +261,7 @@ See [evaluation](evaluation.md) for experiment setup and comparison methods.
 
 ### Reference protocol and mechanism checks
 
-The current `multi-agent-graph-v7-contracts` uses `graph-v7` task contracts.
+The current `multi-agent-graph-v8-triage` uses `graph-v7` task contracts.
 It asks independent tasks to resolve different questions and prioritizes an
 available owner-scoped check when the observed failing operation still has
 competing mechanisms. Lack of budget or access remains an explicit gap; the

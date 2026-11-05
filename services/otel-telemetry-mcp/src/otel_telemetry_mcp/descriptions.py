@@ -61,39 +61,36 @@ DESCRIPTIONS = {
         "sample cannot exclude intermittent failures."
     ),
     "get_trace_detail": (
-        "Inspect a known trace: page all spans, errors first then duration. "
-        "Filter by exact service/operation before pagination; fast normal "
-        "controls remain accessible. Each span includes coverage with "
-        "matched_span_count, page_offset, next_offset and trace_fingerprint. "
-        "Use next_offset to continue with identical filters; a changed "
-        "fingerprint means the normalized span observations changed "
-        "between reads; volatile backend warnings are excluded. "
-        "Return service, operation, duration_ms, diagnostic attributes, "
-        "is_error and parent_span_id when available. observed_at is the "
-        "span start time (timestamp_source=span_startTime), not collection "
-        "time; its end is observed_at plus duration_ms. Cross-service clock "
-        "skew can affect timestamp ordering. Use successful spans "
-        "to investigate latency even when there are no errors. Parent and "
-        "child durations overlap; do not sum them. Results are bounded, "
-        "not a complete span tree unless coverage establishes it. "
-        "This tool does not filter by time.\n\n"
-        "Use the exact attributes.trace_id from trace or log evidence, "
-        "not the evidence's id. If no trace ID is available, search_traces "
-        "or search_logs may supply one when those tools are available. "
-        "Do not invent a trace ID or reconstruct an abbreviated value."
+        "Page a known trace: errors first, then longest spans. Exact "
+        "service/operation/span_id filters precede pagination; fast normal "
+        "controls remain accessible. coverage has matched_span_count, "
+        "page_offset, next_offset and trace_fingerprint. Continue with "
+        "identical filters; changed fingerprints mean changed observations "
+        "(warnings excluded). Returns service, operation, duration_ms, "
+        "diagnostic, is_error and parent_span_id when present. observed_at "
+        "is span start (timestamp_source=span_startTime); end=start+duration. "
+        "Clock skew affects ordering; parent/child durations overlap, so do "
+        "not sum them. Successful spans can explain latency. Only coverage "
+        "establishes completeness; no time filter. Resource/code/exception "
+        "fields retain provenance, conflicts and "
+        "truncation/redaction/omission. "
+        "Exception time differs from span start; events alone do not set "
+        "is_error. Versions do not verify source commits.\n\n"
+        "Use exact attributes.trace_id from trace/log evidence; "
+        "search_traces/search_logs may supply it if authorized. Never use "
+        "evidence.id, invent IDs or expand abbreviations."
     ),
     "search_logs": (
-        "Find OpenSearch logs for one service in the supplied start/end "
-        "window, optionally matching text. Results are a bounded sample; "
-        "use the exact observed telemetry service name. If a filtered "
-        "search is empty or fails to explain the observed operation, "
-        "inspect one unfiltered sample for that service in the same "
-        "window, unless already inspected. Do not cycle through guessed "
-        "service names or assume the cause must appear at error severity. "
-        "absence of a message does not prove absence of a fault. Event time "
-        "is preferred; when it is absent or zero, observation time is used, "
-        "marked by timestamp_source=observedTimestamp in evidence. "
-        "Observation time is not proof of the exact event occurrence time."
+        "Search OpenSearch logs for an exact observed service in start/end. "
+        "Results are a bounded sample, not proof of absence. Optional text "
+        "filter: if empty or irrelevant to the operation, inspect one "
+        "unfiltered sample for that service/window unless already done. Do "
+        "not guess service variants or assume faults appear only at error "
+        "severity. Prefer event time; absent/zero time falls back to "
+        "observation time (timestamp_source=observedTimestamp), not proof of "
+        "occurrence time. Resource/code/exception fields carry provenance, "
+        "conflicts and truncation/redaction/omission; labels do not verify "
+        "source commits."
     ),
 }
 
@@ -137,6 +134,8 @@ PARAMETER_DESCRIPTIONS = {
         ),
     },
     "get_trace_detail": {
+        "span_id": "Optional exact 16-character hexadecimal span ID within "
+        "the supplied trace, applied before pagination.",
         "service": "Optional exact observed service, applied before paging.",
         "operation": (
             "Optional exact observed operation, applied before paging."

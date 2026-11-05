@@ -24,6 +24,12 @@ TOOLS = {
     "read_knowledge": "saved reference sections",
 }
 MESSAGES = {
+    "intake.started": (
+        "collecting_context", "Reading supplied trace references"),
+    "intake.target_completed": (
+        "context_received", "Initial trace lookup finished"),
+    "intake.completed": (
+        "context_ready", "Initial evidence and gaps are ready"),
     "collaboration.planned": ("planning", "Investigation tasks assigned"),
     "collaboration.handoff": (
         "synthesizing", "Checking investigator findings"),
@@ -35,7 +41,9 @@ MESSAGES = {
         "verifying", "Reviewing diagnosis against retained evidence"),
     "verification.completed": ("verified", "Diagnosis review completed"),
     "verification.failed": (
-        "error", "Diagnosis review failed; completion blocked"),
+        "review_incomplete", "Review unavailable; preparing marked initial triage"),
+    "diagnosis.delivered": (
+        "triage_ready", "Initial triage available with item review labels"),
     "verification.cancelled": ("cancelling", "Diagnosis review cancelled"),
     "run.queued": ("queued", "Investigation received, awaiting execution"),
     "run.started": ("started", "Starting investigation"),
@@ -76,6 +84,7 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         "added", "received", "duplicates", "record_count",
         "applied", "skipped", "rejected_count", "verdict", "accepted", "code",
         "role", "phase", "task_id", "round",
+        "triage_status", "review_status", "review_error_code",
     } and isinstance(value, (str, int, float, bool))}
     if event.kind.startswith("tool."):
         tool = TOOLS.get(data.get("tool"), "tool")
@@ -107,9 +116,9 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
     elif event.kind == "run.finished":
         phase = "finished"
         message = {
-            "succeeded": "Diagnosis completed",
+            "succeeded": "Initial triage completed",
             "inconclusive": (
-                "Investigation finished without a confirmed root cause"),
+                "Initial triage finished; review labels and evidence gaps are available"),
             "cancelled": "Investigation cancelled",
             "failed": "Investigation failed",
         }.get(data.get("status"), "Investigation finished")

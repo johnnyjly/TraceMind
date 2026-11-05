@@ -57,8 +57,8 @@ MCP clients may ignore them and use the standard content/output schema.
 | query_metrics | expression, at | — |
 | discover_metrics | start, end | service, metric, limit |
 | search_traces | service, start, end | min_duration_ms (> 0), errors_only (default false) |
-| get_trace_detail | trace_id | — |
-| search_logs | service, start, end | text |
+| get_trace_detail | trace_id | service, operation, span_id, offset, limit |
+| search_logs | service, start, end | text, trace_id |
 
 All timestamps must include a timezone; windows require end > start. Context
 fields are marked `x-investigation-context: start/end` in the advertised schema.
@@ -72,12 +72,50 @@ old event is not admitted merely because its observation time is recent.
 Both groups are queried with the same service/text/window restrictions and
 merged into at most 100 observations, newest selected time first.
 
-`get_trace_detail` retains error spans and adds the twenty longest successful
-spans with service, operation, duration and available parent IDs. This exposes
-slow dependencies without requiring an error. The result is bounded context,
-not a complete span tree; parent and child durations must not be summed.
+`get_trace_detail` applies exact service/operation/span filters before paging
+all spans, errors first then duration. `span_id` is an optional 16-character
+hexadecimal ID within the supplied trace. Pages default to 25 spans (maximum
+100); `coverage` reports matched counts, `next_offset`, filters and a fingerprint
+of the normalized trace. This exposes successful slow dependencies as well as
+fast controls. Results are not a complete span tree unless coverage establishes
+it; parent and child durations must not be summed.
 Why: Trace details contain overlapping and bounded spans, so summing them misstates
 request latency.
+
+Trace spans and logs retain source-reported context in `attributes`:
+
+- `resource` contains allowlisted OTel service name/namespace/version/instance,
+  deployment environment, Kubernetes namespace/pod/cluster, container and host
+  identifiers. `resource_metadata.provenance` identifies each input field;
+  `conflicts` retains differing reported values. Resource scope takes precedence
+  over span/log attributes, then modern names over legacy aliases within a scope.
+- `code` contains reported `file`, `line`, `function` and legacy `namespace`, with
+  provenance and conflict metadata. Modern `code.file.path`, `code.line.number`,
+  `code.function.name` take precedence over `code.filepath`, `code.lineno` and
+  `code.function`. String values are limited to 1 KiB; truncation is explicit.
+- `exceptions` contains up to four records from Jaeger span tags/events or log
+  attributes, in source order. Each record contains its source, reported event
+  timestamp, type/message/stacktrace and code context when present. Span-tag
+  exceptions have no independent event time. Log observation-time fallback does
+  not become an exception event timestamp. Recording an exception does not
+  change span error status, and stack frames are not inferred by parsing text.
+
+Exception records share a 32 KiB serialized UTF-8 budget per evidence item.
+Per-field limits (512-byte type, 1 KiB message, 4 KiB stack) retain head and tail;
+escaping and metadata may require further reduction or omission of event code.
+`exception_coverage` reports retained bytes, total/returned/omitted event counts,
+redaction and truncation. Resource/code conflicts and provenance also remain
+bounded; absent values are not invented. Log body previews are capped at 16 KiB,
+with `body_truncation` identifying their source and retained size.
+
+Explicit credential forms (authorization, cookies, password/token/API-key
+assignments and credentials in connection URLs) are redacted before returning
+exception text, log bodies and duplicated status/diagnostic fields. Structured
+log-body credential keys are also redacted. Markers identify redacted fields;
+this targeted sanitation is not a general PII detector. Arbitrary resource and
+span attributes are not exported. Resource labels remain telemetry claims,
+not verified mappings to a deployment or source revision. Environment/version
+search selectors are not offered without verified backend index support.
 
 Replies contain exactly one of:
 

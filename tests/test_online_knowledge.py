@@ -225,7 +225,13 @@ def test_knowledge_compression_keeps_reader_contract_and_latest_parent_page():
         ),
     ]
     request = request.override(messages=messages, tools=list(tools.values()))
-    selection = select_context(request, estimate_input(request) - 4000)
+    compact_messages = list(messages)
+    compact_messages[2] = messages[2].model_copy(update={
+        "content": json.dumps(index),
+    })
+    allowance = estimate_input(request.override(messages=compact_messages))
+    assert allowance < estimate_input(request)
+    selection = select_context(request, allowance)
     assert selection.fits
     assert json.loads(selection.request.messages[2].content) == index
     assert selection.request.messages[-1].content == "parent section page"
@@ -530,7 +536,9 @@ def test_planning_and_keyword_calls_share_usage_budget_and_trace():
 
     async def completion(messages, *, max_tokens, keyword_extraction):
         auxiliary_calls.append(keyword_extraction)
-        assert max_tokens == POLICY.model_output_tokens
+        # Keyword extraction explicitly requests a smaller output ceiling.
+        expected = 2048 if keyword_extraction else POLICY.model_output_tokens
+        assert max_tokens == expected
         if not keyword_extraction:
             # DeepSeek rejects JSON mode without this word in the prompt.
             assert "json" in messages[0]["content"].lower()

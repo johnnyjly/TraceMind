@@ -109,7 +109,7 @@ def test_specialist_context_overflow_leaves_another_thread_admissible():
     middleware = HarnessMiddleware(run, output_name="InvestigationReport")
     model = FakeListChatModel(responses=["unused"])
     oversized = ModelRequest(
-        model=model, messages=[HumanMessage(content="x" * 20000)],
+        model=model, messages=[HumanMessage(content="request_id=1234567890 " * 3000)],
     )
     with pytest.raises(TaskContextExceeded):
         middleware._prepare_request(oversized)
@@ -151,12 +151,12 @@ def test_evidence_identity_cannot_be_rewritten_after_publication():
 
 
 def unmet_completion():
-    return [{"criterion_id": key, "met": key != "mechanism",
+    return [{"criterion_id": key, "met": key != "next_check",
              "item_ids": ["F1"],
              "missing_requirements": (["UNREVIEWED_ASSERTION"]
-                                      if key == "mechanism" else []),
+                                      if key == "next_check" else []),
              "rationale": "Explicit scripted completion judgement"}
-            for key in ("owner", "operation", "mechanism", "symptom_link")]
+            for key in ("actionable_finding", "next_check")]
 
 
 @pytest.mark.parametrize("status", ["complete", "inconclusive"])
@@ -177,6 +177,6 @@ def test_supported_claims_do_not_imply_completed_task(monkeypatch, status):
     assert result.state.status is RunStatus.INCONCLUSIVE
     assert result.state.verification.review.accepted
     assert not result.state.verification.review.task_completed
-    assert "completion-mechanism" in result.diagnosis.root_cause
+    assert "next_check" in result.diagnosis.root_cause
     assert "UNREVIEWED_ASSERTION" not in result.diagnosis.root_cause
     assert "Payment Charge failed" in result.diagnosis.root_cause

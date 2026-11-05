@@ -292,8 +292,10 @@ def test_collaboration_context_bounds_history_without_losing_request():
                          summary="large summary " * 100)
                 for _ in range(20)]
     text = collaboration_context(state, evidence)
-    assert len(text.encode()) <= (8000 - 1000) // 3
+    from tracemind.agent.workflow.context import estimate_payload
     payload = json.loads(text)
+    assert estimate_payload(payload) <= (8000 - 1000) // 3
+    assert len(text.encode()) <= 16000
     assert payload["request"] == state.user_message
     assert payload["available_evidence_count"] == 20
     assert len(state.previous_messages[0]) > 800

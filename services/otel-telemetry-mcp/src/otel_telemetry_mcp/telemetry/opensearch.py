@@ -11,6 +11,10 @@ from otel_telemetry_mcp.observations import Evidence, EvidenceSource
 from otel_telemetry_mcp.telemetry.errors import TelemetryClientError
 from otel_telemetry_mcp.telemetry.http import request_json
 from otel_telemetry_mcp.telemetry.attributes import diagnostic_attributes
+from otel_telemetry_mcp.telemetry.ingress import (
+    MAX_LOG_BODY_BYTES, clip_text, code_context, exception_context,
+    resource_context, sanitize_text, sanitize_value,
+)
 
 
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -158,13 +162,27 @@ class OpenSearchClient:
                 "OpenSearch log has an invalid timestamp"
             ) from exc
 
-        summary = (
-            body if isinstance(body, str) else json.dumps(body, sort_keys=True)
-        )
+        clean_body = sanitize_value(body)
+        summary = (clean_body if isinstance(clean_body, str)
+                   else json.dumps(clean_body, sort_keys=True))
         body_attributes = {}
+        if clean_body != body:
+            body_attributes["body_redacted"] = True
+        body_bytes = len(summary.encode())
+        if body_bytes > MAX_LOG_BODY_BYTES:
+            summary = clip_text(summary, MAX_LOG_BODY_BYTES)
+            body_attributes["body_truncation"] = {
+                "source": "opensearch.body",
+                "original_bytes": body_bytes,
+                "retained_bytes": len(summary.encode()),
+                "limit_bytes": MAX_LOG_BODY_BYTES,
+            }
         if isinstance(body, str) and not body.strip():
             summary = "[Empty log body]"
-            body_attributes = {"body_empty": True, "original_body": body}
+            body_attributes.update({
+                "body_empty": True,
+                "original_body": clip_text(body, MAX_LOG_BODY_BYTES),
+            })
         severity = source.get("severity")
         if not isinstance(severity, dict):
             severity = {}
@@ -180,13 +198,27 @@ class OpenSearchClient:
                 source.get("attributes") or {}
             ),
         }
+        log_attributes = source.get("attributes") or {}
+        attributes.update(resource_context([
+            ("opensearch.resource", source.get("resource") or {}),
+            ("opensearch.attributes", log_attributes),
+        ]))
+        code = code_context(log_attributes, "opensearch.attributes")
+        if code:
+            attributes["code"] = code
+        attributes.update(exception_context([(
+            "opensearch.attributes", log_attributes,
+            timestamp if not time_attributes else None, None, None,
+        )]))
 
         return Evidence(
             source=EvidenceSource.LOG,
             summary=summary,
             observed_at=observed_at,
             service=service,
-            query=f"service={service}" + (f" text={text}" if text else ""),
+            query=sanitize_text(
+                f"service={service}" + (f" text={text}" if text else "")
+            )[0],
             attributes={
                 key: value
                 for key, value in attributes.items()

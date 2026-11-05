@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import logging
@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 from tracemind.agent.errors import DiagnosisError
 from tracemind.agent.runtime.llm import MODEL_SERVICE_ERRORS
+from tracemind.agent.runtime.token_count import ESTIMATOR_VERSION
 from tracemind.agent.storage.io import run_io
 from tracemind.agent.workflow.tool_policy import resolve_tool_policy
 from tracemind.agent.runtime.recovery import (
@@ -64,6 +65,10 @@ class InvestigationClosed(Exception):
     """Reject further tool admission while allowing a final diagnosis."""
 
 
+class IntakeBudgetExhausted(Exception):
+    """Stop initial lookups without consuming the remaining run budget."""
+
+
 class TaskToolBudgetExhausted(Exception):
     """End only the executing task's tool allocation, not the run."""
 
@@ -107,6 +112,11 @@ class RunHarness:
             purpose=state.purpose,
         )
         self._started = monotonic()
+        if (state.deadline_at is None
+                and state.limits.duration_seconds is not None):
+            state.deadline_at = (state.started_at or datetime.now(UTC)) + timedelta(
+                seconds=state.limits.duration_seconds,
+            )
         self._persist = persist
         self._is_cancelled = is_cancelled
         self._persistence_lock = asyncio.Lock()
@@ -116,6 +126,7 @@ class RunHarness:
         self._role = ContextVar("agent_role", default=None)
         self._task_id = ContextVar("agent_task_id", default=None)
         self._inflight_tools = {}
+        self.intake_active = False
         self.verifier = None
         self._stop: StopReason | None = None
         self._signatures = dict(state.tool_signatures)
@@ -292,18 +303,22 @@ class RunHarness:
             self.check_active()
 
     @property
-    def remaining_seconds(self) -> float:
-        """Return the nonnegative run time remaining on the monotonic
-        clock.
+    def remaining_seconds(self) -> float | None:
+        """Return remaining time, or None for a call-budget-only run.
+
+        A persisted absolute deadline still applies on resume. The monotonic
+        timer also bounds finite runs if the wall clock moves backwards.
         """
+        remaining = []
         if self.state.deadline_at is not None:
-            return max(
-                0, (self.state.deadline_at - datetime.now(UTC)).total_seconds()
+            remaining.append(
+                (self.state.deadline_at - datetime.now(UTC)).total_seconds()
             )
-        return max(
-            0,
-            self.state.limits.duration_seconds - (monotonic() - self._started),
-        )
+        if self.state.limits.duration_seconds is not None:
+            remaining.append(
+                self.state.limits.duration_seconds - (monotonic() - self._started)
+            )
+        return max(0, min(remaining)) if remaining else None
 
     def emit(
         self,
@@ -400,7 +415,8 @@ class RunHarness:
             raise RunStopped(
                 self.state.stop_reason or StopReason.INTERNAL_ERROR
             )
-        if self.remaining_seconds <= 0:
+        remaining = self.remaining_seconds
+        if remaining is not None and remaining <= 0:
             self.stop(StopReason.DEADLINE)
 
     def authorize_tool(self, name: str) -> None:
@@ -434,6 +450,23 @@ class RunHarness:
                 parent_span_id=self.state.id,
                 data={"reason": reason.value},
             )
+
+    def reserve_verification_time(self) -> None:
+        """Close discovery early enough for synthesis and semantic review.
+
+        This is an admission reserve; in-flight calls still obey the run's
+        hard deadline. Zero preserves the existing scheduling policy.
+        """
+        reserve = self.state.limits.verification_reserve_seconds
+        remaining = self.remaining_seconds
+        if (reserve and self.state.verification_policy is not None
+                and self.state.verification is None
+                and self.state.agent_mode == "single"
+                and remaining is not None
+                and remaining <= (
+                    reserve + self.state.limits.model_timeout_seconds
+                )):
+            self.begin_finalization(StopReason.DEADLINE)
 
     @property
     def verification_calls(self) -> int:
@@ -488,6 +521,7 @@ class RunHarness:
         reserved_calls: int = 0,
         before_attempt: Callable[[], None] | None = None,
         retry_attempts: int | None = None,
+        timeout_seconds: float | None = None,
         estimated_tokens: int | Callable[[], int] | None = None,
         protected_tokens: int | Callable[[], int] = 0,
     ) -> T:
@@ -509,6 +543,7 @@ class RunHarness:
                     call,
                     model_name=model_name,
                     purpose=purpose,
+                    timeout_seconds=timeout_seconds,
                     required=required,
                     reserved_calls=reserved_calls,
                     estimated_tokens=(estimated_tokens()
@@ -520,8 +555,8 @@ class RunHarness:
                 )
             except (TimeoutError, *MODEL_SERVICE_ERRORS) as exc:
                 failure = classify_failure(exc)
-                if failure.retryable and attempt < retries:
-                    await self._wait_retry("model", attempt, failure)
+                if (failure.retryable and attempt < retries
+                        and await self._wait_retry("model", attempt, failure)):
                     continue
                 timed_out = isinstance(exc, TimeoutError)
                 if not required or (allow_fallback and failure.retryable):
@@ -540,8 +575,8 @@ class RunHarness:
         target: str,
         attempt: int,
         failure: Failure,
-    ) -> None:
-        """Schedule cancellable backoff, honoring server hints and deadline."""
+    ) -> bool:
+        """Honor retry hints only when the requested wait fits our policy."""
         self.check_active()
         limits = self.state.limits
         delay = min(
@@ -550,8 +585,16 @@ class RunHarness:
         )
         delay *= random.uniform(0.5, 1)
         delay = max(delay, failure.retry_after or 0)
-        if delay >= self.remaining_seconds:
+        remaining = self.remaining_seconds
+        if remaining is not None and delay >= remaining:
             self.stop(StopReason.DEADLINE)
+        if delay > limits.retry_max_backoff_seconds:
+            self.emit(
+                "recovery.retry_skipped",
+                data={"target": target, "reason": "retry_after_exceeds_limit",
+                      "delay_seconds": delay},
+            )
+            return False
         self.emit(
             "recovery.retry_scheduled",
             parent_span_id=self.state.id,
@@ -566,6 +609,7 @@ class RunHarness:
         await self.checkpoint()
         await asyncio.sleep(delay)
         self.check_active()
+        return True
 
     def check_progress(self) -> None:
         """Close investigation after rounds without new usable observations."""
@@ -634,6 +678,7 @@ class RunHarness:
         *,
         model_name: str,
         purpose: str,
+        timeout_seconds: float | None = None,
         required: bool = True,
         reserved_calls: int = 0,
         estimated_tokens: int | None = None,
@@ -675,6 +720,13 @@ class RunHarness:
         if purpose != "verification":
             self._model_spans[self._task_id.get()] = span
         started = monotonic()
+        timeout_seconds = (
+            self.state.limits.model_timeout_seconds
+            if timeout_seconds is None else timeout_seconds
+        )
+        remaining = self.remaining_seconds
+        if remaining is not None:
+            timeout_seconds = min(timeout_seconds, remaining)
         self.emit(
             "model.started",
             span_id=span,
@@ -683,6 +735,9 @@ class RunHarness:
                 "model": model_name,
                 "call": call_number,
                 "purpose": purpose,
+                "timeout_seconds": timeout_seconds,
+                "estimated_tokens": estimated_tokens,
+                "token_estimator": ESTIMATOR_VERSION,
             },
         )
         reported = False
@@ -691,9 +746,7 @@ class RunHarness:
         call_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         valid_usage = []
         try:
-            async with asyncio.timeout(
-                self.state.limits.model_timeout_seconds
-            ):
+            async with asyncio.timeout(timeout_seconds):
                 await self.checkpoint()
                 response = await call()
             # Main-loop responses wrap AIMessage; auxiliary calls return it.
@@ -785,6 +838,7 @@ class RunHarness:
                 duration_ms=(monotonic() - started) * 1000,
                 data={"error_type": "TimeoutError"},
             )
+            self.check_active()
             raise
         except asyncio.CancelledError:
             self.emit(
@@ -840,9 +894,8 @@ class RunHarness:
     @property
     def verification_token_reserve(self):
         policy = self.state.verification_policy
-        return (self.verification_calls * (
-            policy.input_bytes + 1024 + policy.output_tokens
-        )) if policy else 0
+        return (self.verification_calls * self.state.limits.context_tokens
+                if policy else 0)
 
     @property
     def investigation_token_pool(self):
@@ -981,9 +1034,13 @@ class RunHarness:
                         and retry_safe
                         and attempt < self.state.limits.retry_attempts
                     ):
+                        if (self.intake_active
+                                and self.state.intake_progress.attempts
+                                >= self.state.intake_progress.attempt_limit):
+                            raise IntakeBudgetExhausted() from exc
                         self.check_task_tool_budget()
-                        await self._wait_retry(name, attempt, failure)
-                        continue
+                        if await self._wait_retry(name, attempt, failure):
+                            continue
                     if (
                         failure.retryable
                         or failure.category in {"invalid_request", "not_found"}
@@ -1014,6 +1071,11 @@ class RunHarness:
             raise InvestigationClosed()
         record = self.check_task_tool_budget()
         # Both reservations precede the checkpoint and any backend execution.
+        if self.intake_active:
+            progress = self.state.intake_progress
+            if progress.attempts >= progress.attempt_limit:
+                raise IntakeBudgetExhausted()
+            progress.attempts += 1
         if record is not None:
             record.tool_calls += 1
         self.state.tool_calls[name] = self.state.tool_calls.get(name, 0) + 1

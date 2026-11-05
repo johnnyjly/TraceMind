@@ -23,6 +23,7 @@ from tracemind.agent.runtime.knowledge import knowledge_context
 from tracemind.agent.workflow.validation import resolve_proposal
 from tracemind.agent.workflow.handoffs import freeze_task_input, role_tools
 from tracemind.agent.workflow.context import (
+    estimate_payload,
     json_text,
     _evidence_preview,
     _prioritized_evidence,
@@ -325,7 +326,7 @@ def coordinator_context(state, evidence):
     for item in _prioritized_evidence(state, evidence, priority):
         preview = model_references(_evidence_preview(item), state)
         candidate = {**packet, "originals": [*packet["originals"], preview]}
-        if len(json_text(candidate).encode()) <= allowance:
+        if estimate_payload(candidate) <= allowance:
             packet = candidate
             selected.add(preview["id"])
     packet["omitted_original_refs"] = [
@@ -358,7 +359,7 @@ class MultiAgentRunner:
             raise ValueError("multi-agent does not support memory writes")
         if state.collaboration is None:
             state.collaboration = CollaborationState()
-            state.prompt_version = "multi-agent-graph-v7-contracts"
+            state.prompt_version = "multi-agent-graph-v9-focused-triage"
             await harness.checkpoint()
         workflow = state.collaboration
         if workflow.phase == "completed":
@@ -767,7 +768,7 @@ class MultiAgentRunner:
             ):
                 gaps = [c for c in result.claims if c.kind == "uncertainty"]
             can_continue = (
-                (gaps or not result.task_completed)
+                not result.task_completed
                 and workflow.round < 2
                 and workflow.decision < 6
                 and state.limits.model_calls - state.model_calls

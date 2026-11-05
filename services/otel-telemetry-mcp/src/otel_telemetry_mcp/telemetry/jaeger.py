@@ -12,6 +12,9 @@ from otel_telemetry_mcp.observations import Evidence, EvidenceSource
 from otel_telemetry_mcp.telemetry.errors import TelemetryClientError
 from otel_telemetry_mcp.telemetry.http import request_json
 from otel_telemetry_mcp.telemetry.attributes import diagnostic_attributes
+from otel_telemetry_mcp.telemetry.ingress import (
+    code_context, exception_context, resource_context, tag_values,
+)
 
 
 class JaegerClient:
@@ -106,6 +109,7 @@ class JaegerClient:
         *,
         service: str | None = None,
         operation: str | None = None,
+        span_id: str | None = None,
         offset: int = 0,
         limit: int = 25,
     ) -> list[Evidence] | dict:
@@ -148,6 +152,8 @@ class JaegerClient:
             for e in items
             if (service is None or e.service == service)
             and (operation is None or e.attributes["operation"] == operation)
+            and (span_id is None
+                 or e.attributes["span_id"].lower() == span_id.lower())
         ]
         items.sort(
             key=lambda e: (
@@ -168,6 +174,8 @@ class JaegerClient:
             "trace_fingerprint": fingerprint,
             "selection": {"service": service, "operation": operation},
         }
+        if span_id is not None:
+            coverage["selection"]["span_id"] = span_id
         for item in page:
             item.attributes["coverage"] = coverage
         return page if page else {"kind": "trace_detail_coverage", **coverage}
@@ -306,10 +314,29 @@ class JaegerClient:
             ):
                 attributes["parent_span_id"] = str(reference["spanID"])
                 break
+        diagnostic = diagnostic_attributes(tags)
+        attributes["diagnostic"] = diagnostic
         for key in ("error.type", "otel.status_description", "status.message"):
-            if key in tags:
-                attributes[key.replace(".", "_")] = tags[key]
-        attributes["diagnostic"] = diagnostic_attributes(tags)
+            if key in diagnostic:
+                attributes[key.replace(".", "_")] = diagnostic[key]
+                for marker in ("redacted", "truncated"):
+                    if diagnostic.get(key + "." + marker):
+                        attributes[key.replace(".", "_") + "_" + marker] = True
+        attributes.update(resource_context([
+            ("jaeger.process.tags", tag_values(process.get("tags"))),
+            ("jaeger.span.tags", tags),
+        ]))
+        code = code_context(tags, "jaeger.span.tags")
+        if code:
+            attributes["code"] = code
+        exceptions = [("jaeger.span.tags", tags, None, None, None)]
+        logs = span.get("logs")
+        for index, event in enumerate(logs if isinstance(logs, list) else []):
+            if isinstance(event, dict):
+                exceptions.append(("jaeger.span.logs", tag_values(
+                    event.get("fields")), event.get("timestamp"),
+                    "microseconds", index))
+        attributes.update(exception_context(exceptions))
 
         return Evidence(
             source=EvidenceSource.TRACE,

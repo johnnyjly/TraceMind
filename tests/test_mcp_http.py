@@ -120,9 +120,11 @@ class Backend:
         ]
 
     async def get_trace_detail(
-        self, trace_id, *, service=None, operation=None, offset=0, limit=25
+        self, trace_id, *, service=None, operation=None, span_id=None,
+        offset=0, limit=25,
     ):
         self.calls.append(("get_trace_detail", trace_id))
+        self.selected_span_id = span_id
         return [
             Evidence(
                 id=UUID(int=3),
@@ -246,8 +248,10 @@ def test_discovered_definitions_five_calls_and_local_evidence(monkeypatch):
                     tools["search_traces"].ainvoke({"service": "checkout"}),
                 )
                 await tools["get_trace_detail"].ainvoke(
-                    {"trace_id": trace[0]["attributes"]["trace_id"]}
+                    {"trace_id": trace[0]["attributes"]["trace_id"],
+                     "span_id": "b" * 16}
                 )
+                assert backend.selected_span_id == "b" * 16
                 logs = await tools["search_logs"].ainvoke(
                     {"service": "payment"}
                 )

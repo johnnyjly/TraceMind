@@ -177,3 +177,24 @@ def test_run_api_queues_reads_and_cancels(tmp_path: Path) -> None:
     assert status.json()["status"] == "queued"
     assert pending.status_code == 409
     assert cancelled.json()["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("duration", [None, 600])
+def test_claim_and_recovery_preserve_optional_deadline(tmp_path, duration):
+    path = tmp_path / "deadline.sqlite3"
+    repository = RunRepository(path)
+    state = queued_state()
+    state.limits.duration_seconds = duration
+    repository.create(state, request_hash="deadline")
+    first = repository.claim_next()
+    assert first is not None
+    deadline = first.run.state.deadline_at
+    if duration is None:
+        assert deadline is None
+    else:
+        assert (deadline - first.run.state.started_at).total_seconds() == duration
+    expire_lease(path, state.id)
+    resumed = RunRepository(path).claim_next()
+    assert resumed is not None and resumed.resuming
+    assert resumed.run.state.deadline_at == deadline
+    assert resumed.run.state.limits.duration_seconds == duration

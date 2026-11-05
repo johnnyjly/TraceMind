@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="TRACEMIND_",
+        env_parse_none_str="none",
         extra="ignore",
     )
 
@@ -33,8 +34,8 @@ class Settings(BaseSettings):
     eval_judge_deepseek_thinking: bool = True
     eval_judge_reasoning_effort: Literal["low", "high", "max"] = "high"
     eval_judge_timeout_seconds: float = Field(default=180, gt=0)
-    eval_judge_input_bytes: int = Field(default=65536, ge=1)
-    eval_judge_output_tokens: int = Field(default=8192, ge=1)
+    eval_judge_input_bytes: int = Field(default=524288, ge=1)
+    eval_judge_output_tokens: int = Field(default=12288, ge=1)
     verifier_enabled: bool = True
     verifier_provider: Literal["google", "openai", "deepseek"] = "deepseek"
     verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
@@ -43,8 +44,8 @@ class Settings(BaseSettings):
     verifier_timeout_seconds: float = Field(
         default=180, gt=0, allow_inf_nan=False
     )
-    verifier_input_bytes: int = Field(default=131072, ge=1)
-    verifier_output_tokens: int = Field(default=8192, ge=1)
+    verifier_input_bytes: int = Field(default=524288, ge=1)
+    verifier_output_tokens: int = Field(default=16384, ge=1)
     telemetry_transport: Literal["mcp"] = "mcp"
     telemetry_mcp_url: AnyHttpUrl = "http://127.0.0.1:8012/mcp"
     telemetry_mcp_response_bytes: int = Field(default=16_777_216, ge=1024)
@@ -61,21 +62,24 @@ class Settings(BaseSettings):
     agent_fallback_model: str | None = Field(default=None, min_length=1)
     agent_recursion_limit: int = Field(default=12, ge=2, le=50)
     agent_mode: Literal["single", "multi"] = "single"
-    agent_context_tokens: int = Field(default=32768, ge=1)
-    agent_output_tokens: int = Field(default=8192, ge=1)
+    agent_context_tokens: int = Field(default=65536, ge=1)
+    agent_output_tokens: int = Field(default=16384, ge=1)
     agent_max_total_tokens: int | None = Field(default=None, ge=1)
     agent_observation_bytes: int = Field(default=8_388_608, ge=1)
     agent_max_model_calls: int = Field(default=8, ge=1)
     agent_max_tool_calls: int = Field(default=12, ge=1)
     agent_max_identical_tool_calls: int = Field(default=2, ge=1)
-    agent_timeout_seconds: float = Field(
-        default=600, gt=0, allow_inf_nan=False
+    agent_timeout_seconds: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False
     )
     agent_model_timeout_seconds: float = Field(
         default=180, gt=0, allow_inf_nan=False
     )
     agent_tool_timeout_seconds: float = Field(
         default=20, gt=0, allow_inf_nan=False
+    )
+    agent_verification_reserve_seconds: float = Field(
+        default=0, ge=0, allow_inf_nan=False
     )
     agent_allowed_tools: tuple[ToolName, ...] = TOOL_NAMES
     agent_trace_directory: Path | None = Path("artifacts/runs")
@@ -101,7 +105,7 @@ class Settings(BaseSettings):
     agent_knowledge_context_bytes: int = Field(default=8192, ge=64)
     agent_knowledge_max_queries: int = Field(default=3, ge=1, le=3)
     agent_knowledge_result_limit: int = Field(default=5, ge=1, le=20)
-    agent_knowledge_model_output_tokens: int = Field(default=8192, ge=1)
+    agent_knowledge_model_output_tokens: int = Field(default=16384, ge=1)
     agent_knowledge_reserved_model_calls: int = Field(default=1, ge=1)
     agent_memory_environment: str | None = Field(
         default=None,
@@ -219,6 +223,9 @@ class Settings(BaseSettings):
             duration_seconds=self.agent_timeout_seconds,
             model_timeout_seconds=self.agent_model_timeout_seconds,
             tool_timeout_seconds=self.agent_tool_timeout_seconds,
+            verification_reserve_seconds=(
+                self.agent_verification_reserve_seconds
+            ),
             retry_attempts=self.agent_retry_attempts,
             retry_backoff_seconds=self.agent_retry_backoff_seconds,
             retry_max_backoff_seconds=self.agent_retry_max_backoff_seconds,

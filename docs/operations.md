@@ -42,6 +42,111 @@ Synchronous operational timeouts return 504; tool/model failures and invalid
 diagnoses return 502. Error `detail` is a string. Responses with run metadata
 include `X-TraceMind-Run-ID` and `X-TraceMind-Stop-Reason` headers.
 
+## Initial evidence ingress
+
+Diagnosis, run and investigation creation accept optional `initial_context`.
+An investigating follow-up may supply a new context. The following is an
+illustrative addition to the request above, not a live trace:
+
+```json
+{
+  "initial_context": {
+    "prefetch_traces": true,
+    "origin": {
+      "source": "on-call-engineer",
+      "external_id": "incident-42",
+      "reported_at": "2024-01-01T00:05:00Z"
+    },
+    "traces": [{
+      "trace_id": "0123456789abcdef0123456789abcdef",
+      "span_id": "0123456789abcdef",
+      "service": "checkout",
+      "operation": "POST /checkout"
+    }],
+    "error": {
+      "type": "TimeoutError",
+      "message": "Payment call timed out",
+      "file": "checkout.py",
+      "line": 42
+    },
+    "scope": {"environment": "production"},
+    "deployments": [{"service": "checkout", "version": "v2"}]
+  }
+}
+```
+
+These are caller-reported hints, stored on each run, not on the incident. They
+never receive an evidence ID. `origin.source` does not authenticate the sender
+or install an alert connector. A supplied code path/line is not source access,
+and a version label is not a verified commit or causal proof of a bad release.
+
+Before the first model call, TraceMind reads supplied trace locators through the
+same authorized `get_trace_detail` binding, harness and evidence collector used
+by the agent. Exact `span_id` filtering occurs before backend pagination. Service
+and operation hints do not restrict this lookup. Deployment hints are scoped to
+their named service and do not filter out differently versioned downstream spans.
+The first model receives separate reported hints, retained E observations and
+lookup results. `backend_coverage` summarizes backend paging before run time/scope
+filters; the lookup's E IDs identify only retained matches. An empty coverage
+object means coverage is unknown. Existing `read_evidence` retrieves
+retained details by E handle.
+
+| Boundary | Behavior |
+| --- | --- |
+| Input | At most 3 trace/span locators, 10 deployment hints, 32 KiB serialized context; unknown fields rejected |
+| Identifiers | Nonzero 16/32 hex trace ID, optional nonzero 16 hex span ID; normalized to lowercase |
+| Initial reads | At most 3 actual tool attempts including retries, also charged to the run's existing budget/deadline |
+| Scope | Explicit environment/cluster/namespace must match observed resource identity; missing, conflicting, redacted or truncated identity is excluded as unknown |
+| Lookup outcomes | `found`, `not_found`, `unavailable`, `outside_window`, `scope_mismatch`, `scope_unknown`, `coverage_incomplete` or `skipped`, with reason when applicable |
+| Disable | Omit context for old behavior, or set `prefetch_traces: false` to retain the same hints without initial reads |
+| Resume | Attempts are checkpointed before I/O; completed locators are not repeated; an interrupted request can be retried within the remaining cap |
+| Follow-up | Parent observations may be retained; new initial hints are supplied explicitly and parent locators are not automatically rerun |
+| Explain | New context is rejected; explanation cannot perform initial remote reads |
+
+An explicit scope is a filtering constraint, not an authorization boundary or
+backend routing instruction. It applies to all newly retained observations;
+metrics without matching resource identity are therefore excluded too. The
+current tools do not provide environment/version search selectors. Filtered
+results cannot establish the health of the scoped population.
+
+Jaeger process/span tags and exception events, and OpenSearch resource/attribute
+fields, retain allowlisted resource identity, version, code location and exception
+information when present. Sources, conflicting aliases, truncation and redaction
+are recorded. Large model previews omit conflicted selected values and show
+`conflicting_fields`; full retained records keep the competing source values.
+Exception-only code locations remain available in previews when space permits.
+
+`observed_at` remains the span start time. Span evidence is retained only when
+that start lies within the investigation window; an exception inside the window
+on an earlier-started span is not currently retained. Retained exception events
+keep their own timestamp and get a separate `in_investigation_window` marker,
+recomputed when a follow-up changes the window. Missing/invalid event timestamps
+remain unknown. An exception event alone does not make a span erroneous.
+
+Each observation retains at most 4 exception source records (not necessarily
+distinct failures), with a combined 32 KiB exception allowance; each stack is
+bounded to 4 KiB, and log bodies to 16 KiB. Common credential forms are redacted
+before storage, but this is not comprehensive secret or PII detection. Do not
+submit credentials. Model previews are further bounded in UTF-8 bytes, with
+reported-field reduction and omitted-evidence counts. Full sanitized hints stay
+in the run snapshot, while `read_evidence` exposes only retained observations.
+Extremely small context budgets still fail through the existing context gate.
+
+A found locator means at least one matching retained span, not a complete trace
+or confirmed root cause. Initial lookup reads one page; existing coverage and
+pagination remain necessary for larger traces. 404 means unavailable telemetry,
+not service health. Permissions, cancellation and overall run budgets still
+apply; disabling prefetch does not disable tool use later in the investigation.
+
+Offline acceptance is covered by `test_intake.py`, `test_intake_api.py`,
+`test_initial_evidence.py`, `test_mcp_evidence_ingress.py` and the existing MCP,
+worker, context and persistence tests. These verify contracts and execution,
+not diagnosis accuracy or speed. A later paired evaluation can keep incident,
+window, hints, model and total budgets fixed, toggle `prefetch_traces`, and compare
+total time/tool attempts, useful first evidence and final correctness. Keep
+primary failures and timeouts in the denominator. No such production benefit is
+claimed by this phase.
+
 ## Configuration and budgets
 
 [.env.example](../.env.example) is the settings reference. Its example diagnostic
@@ -49,8 +154,8 @@ profile overrides smaller code defaults when copied into `.env`:
 
 | Setting suffix (`TRACEMIND_AGENT_`) | Example profile | Code default |
 | --- | --- | --- |
-| `CONTEXT_TOKENS` | 131072 | 32768 |
-| `OUTPUT_TOKENS` | 8192 | 8192 |
+| `CONTEXT_TOKENS` | 65536 | 65536 |
+| `OUTPUT_TOKENS` | 16384 | 16384 |
 | `OBSERVATION_BYTES` | 8388608 | 8388608 |
 | `RECURSION_LIMIT` | 50 | 12 |
 | `MAX_MODEL_CALLS` | 15 | 8 |
@@ -60,7 +165,30 @@ profile overrides smaller code defaults when copied into `.env`:
 Attempt timeouts default to 180 seconds for models and 20 for tools. These limits
 are not model capacity declarations. Retries/repairs consume attempts; evidence
 reads consume tool attempts. Evaluation also applies the case's tool-call cap.
-Context estimates are byte-based, distinct from provider-reported token usage.
+Context admission uses the locally bundled `cl100k_base` tokenizer, with
+20% headroom plus 1024 framing tokens. This is a proxy for DeepSeek and
+other provider tokenizers, not their exact count. Serialized messages,
+tools and output schemas are counted; output is reserved within the shared
+65536-token envelope for investigation, auxiliary retrieval and review.
+The offline judge uses the same configured envelope. Vocabulary loading is
+offline and checksum-verified. Actual provider usage remains authoritative
+for the ledger; events retain the estimator version. UTF-8 byte limits
+remain independent storage and payload guards, never token quantities.
+
+Investigation and knowledge-helper output limits are 16384 tokens. Online
+verification and the offline judge allow 12288 output tokens and 524288 input
+bytes. Thinking tokens consume the output allowance too. These are maxima,
+not targets for response length, and they do not extend any deadline.
+Existing persisted runs keep their original limits; explicit environment
+values override defaults. Restart API/worker processes after configuration
+changes.
+
+The cumulative token cap remains unset by default. If enabled, it must also
+cover admission reservations: two reviews reserve their maximum input plus
+output, and synthesis/repair reserve context allowances. The example optional
+cap is 4000000; retaining an old 1000000 cap with the larger defaults can close
+investigation before useful work. Unknown usage remains charged; reported
+usage is kept separately from these conservative reservations.
 
 `TRACEMIND_AGENT_ALLOWED_TOOLS` is an explicit JSON grant list. Defaults are
 `query_metrics`, `discover_metrics`, `search_traces`, `get_trace_detail`,
@@ -221,9 +349,71 @@ Online verification is enabled by default for newly created runs. Set
 explicitly disable it. Restart existing API and worker processes after changes.
 One tool-free completion review consumes the existing model-call/time budgets
 and shared token accounting; it never automatically repairs a diagnosis.
-Semantic rejection returns inconclusive, and review failure fails the run.
-Persisted policy and review state govern resumed runs.
-Why: Admission freezes the gate so later worker settings cannot silently remove it.
+The product delivers initial triage for an on-call engineer. Completion means
+an evidence-supported failure location or propagation finding and a concrete
+next inspection. A unique implementation root cause or release attribution is
+not required; unsupported factual claims are still rejected individually.
+
+The response retains all numbered `items`, including proposed checks, evidence
+gaps and rejected claims. Each item has `review_status`, `evidence_support`,
+original citations, separate supporting/conflicting citations and review
+rationale. Supported proposals are marked `not_applicable` for factual evidence
+support: a sensible inspection is not proof of an incident cause. Supported
+uncertainty remains uncertainty. Legacy `root_cause` and `remediation` text also
+carry review labels. `confidence` remains an uncalibrated legacy model estimate;
+no per-item probability is inferred from model agreement.
+
+Top-level `triage_status` is `ready`, `partial` or `no_findings` independently
+of whether every claim passed review. `review_status` distinguishes `completed`,
+`timed_out`, `unavailable` and `not_requested`. Recoverable review failure returns
+an inconclusive initial result with every item explicitly unreviewed, after
+citation/window validation; it never counts as passed verification. A current
+prior reviewed result may be retained if a later attempt fails. Explicit user
+cancellation, invalid candidate citations and stale review contracts retain
+their existing failure semantics. Unreviewed/rejected output is not saved as
+learned feedback. With verification explicitly disabled, legacy delivery is
+unchanged and metadata defaults to `not_requested`.
+
+Persisted policy and review state govern resumed runs. Existing reviews from
+older rubric versions are not silently reused. The default overall deadline is
+disabled (`TRACEMIND_AGENT_TIMEOUT_SECONDS=none`); a positive value enables it.
+Direct and worker runs retain the frozen policy on resume, including any
+existing absolute deadline. Per-model and per-tool request timeouts remain
+finite, so a stuck external request cannot hang an otherwise bounded run.
+If a provider's Retry-After exceeds the configured maximum backoff, automatic
+retry is declined rather than waiting indefinitely or retrying too early.
+
+Model/tool calls, repeated queries, no-progress rounds and graph steps bound
+investigation. Failed attempts also consume the shared budget. Before each
+investigation attempt the harness reserves calls for candidate synthesis,
+remaining diagnosis repair, and two review attempts (initial plus at most one
+output-contract repair). Runtime snapshots show the discovery allocation and
+reserved calls. Graph recursion limits count graph steps, not model turns.
+
+The verifier uses `TRACEMIND_VERIFIER_TIMEOUT_SECONDS` for **each request**,
+independently of the ordinary per-model timeout. A format repair receives its
+own request timeout but still consumes the shared model-call budget. If an
+overall deadline is explicitly enabled, both attempts use only its remaining
+time. `model.started` records the effective attempt timeout;
+`verification.started` records input size and remaining run time (null when
+disabled). Timed-out review returns an explicitly unreviewed candidate.
+The default review output budget is 16384 tokens, including provider reasoning.
+Provider-truncated/incomplete responses return `incomplete_output` without
+repeating the same request as a format repair; all candidate items remain
+explicitly unreviewed. Complete responses with invalid JSON/contracts can still
+use one bounded repair. A larger allowance enables output, not semantic trust.
+
+Initial reports normally contain 2-4 key observations, at most one useful
+hypothesis and one essential gap, and 1-2 next checks. This is a prioritization
+instruction, not silent truncation: material transaction-state gaps remain.
+Every emitted item is still reviewed, with all retained evidence, including
+uncited counterevidence. Reported labels and telemetry facts are kept separate.
+Repeated evidence attributes remain losslessly shared in the review packet.
+
+`TRACEMIND_AGENT_VERIFICATION_RESERVE_SECONDS` remains an optional single-agent
+admission rule for explicitly time-bounded trials. It has no effect without an
+overall deadline and cannot guarantee completion of in-flight calls. Admission
+freezes policy so later worker settings cannot silently change the run.
 
 Runtime Langfuse tracing is separately opt-in through `TRACEMIND_LANGFUSE_*`;
 normal operation does not require the evaluation server. For model limits,

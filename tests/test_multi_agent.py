@@ -1293,6 +1293,14 @@ def test_interruption_after_review_retains_supported_findings(
             "rationale": "No supporting observation",
         }
     )
+    body["completion"] = [
+        {"criterion_id": "actionable_finding", "met": True,
+         "item_ids": ["F1"], "missing_requirements": [],
+         "rationale": "Payment failure is located"},
+        {"criterion_id": "next_check", "met": False,
+         "item_ids": [], "missing_requirements": ["A concrete next check"],
+         "rationale": "The candidate did not propose the next inspection"},
+    ]
     service, _, reviewer, _ = service_for(
         monkeypatch, respond=respond, reviewer=ReviewModel(body=body)
     )
@@ -1301,7 +1309,19 @@ def test_interruption_after_review_retains_supported_findings(
     assert result.state.stop_reason == reason
     assert result.diagnosis.status.value == "inconclusive"
     assert "Payment Charge failed" in result.diagnosis.root_cause
-    assert "Database is unavailable" not in result.diagnosis.root_cause
+    assert "Database is unavailable" in result.diagnosis.root_cause
+    assert result.diagnosis.review_status == "completed"
+    assert result.diagnosis.triage_status == "partial"
+    items = {item.id: item for item in result.diagnosis.items}
+    assert items["F1"].review_status == "reviewed"
+    assert items["F1"].evidence_support == "supported"
+    assert items["F1"].supporting_evidence_ids == [EVIDENCE.id]
+    assert items["F2"].review_status == "reviewed"
+    assert items["F2"].evidence_support == "insufficient"
+    assert items["F2"].missing_observations == ["Database failure"]
+    assert "[REVIEWED; insufficient evidence] Database is unavailable" in (
+        result.diagnosis.root_cause
+    )
     assert result.diagnosis.evidence_ids == [EVIDENCE.id]
     assert not result.state.candidate_items
     assert result.state.verification.review.claims[0].verdict == "supported"
@@ -1387,20 +1407,48 @@ def test_feedback_candidate_and_counterevidence_keep_handoff_priority():
     assert not packet["tasks"] and not packet["hypotheses"]
 
 
-def test_first_review_failure_does_not_publish_unreviewed_candidate(
-    monkeypatch,
+@pytest.mark.parametrize("mode,review_status,error_code", [
+    ("unavailable", "unavailable", "model_unavailable"),
+    ("timeout", "timed_out", "timeout"),
+])
+def test_first_review_failure_returns_candidate_without_endorsement(
+    monkeypatch, mode, review_status, error_code,
 ):
-    reviewer = ReviewModel(body=review(), mode="unavailable")
-    service, _, _, _ = service_for(monkeypatch, reviewer=reviewer)
-    with pytest.raises(DiagnosisError) as caught:
-        run(service)
-    state = caught.value.state
-    assert state.status is RunStatus.FAILED
+    reviewer = ReviewModel(body=review(), mode=mode)
+    service, model, _, _ = service_for(monkeypatch, reviewer=reviewer)
+    service._verification_policy.timeout_seconds = 0.05
+    result = run(service)
+    state = result.state
+    assert state.status is RunStatus.INCONCLUSIVE
     assert state.stop_reason is StopReason.VERIFICATION_FAILED
-    assert state.diagnosis is None
+    assert state.diagnosis == result.diagnosis
+    assert result.diagnosis.status.value == "inconclusive"
+    assert result.diagnosis.review_status == review_status
+    assert result.diagnosis.review_error_code == error_code
+    assert result.diagnosis.triage_status == "partial"
+    assert result.diagnosis.evidence_ids == [EVIDENCE.id]
+    assert len(result.diagnosis.items) == 1
+    item = result.diagnosis.items[0]
+    assert item.text == "Payment Charge failed"
+    assert item.review_status == "unreviewed"
+    assert item.evidence_support == "not_assessed"
+    assert item.kind is None and not item.supporting_evidence_ids
+    assert "UNREVIEWED; evidence support not assessed" in (
+        result.diagnosis.root_cause
+    )
+    # The multi runner never returns its local draft when its first review
+    # fails; delivery must recover the saved, provenance-checked candidate.
+    assert state.collaboration.draft.root_cause == (
+        state.verification.candidate.root_cause
+    )
+    assert state.verification.status == "failed"
+    assert state.verification.error_code == error_code
     assert not state.collaboration.reviews
-    assert not any(e.kind in {"diagnosis.partial", "diagnosis.accepted"}
-                   for e in state.events)
+    assert not state.feedback_updates
+    assert reviewer.calls == 1
+    assert state.model_calls == model.calls + reviewer.calls
+    assert not any(e.kind == "diagnosis.accepted" for e in state.events)
+    assert trace_issues(state) == []
 
 
 @pytest.mark.parametrize("new_evidence", [False, True])
@@ -1426,6 +1474,14 @@ def test_later_review_outage_reuses_only_current_prior_support(
         "missing_observations": ["Database failure"],
         "rationale": "No supporting observation",
     })
+    body["completion"] = [
+        {"criterion_id": "actionable_finding", "met": True,
+         "item_ids": ["F1"], "missing_requirements": [],
+         "rationale": "Payment failure is located"},
+        {"criterion_id": "next_check", "met": False,
+         "item_ids": [], "missing_requirements": ["A concrete next check"],
+         "rationale": "The candidate did not propose the next inspection"},
+    ]
     reviewer = ReviewModel(body=body)
     dispatched = False
 
@@ -1466,35 +1522,57 @@ def test_later_review_outage_reuses_only_current_prior_support(
         telemetry=ChangedTelemetry(),
         limits=RunLimits(model_calls=24, tool_calls=20),
     )
+    result = run(service)
+    state, evidence = result.state, result.evidence
+    assert state.status is RunStatus.INCONCLUSIVE
+    assert result.diagnosis.status.value == "inconclusive"
+    assert len(state.collaboration.reviews) == 1
+    prior = state.collaboration.reviews[0]
+    assert review_still_current(state, prior, evidence) is not new_evidence
+    assert "Database is unavailable" in prior.candidate.root_cause
+    assert "Initial triage" not in prior.candidate.root_cause
+    assert prior.review.claims[0].verdict == "supported"
+    assert prior.review.claims[1].verdict == "insufficient"
+    assert "NEW_UNVERIFIED_SENTINEL" in (
+        state.collaboration.draft.root_cause
+    )
     if new_evidence:
-        with pytest.raises(DiagnosisError) as caught:
-            run(service)
-        state, evidence = caught.value.state, caught.value.evidence
         assert changed.id in {e.id for e in evidence}
-        assert state.status is RunStatus.FAILED
-        assert state.diagnosis is None
-        assert not review_still_current(
-            state, state.collaboration.reviews[0], evidence,
-        )
+        assert result.diagnosis.review_status == "unavailable"
+        assert result.diagnosis.review_error_code == "model_unavailable"
+        assert "NEW_UNVERIFIED_SENTINEL" in result.diagnosis.root_cause
+        assert "Payment Charge failed" not in result.diagnosis.root_cause
+        assert len(result.diagnosis.items) == 1
+        item = result.diagnosis.items[0]
+        assert item.review_status == "unreviewed"
+        assert item.evidence_support == "not_assessed"
+        assert item.kind is None and not item.supporting_evidence_ids
+        assert state.verification.status == "failed"
+        assert review_still_current(state, state.verification, evidence)
         assert not any(e.kind == "diagnosis.partial" for e in state.events)
     else:
-        result = run(service)
-        state, evidence = result.state, result.evidence
-        assert state.status is RunStatus.INCONCLUSIVE
-        assert result.diagnosis.status.value == "inconclusive"
+        assert result.diagnosis.review_status == "completed"
+        assert result.diagnosis.triage_status == "partial"
         assert "Payment Charge failed" in result.diagnosis.root_cause
-        assert "Database is unavailable" not in result.diagnosis.root_cause
+        assert "Database is unavailable" in result.diagnosis.root_cause
         assert "NEW_UNVERIFIED_SENTINEL" not in result.diagnosis.root_cause
+        items = {item.id: item for item in result.diagnosis.items}
+        assert items["F1"].review_status == "reviewed"
+        assert items["F1"].evidence_support == "supported"
+        assert items["F1"].supporting_evidence_ids == [EVIDENCE.id]
+        assert items["F2"].review_status == "reviewed"
+        assert items["F2"].evidence_support == "insufficient"
+        assert items["F2"].missing_observations == ["Database failure"]
         assert result.diagnosis.evidence_ids == [EVIDENCE.id]
         assert not state.candidate_items
-        prior = state.collaboration.reviews[0]
-        assert review_still_current(state, prior, evidence)
+        assert state.verification.input_sha256 == prior.input_sha256
         assert any(
             e.kind == "diagnosis.partial"
             and e.data["review_input_sha256"] == prior.input_sha256
             for e in state.events
         )
-        assert trace_issues(state) == []
+    assert not state.feedback_updates
     assert reviewer.calls == 2
     assert state.stop_reason is StopReason.VERIFICATION_FAILED
     assert not any(e.kind == "diagnosis.accepted" for e in state.events)
+    assert trace_issues(state) == []

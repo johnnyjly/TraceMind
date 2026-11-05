@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from tracemind.models import Diagnosis, Incident
+from tracemind.models.intake import InitialContext
 from tracemind.models.run import RunPurpose, RunStatus, StopReason
 
 
@@ -15,6 +16,7 @@ class DiagnosisRequest(BaseModel):
     """Incident and timezone-aware start/end bounds for an investigation."""
 
     incident: Incident
+    initial_context: InitialContext | None = None
     investigation_start: AwareDatetime
     investigation_end: AwareDatetime
 
@@ -51,6 +53,7 @@ class FollowUpRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=4000)
     purpose: Literal["investigate", "explain"] = "investigate"
+    initial_context: InitialContext | None = None
     investigation_start: AwareDatetime | None = None
     investigation_end: AwareDatetime | None = None
 
@@ -59,6 +62,8 @@ class FollowUpRequest(BaseModel):
         """Require nonblank input and a complete, increasing time window."""
         if not self.message.strip():
             raise ValueError("message must not be blank")
+        if self.purpose == "explain" and self.initial_context is not None:
+            raise ValueError("explanation cannot accept new initial context")
         if ((self.investigation_start is None) !=
                 (self.investigation_end is None)):
             raise ValueError("provide both investigation bounds or neither")

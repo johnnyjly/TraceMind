@@ -7,6 +7,7 @@ from datetime import datetime
 from uuid import UUID
 
 from tracemind.models import Evidence
+from tracemind.models.intake import InitialContext
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.run import (
     RunLimits,
@@ -31,9 +32,12 @@ def plan_follow_up(
     start: datetime | None,
     end: datetime | None,
     memory_policy: MemoryPolicy | None,
+    initial_context: InitialContext | None = None,
 ) -> tuple[RunState, list[Evidence]]:
     start = start or parent.state.investigation_start
     end = end or parent.state.investigation_end
+    if purpose is RunPurpose.EXPLAIN and initial_context is not None:
+        raise RunConflict("explanation cannot accept new initial context")
     if start.utcoffset() is None or end.utcoffset() is None or end <= start:
         raise ValueError("invalid follow-up investigation window")
     if purpose is RunPurpose.EXPLAIN and (
@@ -64,16 +68,17 @@ def plan_follow_up(
             else "single"
         ),
         incident=parent.state.incident,
+        initial_context=initial_context,
         investigation_id=investigation_id,
         parent_run_id=parent.state.id,
         purpose=purpose,
         prompt_version=(
-            "multi-agent-graph-v7-contracts"
+            "multi-agent-graph-v9-focused-triage"
             if (
                 parent.state.agent_mode == "multi"
                 and purpose is RunPurpose.INVESTIGATE
             )
-            else "single-agent-followup-v5"
+            else "single-agent-followup-v7-focused-triage"
         ),
         user_message=message,
         previous_messages=[s.user_message for s in history if s.user_message],

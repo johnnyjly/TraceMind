@@ -2,6 +2,8 @@
 
 from hashlib import sha256
 
+from otel_telemetry_mcp.telemetry.ingress import sanitize_text
+
 
 DIAGNOSTIC_KEYS = frozenset(
     {
@@ -60,6 +62,8 @@ DIAGNOSTIC_KEYS = frozenset(
 
 
 def diagnostic_attributes(values: dict) -> dict:
+    if not isinstance(values, dict):
+        return {}
     selected = {}
     aliases = {
         "userId": "user.id",
@@ -77,6 +81,10 @@ def diagnostic_attributes(values: dict) -> dict:
         elif key in DIAGNOSTIC_KEYS and isinstance(
             value, (str, int, float, bool)
         ):
+            if isinstance(value, str):
+                value, redacted = sanitize_text(value)
+                if redacted:
+                    selected[key + ".redacted"] = True
             selected[key] = value[:1600] if isinstance(value, str) else value
             if isinstance(value, str) and len(value) > 1600:
                 selected[key + ".truncated"] = True

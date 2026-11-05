@@ -741,7 +741,7 @@ def test_large_results_compress_and_omitted_counterevidence_is_retrievable(
     records = [Evidence(
         source=EvidenceSource.LOG, summary=f"Payment error {i}",
         service="payment", observed_at=END,
-        attributes={"details": "x" * 850},
+        attributes={"details": "0123456789abcdef " * 50},
     ) for i in range(59)]
     counterevidence = Evidence(
         source=EvidenceSource.LOG, summary="Payment succeeded",
@@ -776,7 +776,9 @@ def test_large_results_compress_and_omitted_counterevidence_is_retrievable(
         return diagnosis(messages)
 
     model = ScriptedModel(respond=respond)
-    run = run_service(make_service(model, LargeTelemetry(), tmp_path))
+    run = run_service(make_service(model, LargeTelemetry(), tmp_path,
+        limits=RunLimits(context_tokens=16384, output_tokens=4096),
+    ))
     assert run.state.status is RunStatus.SUCCEEDED
     assert len(run.evidence) == 60
     assert run.diagnosis.evidence_ids == [counterevidence.id]
@@ -794,7 +796,7 @@ def test_accumulating_logs_continue_after_bounded_index_compression(tmp_path):
     records = [Evidence(
         source=EvidenceSource.LOG, summary=f"Payment failure {i}",
         service="payment", observed_at=END,
-        attributes={"details": "x" * 850},
+        attributes={"details": "0123456789abcdef " * 50},
     ) for i in range(300)]
     records[-1] = records[-1].model_copy(update={
         "summary": "Payment succeeded", "attributes": {"status": "SUCCESS"},
@@ -827,7 +829,7 @@ def test_accumulating_logs_continue_after_bounded_index_compression(tmp_path):
     model = ScriptedModel(respond=respond)
     run = run_service(make_service(
         model, LargeTelemetry(), tmp_path, recursion_limit=50,
-        limits=RunLimits(context_tokens=36_864),
+        limits=RunLimits(context_tokens=16384, output_tokens=4096),
     ))
     assert run.state.status is RunStatus.SUCCEEDED
     assert model.calls == 6
@@ -966,3 +968,105 @@ def test_model_retry_rebinds_final_attempt_without_investigation_tools(
     assert run.state.model_calls == 3
     assert run.tool_call_count == 1
     assert run.diagnosis.status is DiagnosisStatus.COMPLETE
+
+
+@pytest.mark.parametrize("reserve,enabled,remaining,closed", [
+    (90, True, 151, False), (90, True, 149, True),
+    (0, True, 20, False), (90, False, 20, False),
+])
+def test_verification_time_reserve_closes_tool_admission(
+    monkeypatch, reserve, enabled, remaining, closed,
+):
+    from tracemind.agent.runtime.harness import InvestigationClosed
+    from tracemind.models.verification import VerificationPolicy
+
+    state = RunState(
+        incident=INCIDENT, investigation_start=START, investigation_end=END,
+        status=RunStatus.RUNNING, allowed_tools=("query_metrics",),
+        limits=RunLimits(duration_seconds=180, model_timeout_seconds=60,
+                         verification_reserve_seconds=reserve),
+        verification_policy=VerificationPolicy() if enabled else None,
+    )
+    harness = RunHarness(state)
+    monkeypatch.setattr(
+        RunHarness, "remaining_seconds", property(lambda s: remaining)
+    )
+    harness.reserve_verification_time()
+    assert (harness.finalization_reason is not None) == closed
+    if closed:
+        with pytest.raises(InvestigationClosed):
+            harness.authorize_tool("query_metrics")
+    else:
+        harness.authorize_tool("query_metrics")
+
+
+def test_role_timeout_cannot_extend_total_run_deadline():
+    state = RunState(
+        incident=INCIDENT, investigation_start=START, investigation_end=END,
+        status=RunStatus.RUNNING,
+        allowed_tools=(),
+        limits=RunLimits(duration_seconds=0.04, retry_attempts=0),
+    )
+    harness = RunHarness(state)
+
+    async def call():
+        await asyncio.sleep(1)
+
+    with pytest.raises(RunStopped) as caught:
+        asyncio.run(harness.model_call(
+            call, model_name="test", purpose="verification", required=False,
+            timeout_seconds=10,
+        ))
+    assert caught.value.reason is StopReason.DEADLINE
+    assert state.usage.unreported_model_calls == 1
+
+
+def test_no_deadline_resume_still_enforces_model_calls():
+    state = RunState(
+        incident=INCIDENT, investigation_start=START, investigation_end=END,
+        started_at=START, status=RunStatus.RUNNING, allowed_tools=(),
+        limits=RunLimits(duration_seconds=None, model_calls=2),
+    )
+    state = RunState.model_validate_json(state.model_dump_json())
+    harness = RunHarness(state, resume=True)
+    assert state.deadline_at is None
+    assert harness.remaining_seconds is None
+
+    async def invoke():
+        return AIMessage(content="done")
+
+    async def run():
+        for _ in range(2):
+            await harness.model_call(invoke, model_name="test")
+        with pytest.raises(RunStopped) as caught:
+            await harness.model_call(invoke, model_name="test")
+        assert caught.value.reason is StopReason.MODEL_BUDGET
+
+    asyncio.run(run())
+    assert state.model_calls == 2
+    assert state.deadline_at is None
+
+
+def test_existing_absolute_deadline_survives_optional_duration():
+    state = RunState(
+        incident=INCIDENT, investigation_start=START, investigation_end=END,
+        status=RunStatus.RUNNING, deadline_at=START,
+        limits=RunLimits(duration_seconds=None), allowed_tools=(),
+    )
+    harness = RunHarness(state, resume=True)
+    with pytest.raises(RunStopped) as caught:
+        harness.check_active()
+    assert caught.value.reason is StopReason.DEADLINE
+
+
+def test_unlimited_service_uses_count_snapshot(tmp_path):
+    model = ScriptedModel(respond=normal_response)
+    run = run_service(make_service(
+        model, Telemetry(), tmp_path,
+        limits=RunLimits(duration_seconds=None, verification_reserve_seconds=90),
+    ))
+    assert run.state.deadline_at is None
+    snapshot = model.inputs[0][-1].text
+    assert "No overall time deadline" in snapshot
+    assert "calls are held for synthesis, repairs and review" in snapshot
+    assert run.state.stop_reason is StopReason.COMPLETED

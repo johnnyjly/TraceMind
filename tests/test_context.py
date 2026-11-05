@@ -123,7 +123,15 @@ def request_with_results():
 def test_context_compression_keeps_pairs_ids_and_input_immutable():
     request, content = request_with_results()
     before = estimate_input(request)
-    selected = select_context(request, before - 2000)
+    compact = request.override(messages=[
+        *request.messages[:2],
+        *(message.model_copy(update={
+            "content": json_text(message.artifact["context_index"]),
+        }) for message in request.messages[2:]),
+    ])
+    allowance = estimate_input(compact)
+    assert allowance < before
+    selected = select_context(request, allowance)
     assert selected.fits
     assert selected.after < selected.before
     assert selected.reduced_messages > 0
@@ -234,7 +242,8 @@ def test_estimator_counts_schema_unicode_and_ignores_private_artifacts():
     assert estimate_input(request.override(response_format=None)) < base
     assert estimate_input(request.override(tools=[{
         "type": "function", "function": {
-            "name": "large_schema", "description": "x" * 5000,
+            "name": "large_schema",
+            "description": "request_id=1234567890 " * 1000,
             "parameters": {"type": "object", "properties": {}},
         },
     }])) > base + 5000
@@ -371,3 +380,28 @@ def test_current_catalogue_page_keeps_all_refs_and_cursor(next_offset):
         }
         assert selected.omitted_previews == 0
     assert request.messages[-1].content == json_text(content)
+
+
+def test_context_index_reduction_uses_tokens_even_when_bytes_increase():
+    request, _ = request_with_results()
+    raw = json_text([{"id": "E1", "details": "🚨" * 200}])
+    index = [{"id": "E1", "retrieval": "read_evidence " * 80}]
+    result = request.messages[2].model_copy(update={
+        "content": raw, "artifact": {"context_index": index},
+    })
+    call = request.messages[1].model_copy(update={
+        "tool_calls": request.messages[1].tool_calls[:1],
+    })
+    request = request.override(messages=[request.messages[0], call, result])
+    compact = request.override(messages=[
+        *request.messages[:2],
+        result.model_copy(update={"content": json_text(index)}),
+    ])
+    assert len(json_text(index).encode()) > len(raw.encode())
+    allowance = estimate_input(compact)
+    assert allowance < estimate_input(request)
+    selected = select_context(request, allowance)
+    assert selected.fits
+    assert selected.reduced_messages == 1
+    assert selected.request.messages[-1].content == json_text(index)
+    assert request.messages[-1].content == raw

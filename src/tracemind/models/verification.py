@@ -8,6 +8,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.evidence import Evidence
 from tracemind.models.incident import Incident
+from tracemind.models.intake import InitialContext
 
 
 class ReviewItem(BaseModel):
@@ -132,6 +133,7 @@ class ReviewSubject(BaseModel):
     """Only observed diagnostic data; no held-out labels or model history."""
 
     incident: Incident | None = None
+    initial_context: InitialContext | None = None
     purpose: Literal["automatic", "investigate", "explain"] | None = None
     user_message: str | None = None
     diagnosis: Diagnosis
@@ -149,8 +151,8 @@ class VerificationPolicy(BaseModel):
     deepseek_thinking: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
     timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
-    input_bytes: int = Field(default=131072, ge=1)
-    output_tokens: int = Field(default=4096, ge=1)
+    input_bytes: int = Field(default=524288, ge=1)
+    output_tokens: int = Field(default=16384, ge=1)
 
 
 class VerificationRecord(BaseModel):

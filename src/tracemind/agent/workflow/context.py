@@ -9,6 +9,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from tracemind.models import Evidence
 from tracemind.models.run import RunState
 from tracemind.agent.workflow.references import model_references
+from tracemind.agent.runtime.token_count import estimate_text_tokens
 
 
 def guidance_context(state: RunState) -> str:
@@ -82,14 +83,36 @@ def memory_context(state: RunState) -> str:
     return json_text(payload)
 
 
-def _evidence_preview(item: Evidence) -> dict:
+def _bounded_text(value: str, limit: int) -> str:
+    return value.encode()[:limit].decode("utf-8", errors="ignore")
+
+
+def _location_preview(code: dict) -> dict:
+    conflicts = code.get("conflicts") or {}
+    incomplete = set(code.get("redacted_fields") or ()) | set(
+        code.get("truncated_fields") or (),
+    )
+    result = {
+        key: _bounded_text(value, 100) if isinstance(value, str) else value
+        for key, value in code.items()
+        if key in {"file", "line", "function"}
+        and key not in conflicts and key not in incomplete
+    }
+    if conflicts:
+        result["conflicting_fields"] = sorted(conflicts)
+    if incomplete:
+        result["incomplete_fields"] = sorted(incomplete)
+    return result
+
+
+def _evidence_preview(item: Evidence, *, max_bytes: int = 2000) -> dict:
     """Include normalized details, marking any oversized fields omitted.
 
     Small observations remain complete. Large attributes are bounded
     separately so a long log body cannot hide the service and error fields.
     """
     data = item.model_dump(mode="json")
-    if len(json_text(data).encode()) <= 2000:
+    if len(json_text(data).encode()) <= max_bytes:
         return data
     preview = {
         "id": str(item.id),
@@ -104,16 +127,30 @@ def _evidence_preview(item: Evidence) -> dict:
         "truncated_attribute_keys": [],
     }
     priority = (
+        "trace_id",
+        "span_id",
+        "resource",
+        "code",
+        "exceptions",
+        "exception_coverage",
         "operation",
         "error_type",
         "otel_status_description",
         "status_message",
         "body",
-        "trace_id",
-        "span_id",
         "labels",
         "value",
     )
+    while len(json_text(preview).encode()) > max_bytes - 300:
+        if len(preview["summary"]) > 40:
+            length = len(preview["summary"]) // 2
+            preview["summary"] = preview["summary"][:length]
+        elif preview["query"]:
+            preview["query"] = None
+        else:
+            break
+    base_bytes = len(json_text(preview).encode())
+    allowance = min(1200, max(0, max_bytes - base_bytes - 120))
     keys = sorted(
         item.attributes,
         key=lambda k: (
@@ -126,13 +163,53 @@ def _evidence_preview(item: Evidence) -> dict:
         shortened = isinstance(value, str) and len(value) > 320
         if shortened:
             value = value[:320]
+        elif key == "code" and isinstance(value, dict):
+            value = _location_preview(value)
+            shortened = value != item.attributes[key]
+        elif key == "resource" and isinstance(value, dict):
+            metadata = item.attributes.get("resource_metadata") or {}
+            conflicts = metadata.get("conflicts") or {}
+            incomplete = set(metadata.get("redacted_fields") or ()) | set(
+                metadata.get("truncated_fields") or (),
+            )
+            value = {k: _bounded_text(v, 80) if isinstance(v, str) else v
+                     for k, v in value.items() if k in {
+                         "service.version", "service.instance.id",
+                         "deployment.environment.name", "k8s.pod.name",
+                         "k8s.namespace.name", "k8s.cluster.name",
+                     } and k not in conflicts and k not in incomplete}
+            if conflicts:
+                value["conflicting_fields"] = sorted(conflicts)
+            if incomplete:
+                value["incomplete_fields"] = sorted(incomplete)
+            shortened = value != item.attributes[key]
+        elif key == "exceptions" and isinstance(value, list):
+            value = [{
+                **{k: _bounded_text(v, 100) if isinstance(v, str) else v
+                   for k, v in event.items() if k in {
+                       "type", "message", "source", "timestamp",
+                       "in_investigation_window"}},
+                "has_stacktrace": bool(event.get("stacktrace")),
+                **({"code": _location_preview(event["code"])}
+                   if isinstance(event.get("code"), dict) else {}),
+            } for event in value[:2] if isinstance(event, dict)]
+            shortened = True
         candidate = {**preview["attributes"], key: value}
-        if len(json_text(candidate).encode()) <= 1200:
+        if len(json_text(candidate).encode()) <= allowance:
             preview["attributes"] = candidate
             if shortened:
                 preview["truncated_attribute_keys"].append(key)
         else:
             preview["omitted_attribute_keys"].append(key)
+    # Metadata is also bounded; the count still records every omission.
+    preview["omitted_attribute_count"] = len(preview["omitted_attribute_keys"])
+    while len(json_text(preview).encode()) > max_bytes:
+        if preview["omitted_attribute_keys"]:
+            preview["omitted_attribute_keys"].pop()
+        elif preview["truncated_attribute_keys"]:
+            preview["truncated_attribute_keys"].pop()
+        else:
+            break
     return preview
 
 
@@ -179,6 +256,14 @@ def collaboration_context(
             "status": prior.status.value,
             "root_cause": prior.root_cause[:1600],
             "confidence": prior.confidence,
+            "review_status": prior.review_status,
+            "review_error_code": prior.review_error_code,
+            "triage_status": prior.triage_status,
+            "item_review_states": [
+                {"id": item.id, "review_status": item.review_status,
+                 "evidence_support": item.evidence_support}
+                for item in prior.items
+            ],
             "remediation": [text[:240] for text in prior.remediation[:3]],
             "evidence_ids": [str(i) for i in prior.evidence_ids[:20]],
             "historical_claim_only": True,
@@ -203,16 +288,14 @@ def collaboration_context(
             else "detail retrieval is unavailable under current tool policy"
         ),
     }
-    allowance = min(
-        16000,
-        max(
-            0, (state.limits.context_tokens - state.limits.output_tokens) // 3
-        ),
+    allowance = max(
+        0, (state.limits.context_tokens - state.limits.output_tokens) // 3
     )
     payload["omitted_evidence_previews"] = len(evidence) - len(
         payload["evidence_previews"]
     )
-    while len(json_text(payload).encode()) > allowance:
+    while (len(json_text(payload).encode()) > 16000
+           or estimate_payload(payload) > allowance):
         if payload["recent_user_messages"]:
             payload["recent_user_messages"].pop(0)
         elif payload["evidence_previews"]:
@@ -225,6 +308,81 @@ def collaboration_context(
     return json_text(model_references(payload, state))
 
 
+def _reported_preview(context, text_bytes):
+    truncated = []
+
+    def reduce(value, path=""):
+        if isinstance(value, dict):
+            return {key: reduce(item, f"{path}.{key}".lstrip("."))
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [reduce(item, f"{path}.{index}")
+                    for index, item in enumerate(value)]
+        if (isinstance(value, str)
+                and path.rsplit(".", 1)[-1] not in {
+                    "trace_id", "span_id", "reported_at",
+                }):
+            limit = (text_bytes * 3
+                     if path == "error.stacktrace" else text_bytes)
+            shortened = _bounded_text(value, limit)
+            if shortened != value:
+                truncated.append(path)
+            return shortened
+        return value
+
+    reported = reduce(context.model_dump(mode="json", exclude_none=True))
+    return reported, truncated
+
+
+def intake_context(state: RunState, evidence: list[Evidence]) -> str:
+    """Present supplied hints and lookup evidence as separate bounded data."""
+    reported, truncated = _reported_preview(state.initial_context, 160)
+    progress = state.intake_progress
+    priority = [key for result in (progress.results if progress else [])
+                for key in result.evidence_ids]
+    payload = {
+        "reported_context": reported,
+        "reported_context_is_unverified": True,
+        "truncated_reported_fields": truncated,
+        "lookup_results": [r.model_dump(mode="json")
+                           for r in progress.results] if progress else [],
+        "available_evidence_count": len(evidence),
+        "evidence_previews": [
+            _evidence_preview(item, max_bytes=1200)
+            for item in list(
+                _prioritized_evidence(state, evidence, priority),
+            )[:12]
+        ],
+        "omitted_evidence_previews": max(0, len(evidence) - 12),
+        "detail_retrieval": (
+            "Use read_evidence with an E handle for retained full details."
+            if "read_evidence" in state.allowed_tools
+            else "Detail retrieval is unavailable under current tool policy."
+        ),
+    }
+    allowance = max(
+        0, (state.limits.context_tokens - state.limits.output_tokens) // 3,
+    )
+    text_bytes = 160
+    while (len(json_text(payload).encode()) > 12000
+           or estimate_payload(payload) > allowance):
+        if len(payload["evidence_previews"]) > 1:
+            payload["evidence_previews"].pop()
+            payload["omitted_evidence_previews"] += 1
+        elif text_bytes > 20:
+            text_bytes //= 2
+            reported, truncated = _reported_preview(
+                state.initial_context, text_bytes,
+            )
+            payload["reported_context"] = reported
+            payload["truncated_reported_fields"] = truncated
+        else:
+            # Keep at least one observation; the context gate rejects budgets
+            # too small even for this bounded packet instead of hiding it.
+            break
+    return json_text(model_references(payload, state))
+
+
 def json_text(value: object) -> str:
     """Serialize JSON deterministically while preserving Unicode characters."""
     return json.dumps(
@@ -233,17 +391,16 @@ def json_text(value: object) -> str:
 
 
 def estimate_payload(payload: object) -> int:
-    """Estimate text/JSON tokens using UTF-8 bytes plus framing allowance."""
-    return len(json_text(payload).encode("utf-8")) + 1024
+    """Estimate serialized text/JSON tokens with tokenizer headroom."""
+    return estimate_text_tokens(json_text(payload))
 
 
 def estimate_input(request: ModelRequest) -> int:
     """Estimate input size from messages, tools, and the response schema.
 
-    Count serialized UTF-8 bytes plus a framing allowance. Exclude tool
-    artifacts, which are not sent to the provider. The result is a
-    conservative admission estimate, not measured token usage or a
-    tokenizer guarantee.
+    Tokenize serialized model content, excluding tool artifacts. Include
+    headroom for provider tokenizer differences and wire framing. This
+    is an admission estimate, not measured provider token usage.
     """
     schema = getattr(
         request.response_format, "schema", request.response_format
@@ -264,8 +421,6 @@ def estimate_input(request: ModelRequest) -> int:
         "response_format": schema,
         "tool_choice": request.tool_choice,
     }
-    # One UTF-8 byte per estimated token is deliberately conservative for
-    # text/JSON. Allow extra framing space; this is not a tokenizer guarantee.
     return estimate_payload(payload)
 
 
@@ -361,12 +516,14 @@ def select_context(
         if not (index > last_call and artifact.get("catalogue_page")):
             eligible.append(index)
         content = json_text(artifact["context_index"])
-        if len(content.encode()) >= len(str(message.content).encode()):
+        view = list(messages)
+        view[index] = message.model_copy(update={"content": content})
+        candidate = request.override(messages=view)
+        size = estimate_input(candidate)
+        if size >= after:
             continue
-        messages[index] = message.model_copy(update={"content": content})
+        messages, after = view, size
         reduced.add(index)
-        candidate = request.override(messages=messages)
-        after = estimate_input(candidate)
         if after <= allowance:
             return ContextSelection(
                 candidate, before, after, len(reduced), True

@@ -19,7 +19,10 @@ from fastapi import (
     Response,
     status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from tracemind.agent.errors import DiagnosisError, ModelConfigurationError
@@ -152,10 +155,14 @@ def request_fingerprint(
     operation: str | None = None,
 ) -> str:
     """Hash validated input, omitting generated incident IDs."""
-    excluded = None
+    excluded = {}
     if isinstance(request, DiagnosisRequest):
         if "id" not in request.incident.model_fields_set:
-            excluded = {"incident": {"id"}}
+            excluded["incident"] = {"id"}
+    if (isinstance(request, (DiagnosisRequest, FollowUpRequest))
+            and request.initial_context is None):
+        # Preserve hashes already stored before per-run context existed.
+        excluded["initial_context"] = True
     payload = request.model_dump(mode="json", exclude=excluded)
     if operation is not None:
         payload = {"operation": operation, "body": payload}
@@ -173,6 +180,16 @@ def create_app() -> FastAPI:
 
     application.state.repositories = {}
     application.state.repository_lock = Lock()
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        """Do not echo rejected context or its unsanitized enclosing body."""
+        if isinstance(exc.body, dict) and "initial_context" in exc.body:
+            errors = [{key: value for key, value in error.items()
+                       if key != "input"} for error in exc.errors()]
+            return JSONResponse(status_code=422,
+                                content={"detail": jsonable_encoder(errors)})
+        return await request_validation_exception_handler(request, exc)
 
     @application.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
@@ -198,10 +215,13 @@ def create_app() -> FastAPI:
         run metadata is returned in headers.
         """
         try:
+            context = ({"initial_context": request.initial_context}
+                       if request.initial_context is not None else {})
             run = await service.diagnose_with_evidence(
                 request.incident,
                 start=request.investigation_start,
                 end=request.investigation_end,
+                **context,
             )
             if run.state is not None and run.state.stop_reason is not None:
                 response.headers["X-TraceMind-Run-ID"] = str(run.state.id)
@@ -250,11 +270,12 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v7-contracts"
+                "multi-agent-graph-v9-focused-triage"
                 if settings.agent_mode == "multi"
-                else "single-agent-v12"
+                else "single-agent-v14-focused-triage"
             ),
             incident=request.incident,
+            initial_context=request.initial_context,
             memory_policy=settings.memory_policy,
             learning_policy=settings.memory_policy,
             knowledge_policy=settings.knowledge_policy,
@@ -369,12 +390,13 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v7-contracts"
+                "multi-agent-graph-v9-focused-triage"
                 if settings.agent_mode == "multi"
-                else "single-agent-v12"
+                else "single-agent-v14-focused-triage"
             ),
             investigation_id=uuid4(),
             incident=request.incident,
+            initial_context=request.initial_context,
             memory_policy=settings.memory_policy,
             learning_policy=settings.memory_policy,
             knowledge_policy=settings.knowledge_policy,
@@ -469,6 +491,7 @@ def create_app() -> FastAPI:
                 limits=settings.run_limits,
                 allowed_tools=settings.agent_allowed_tools,
                 memory_policy=settings.memory_policy,
+                initial_context=request.initial_context,
                 start=request.investigation_start,
                 end=request.investigation_end,
                 request_hash=request_fingerprint(

@@ -184,15 +184,14 @@ def test_dispatch_reserve_covers_verifier_repair(monkeypatch):
     from test_verifier import ReviewModel, review
     from tracemind.models.run import RunLimits
 
-    limits = RunLimits(model_calls=12, total_tokens=1000000)
+    limits = RunLimits(model_calls=12, total_tokens=4000000)
     reviewer = ReviewModel(body=review(), mode="repair")
     service, _, _, _ = service_for(
         monkeypatch, limits=limits, reviewer=reviewer,
     )
     state = execute(service).state
     record = next(iter(state.collaboration.tasks.values()))
-    policy = state.verification_policy
-    protected = (2 * (policy.input_bytes + 1024 + policy.output_tokens)
+    protected = (2 * limits.context_tokens
                  + (1 + limits.diagnosis_repairs) * limits.context_tokens)
     # The scripted first coordinator used 15 tokens before dispatch.
     assert record.token_limit == limits.total_tokens - 15 - protected
@@ -211,7 +210,8 @@ def test_coordinator_closes_readers_before_using_synthesis_reserve():
     from langchain_core.messages import HumanMessage
     from tracemind.agent.runtime.middleware import HarnessMiddleware
 
-    run = harness(total_tokens=32769, diagnosis_repairs=0)
+    run = harness(total_tokens=32769, diagnosis_repairs=0,
+                  context_tokens=32768, output_tokens=4096)
     middleware = HarnessMiddleware(
         run, output_name="CoordinatorDecision", investigation=False,
     )

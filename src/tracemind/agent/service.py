@@ -25,6 +25,10 @@ from tracemind.agent.memory.lookup import (
     MemoryLookup,
 )
 from tracemind.agent.workflow.preparation import prepare_context
+from tracemind.agent.workflow.intake import collect_initial_evidence
+from tracemind.agent.workflow.observations import (
+    mark_exception_window, scope_status,
+)
 from tracemind.agent.runtime.runner import (
     AgentRunner,
     LangChainAgentRunner as LangChainAgentRunner,
@@ -32,14 +36,15 @@ from tracemind.agent.runtime.runner import (
 )
 from tracemind.agent.runtime.tools import EvidenceCollector, create_mcp_tools
 from tracemind.agent.workflow.validation import validate_draft
+from tracemind.agent.workflow.triage import reviewed_draft, unreviewed_draft
 from tracemind.mcp.client import ToolClient
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
+from tracemind.models.intake import InitialContext
 from tracemind.models.memory import MemoryPolicy
 from tracemind.models.knowledge import KnowledgePolicy
 from tracemind.models.verification import VerificationPolicy
 from tracemind.agent.verification import (
     DiagnosisVerifier,
-    partial_draft,
     review_still_current,
 )
 from tracemind.rag.model_bridge import Completion
@@ -110,6 +115,7 @@ class DiagnosisService:
         *,
         start: datetime,
         end: datetime,
+        initial_context: InitialContext | None = None,
     ) -> Diagnosis:
         """Run an investigation and return only its accepted or partial
         diagnosis.
@@ -117,7 +123,9 @@ class DiagnosisService:
         Use diagnose_with_evidence when evidence and execution state are
         needed. Investigation failures propagate as DiagnosisError.
         """
-        run = await self.diagnose_with_evidence(incident, start=start, end=end)
+        run = await self.diagnose_with_evidence(
+            incident, start=start, end=end, initial_context=initial_context,
+        )
         return run.diagnosis
 
     async def diagnose_with_evidence(
@@ -126,6 +134,7 @@ class DiagnosisService:
         *,
         start: datetime,
         end: datetime,
+        initial_context: InitialContext | None = None,
     ) -> DiagnosisRun:
         """Investigate a fixed, timezone-aware window with isolated run state.
 
@@ -145,11 +154,13 @@ class DiagnosisService:
         state = RunState(
             agent_mode=self._agent_mode,
             prompt_version=(
-                "multi-agent-graph-v7-contracts"
+                "multi-agent-graph-v9-focused-triage"
                 if (self._agent_mode == "multi")
-                else "single-agent-v12"
+                else "single-agent-v14-focused-triage"
             ),
             incident=incident,
+            initial_context=(initial_context.model_copy(deep=True)
+                             if initial_context is not None else None),
             investigation_start=start,
             investigation_end=end,
             limits=self._limits.model_copy(deep=True),
@@ -186,6 +197,21 @@ class DiagnosisService:
         feedback_writer: FeedbackWriter | None = None,
     ) -> DiagnosisRun:
         """Continue a leased run with its evidence and admission ledger."""
+        scope = state.initial_context.scope if state.initial_context else None
+        retained = [
+            mark_exception_window(
+                item, state.investigation_start, state.investigation_end,
+            )
+            for item in evidence
+            if (state.initial_context is None or (
+                item.observed_at.utcoffset() is not None
+                and state.investigation_start <= item.observed_at
+                <= state.investigation_end
+            ))
+            and scope_status(item, scope) == "matched"
+        ]
+        state.omitted_prior_evidence += len(evidence) - len(retained)
+        evidence = retained
         collector: EvidenceCollector
         collector = EvidenceCollector(
             max_bytes=state.limits.observation_bytes,
@@ -320,6 +346,8 @@ class DiagnosisService:
                             model_name=self._knowledge_model_name,
                         ),
                     )
+                    await collect_initial_evidence(state, collector, harness,
+                                                   tools)
                     prompt = await prepare_context(
                         state,
                         collector.evidence,
@@ -363,11 +391,13 @@ class DiagnosisService:
                     ):
                         state.feedback_updates = []
                         harness.stop(StopReason.VERIFICATION_REJECTED)
-                    if not review.task_completed:
-                        draft = partial_draft(
-                            state.verification.items, review
-                        )
-                        state.candidate_items = []
+                    draft = reviewed_draft(
+                        candidate, state.verification.items, review,
+                    )
+                    if review.accepted and review.task_completed:
+                        draft.feedback_updates = state.feedback_updates
+                    else:
+                        state.feedback_updates = []
                 harness.emit(
                     "diagnosis.accepted",
                     parent_span_id=state.id,
@@ -381,6 +411,12 @@ class DiagnosisService:
                 )
                 if (
                     state.learning_policy is not None
+                    and (state.verification_policy is None or (
+                        state.verification is not None
+                        and state.verification.review is not None
+                        and state.verification.review.accepted
+                        and state.verification.review.task_completed
+                    ))
                     and state.user_message
                     and feedback_writer is not None
                 ):
@@ -414,6 +450,7 @@ class DiagnosisService:
                 terminal_status = RunStatus.INCONCLUSIVE
                 reason = StopReason.INSUFFICIENT_EVIDENCE
         except (RunStopped, TimeoutError, GraphRecursionError) as exc:
+            state.feedback_updates = []
             if isinstance(exc, RunStopped):
                 reason = exc.reason
             elif isinstance(exc, TimeoutError):
@@ -438,8 +475,9 @@ class DiagnosisService:
             if reason is StopReason.VERIFICATION_REJECTED:
                 state.candidate_items = []
                 terminal_status = RunStatus.INCONCLUSIVE
-                draft = partial_draft(
-                    state.verification.items, state.verification.review
+                draft = reviewed_draft(
+                    state.verification.candidate,
+                    state.verification.items, state.verification.review,
                 )
                 harness.emit(
                     "diagnosis.partial",
@@ -448,6 +486,36 @@ class DiagnosisService:
                         "evidence_ids": [str(i) for i in draft.evidence_ids]
                     },
                 )
+            elif (
+                reason in {StopReason.DEADLINE, StopReason.VERIFICATION_FAILED}
+                and retained is None
+                and state.verification is not None
+                and (reason is StopReason.DEADLINE
+                     or state.verification.error_code in {
+                         "timeout", "model_unavailable", "model_configuration",
+                         "input_limit", "context_limit", "invalid_output",
+                         "incomplete_output",
+                     })
+                and review_still_current(
+                    state, state.verification, collector.evidence,
+                )
+            ):
+                # Candidate references were validated before review. Recheck
+                # provenance; failed semantic review provides no endorsement.
+                record = state.verification
+                if record.status == "running":
+                    record.status, record.error_code = "failed", "deadline"
+                raw = DiagnosisDraft(**record.candidate.model_dump(
+                    exclude={"incident_id"},
+                ))
+                harness.validate_draft(raw)
+                draft = unreviewed_draft(
+                    record.candidate, record.items,
+                    "deadline" if reason is StopReason.DEADLINE
+                    else record.error_code,
+                )
+                state.feedback_updates = []
+                terminal_status = RunStatus.INCONCLUSIVE
             elif reason in {
                 StopReason.MODEL_BUDGET,
                 StopReason.TOKEN_BUDGET,
@@ -468,7 +536,10 @@ class DiagnosisService:
                 state.candidate_items = []
                 if retained is not None:
                     state.verification = retained
-                    draft = partial_draft(retained.items, retained.review)
+                    draft = reviewed_draft(
+                        retained.candidate, retained.items, retained.review,
+                    )
+                    draft.status = DiagnosisStatus.INCONCLUSIVE
                     harness.emit(
                         "diagnosis.partial",
                         parent_span_id=state.id,
@@ -536,6 +607,13 @@ class DiagnosisService:
                 state.diagnosis = Diagnosis(
                     incident_id=incident.id,
                     **draft.model_dump(exclude={"feedback_updates"}),
+                )
+                harness.emit(
+                    "diagnosis.delivered", parent_span_id=state.id,
+                    data={"status": draft.status.value,
+                          "triage_status": draft.triage_status,
+                          "review_status": draft.review_status,
+                          "review_error_code": draft.review_error_code},
                 )
             harness.finish(terminal_status, reason)
             await harness.checkpoint(check_cancel=False)

@@ -16,7 +16,7 @@ class KnowledgePolicy(BaseModel):
     context_bytes: int = Field(default=8192, ge=64)
     result_limit: int = Field(default=5, ge=1, le=20)
     max_queries: int = Field(default=3, ge=1, le=3)
-    model_output_tokens: int = Field(default=512, ge=1)
+    model_output_tokens: int = Field(default=16384, ge=1)
     reserved_model_calls: int = Field(default=1, ge=1)
 
 

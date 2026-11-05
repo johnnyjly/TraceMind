@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.budget import TokenLedger
 from tracemind.models.incident import Incident
+from tracemind.models.intake import InitialContext
 from tracemind.models.collaboration import CollaborationState
 from tracemind.models.verification import (
     VerificationPolicy, VerificationRecord, ReviewItem,
@@ -36,16 +37,21 @@ TOOL_NAMES: tuple[ToolName, ...] = (
 class RunLimits(BaseModel):
     """Call, time, context, output, and evidence-size limits for one run."""
 
-    context_tokens: int = Field(default=32768, ge=1)
-    output_tokens: int = Field(default=4096, ge=1)
+    context_tokens: int = Field(default=65536, ge=1)
+    output_tokens: int = Field(default=16384, ge=1)
     total_tokens: int | None = Field(default=None, ge=1)
     observation_bytes: int = Field(default=8_388_608, ge=1)
     model_calls: int = Field(default=8, ge=1)
     tool_calls: int = Field(default=12, ge=1)
     identical_tool_calls: int = Field(default=2, ge=1)
-    duration_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
+    duration_seconds: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False
+    )
     model_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     tool_timeout_seconds: float = Field(default=20, gt=0, allow_inf_nan=False)
+    verification_reserve_seconds: float = Field(
+        default=0, ge=0, allow_inf_nan=False
+    )
     retry_attempts: int = Field(default=2, ge=0, le=5)
     retry_backoff_seconds: float = Field(
         default=0.25, ge=0, allow_inf_nan=False
@@ -138,6 +144,29 @@ class TokenUsage(BaseModel):
     reported_cache_miss_tokens: int = 0
 
 
+class IntakeResult(BaseModel):
+    """Outcome for one supplied locator, separate from incident evidence."""
+
+    target_index: int = Field(ge=0, le=2)
+    status: Literal[
+        "found", "not_found", "unavailable", "outside_window",
+        "scope_mismatch", "scope_unknown", "coverage_incomplete", "skipped",
+    ]
+    evidence_ids: list[UUID] = Field(default_factory=list)
+    reason: str | None = None
+    backend_coverage: dict[str, int | None] = Field(default_factory=dict)
+
+
+class IntakeProgress(BaseModel):
+    """Durable admission count and completed initial-context lookups."""
+
+    version: Literal["evidence-ingress-v1"] = "evidence-ingress-v1"
+    attempt_limit: int = Field(default=3, ge=0, le=3)
+    attempts: int = Field(default=0, ge=0)
+    completed: bool = False
+    results: list[IntakeResult] = Field(default_factory=list, max_length=3)
+
+
 class RunState(BaseModel):
     """Mutable investigation state, counters, evidence IDs, and events.
     """
@@ -166,6 +195,7 @@ class RunState(BaseModel):
         default_factory=list, max_length=3,
     )
     incident: Incident
+    initial_context: InitialContext | None = None
     investigation_start: datetime
     investigation_end: datetime
     limits: RunLimits
@@ -174,7 +204,7 @@ class RunState(BaseModel):
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
     collaboration: CollaborationState | None = None
     agent_mode: Literal["single", "multi"] = "single"
-    prompt_version: str = "single-agent-v12"
+    prompt_version: str = "single-agent-v14-focused-triage"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
@@ -190,6 +220,7 @@ class RunState(BaseModel):
     active_model: str | None = None
     tool_calls: dict[str, int] = Field(default_factory=dict)
     tool_signatures: dict[str, int] = Field(default_factory=dict)
+    intake_progress: IntakeProgress | None = None
     result_fingerprints: list[str] = Field(default_factory=list)
     progress_count: int = 0
     last_progress: int | None = None
