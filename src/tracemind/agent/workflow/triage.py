@@ -111,7 +111,7 @@ def reviewed_draft(candidate, items, review):
     )
 
 
-def unreviewed_draft(candidate, items, error_code):
+def unreviewed_draft(candidate, items, error_code, *, pending=False):
     """Publish a provenance-checked candidate with no semantic endorsement."""
     delivered = [TriageItem(
         **item.model_dump(), review_status="unreviewed",
@@ -119,9 +119,72 @@ def unreviewed_draft(candidate, items, error_code):
     ) for item in items]
     return _delivery(
         candidate, delivered, status=DiagnosisStatus.INCONCLUSIVE,
-        triage_status=("partial" if any(item.section == "finding"
-                                       for item in items) else "no_findings"),
-        review_status=("timed_out" if error_code in {"timeout", "deadline"}
+        triage_status=(
+            "partial" if any(item.section == "finding" for item in items)
+            else "no_findings"
+        ),
+        review_status=("pending" if pending and not error_code else
+                       "timed_out" if error_code in {"timeout", "deadline"}
                        else "unavailable" if error_code else "not_requested"),
         error_code=error_code,
     )
+
+
+def current_triage(state, evidence, *, cancel_requested=False):
+    """Project only the current, provenance-valid candidate and its review.
+
+    No archived collaboration review can become the current initial result.
+    The fingerprint binds the review to candidate, evidence and query history.
+    """
+    from tracemind.agent.errors import DiagnosisValidationError
+    from tracemind.agent.verification import (
+        review_items, review_still_current, subject_for, validate_review,
+    )
+    from tracemind.agent.workflow.validation import validate_draft
+    from tracemind.models.diagnosis import Diagnosis
+    from tracemind.models.storage import TERMINAL
+
+    record = state.verification
+    if record is None or record.candidate.incident_id != state.incident.id:
+        return None
+    if state.candidate_items and state.candidate_items != record.items:
+        return None
+    subject = subject_for(state, record.candidate, evidence).model_copy(
+        update={"items": record.items},
+    )
+    raw = DiagnosisDraft(**record.candidate.model_dump(
+        exclude={"incident_id"},
+    ))
+    try:
+        validate_draft(raw, evidence, start=subject.start, end=subject.end,
+                       knowledge=state.knowledge)
+        if review_items(subject) != record.items:
+            return None
+        if not review_still_current(state, record, evidence):
+            return None
+    except (DiagnosisValidationError, ValueError):
+        return None
+    if record.status == "completed" and record.review is not None:
+        try:
+            validate_review(record.review, subject)
+        except ValueError:
+            draft = unreviewed_draft(record.candidate, record.items,
+                                     "invalid_review")
+        else:
+            draft = reviewed_draft(
+                record.candidate, record.items, record.review,
+            )
+    else:
+        error = record.error_code
+        if not error and record.status == "failed":
+            error = "review_unavailable"
+        if not error and cancel_requested:
+            error = "cancelled"
+        if not error and state.status in TERMINAL:
+            error = (state.stop_reason.value if state.stop_reason
+                     else "review_interrupted")
+        draft = unreviewed_draft(record.candidate, record.items, error,
+                                 pending=error is None)
+    return Diagnosis(incident_id=state.incident.id, **draft.model_dump(
+        exclude={"feedback_updates"},
+    ))

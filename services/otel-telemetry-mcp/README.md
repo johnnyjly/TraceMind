@@ -138,3 +138,22 @@ The repository's `tests/test_mcp_http.py` starts a real HTTP server with fake
 telemetry and exercises discovery, execution and application controls. Docker
 verification additionally confirms that TraceMind/LangChain are not installed.
 The service lock retains the dependency versions used by the application.
+
+### Address and success-state evidence
+
+`diagnostic` preserves `upstream.host`, `upstream.cluster`, `server.address`,
+`destination.address`, `source.address` and `event.name` independently when
+present. `diagnostic_source` identifies `jaeger.span.tags` or
+`opensearch.attributes`. Addresses are not inferred from log-body columns.
+Interpret each field using the actual instrumentation/log format and span kind;
+`server.address` alone is not proof of an upstream destination. In the Demo
+Envoy `proxy.access` format it is the downstream local address, while
+`upstream.host` names the upstream host. This is not a universal OTel mapping.
+
+Original `otel.status_code`, `error` and RPC/HTTP status fields remain visible.
+`is_error=false` means no recognized error marker; absent status remains
+unknown. Explicit RPC/HTTP success reports that operation's status, not proof
+of order persistence, payment settlement, final cart state or safe retries.
+Business outcomes require linked business-state evidence; retry decisions also
+require transaction-state and idempotency checks. Redaction/truncation markers
+continue to apply to the retained fields.

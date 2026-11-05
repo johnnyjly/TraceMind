@@ -362,3 +362,37 @@ def test_resource_and_exception_changes_update_trace_fingerprint():
                 "coverage"]["trace_fingerprint"] for _ in range(3)]
 
     assert len(set(asyncio.run(exercise()))) == 3
+
+
+def test_proxy_addresses_retain_distinct_roles_and_source():
+    fields = {
+        "event.name": "proxy.access", "upstream.host": "172.18.0.25:8080",
+        "upstream.cluster": "frontend", "server.address": "172.18.0.27:8080",
+        "destination.address": "172.18.0.25", "source.address": "172.18.0.1",
+    }
+    item = log_item(attributes=fields)
+    assert item.attributes["diagnostic"] == fields
+    assert item.attributes["diagnostic_source"] == "opensearch.attributes"
+    # Missing structured upstream remains missing; never guess from columns.
+    local_only = log_item(
+        attributes={"server.address": fields["server.address"]},
+        body='"172.18.0.25:8080" "172.18.0.27:8080"',
+    )
+    assert "upstream.host" not in local_only.attributes["diagnostic"]
+    redacted = log_item(attributes={
+        "upstream.host": "https://host/path?token=private-upstream-token",
+    })
+    assert "private-upstream-token" not in redacted.model_dump_json()
+    assert redacted.attributes["diagnostic"]["upstream.host.redacted"]
+
+
+@pytest.mark.parametrize("fields,is_error", [
+    ({}, False), ({"otel.status_code": "OK"}, False),
+    ({"rpc.grpc.status_code": 0}, False), ({"error": False}, False),
+    ({"otel.status_code": "ERROR"}, True), ({"error": True}, True),
+])
+def test_absent_status_is_not_normalized_to_explicit_success(fields, is_error):
+    item = span_item(span_tags=fields)
+    assert item.attributes["is_error"] is is_error
+    assert item.attributes["diagnostic"] == fields
+    assert item.attributes["diagnostic_source"] == "jaeger.span.tags"

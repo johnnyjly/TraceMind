@@ -31,6 +31,7 @@ investigation window.
 | Synchronous diagnosis | `POST /api/v1/diagnoses`; waits without persistent recovery |
 | Queue a run | `POST /api/v1/runs`; returns 202 with run ID |
 | Status/result | `GET /api/v1/runs/{id}` and `/api/v1/runs/{id}/result` |
+| Initial triage | `GET /api/v1/runs/{id}/triage` (available before review completes) |
 | Cancel | `POST /api/v1/runs/{id}/cancel`; interrupts work and stops new admission |
 | Resume | `POST /api/v1/runs/{id}/resume`; requeues after the old worker lease expires |
 
@@ -248,6 +249,40 @@ Synchronous diagnoses/evaluations are not live SSE runs.
 Why: Cursor deduplication and terminal commit boundaries prevent observers from treating
 reconnects as new execution.
 
+### Read initial triage while review is running
+
+For queued runs, listen for `triage.available`, then GET the supplied
+`triage_url` (`/api/v1/runs/{id}/triage`). The candidate, evidence and event are
+checkpointed before invoking the reviewer. Status and investigation-history
+responses also provide this URL; its presence alone does not mean a candidate
+is ready. Before a current provenance-valid candidate exists, GET returns 409;
+an unknown run returns 404. The synchronous `/diagnoses` route still waits.
+
+A 200 response contains `run_id`, `candidate_id`, run `status`,
+`cancel_requested`, `diagnosis` and all retained `evidence`. `candidate_id` is
+an opaque fingerprint of the review input, not a confidence score. The initial
+`diagnosis.review_status` is `pending`, its result status is `inconclusive`,
+and every item is `unreviewed` / `not_assessed`. This means citations and the
+item contract passed basic checks, not that the claims are semantically true.
+
+Refresh on `verification.completed`, `verification.failed` or terminal events.
+The same candidate ID then carries individual review verdicts, or an explicit
+review failure with the unreviewed statements preserved. A cancel request or
+an interrupted review does not remain pending forever; it is marked
+`unavailable` with a reason. A review already completed before cancellation
+keeps its assessment. Run lifecycle and review state are independent.
+
+Only the current candidate is projected. Reinvestigation removes the current
+candidate until a new one is ready. Changed evidence, candidate, query history
+or rubric cannot reuse old support; this endpoint returns 409 for a stale
+fingerprint/rubric. Older-version candidates therefore may not be available
+through this new endpoint after an upgrade. Persisted historical records and
+existing terminal `/result` remain available under their previous semantics.
+The endpoint does not create work or resume model calls. SSE carries only URL,
+identity and status, not candidate text or raw logs. Clients compare candidate
+IDs on refresh, deduplicate events by run/sequence, and use the returned run
+status for cancellation/completion rather than treating `pending` as final.
+
 Detailed JSONL defaults to `artifacts/runs/<run_id>.jsonl`: durations, call/span
 relationships, evidence IDs and reported usage, without raw prompts, query/result
 payloads or exception messages. File errors warn without replacing run outcomes.
@@ -365,7 +400,7 @@ no per-item probability is inferred from model agreement.
 
 Top-level `triage_status` is `ready`, `partial` or `no_findings` independently
 of whether every claim passed review. `review_status` distinguishes `completed`,
-`timed_out`, `unavailable` and `not_requested`. Recoverable review failure returns
+`pending`, `timed_out`, `unavailable` and `not_requested`. Recoverable review failure returns
 an inconclusive initial result with every item explicitly unreviewed, after
 citation/window validation; it never counts as passed verification. A current
 prior reviewed result may be retained if a later attempt fails. Explicit user

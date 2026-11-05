@@ -41,7 +41,7 @@ class DiagnosisDraft(BaseModel):
     remediation: list[str] = Field(default_factory=list)
     items: list[TriageItem] = Field(default_factory=list)
     review_status: Literal[
-        "not_requested", "completed", "timed_out", "unavailable"
+        "not_requested", "pending", "completed", "timed_out", "unavailable"
     ] = "not_requested"
     review_error_code: str | None = None
     triage_status: Literal["ready", "partial", "no_findings"] | None = None
@@ -54,7 +54,15 @@ class ProposalStatement(BaseModel):
     """One scoped statement with model-facing run-local references."""
 
     model_config = ConfigDict(extra="forbid")
-    text: str = Field(min_length=1, max_length=1400)
+    text: str = Field(
+        min_length=1, max_length=1400,
+        description=(
+            "One independently assessable assertion with its necessary "
+            "scope/conditions. Separate protocol status, business outcome "
+            "and safe-retry assumptions into distinct items. A future check "
+            "must not assert an unobserved outcome as its premise."
+        ),
+    )
     evidence_refs: list[str] = Field(
         default_factory=list,
         description='Exact retained handles, e.g. ["E17", "E18"]. '

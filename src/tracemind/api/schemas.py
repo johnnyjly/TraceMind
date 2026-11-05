@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
-from tracemind.models import Diagnosis, Incident
+from tracemind.models import Diagnosis, Evidence, Incident
 from tracemind.models.intake import InitialContext
 from tracemind.models.run import RunPurpose, RunStatus, StopReason
 
@@ -46,6 +46,18 @@ class RunStatusResponse(BaseModel):
     evidence_count: int
     started_at: datetime | None
     finished_at: datetime | None
+    triage_url: str | None = None
+
+
+class RunTriageResponse(BaseModel):
+    """Current triage with separate run lifecycle and item review states."""
+
+    run_id: UUID
+    candidate_id: str
+    status: RunStatus
+    cancel_requested: bool
+    diagnosis: Diagnosis
+    evidence: list[Evidence]
 
 
 class FollowUpRequest(BaseModel):
@@ -92,6 +104,7 @@ class InvestigationTurn(BaseModel):
     investigation_end: datetime
     user_message: str | None
     diagnosis: Diagnosis | None
+    triage_url: str | None = None
 
 
 class InvestigationResponse(BaseModel):

@@ -405,3 +405,30 @@ def test_context_index_reduction_uses_tokens_even_when_bytes_increase():
     assert selected.reduced_messages == 1
     assert selected.request.messages[-1].content == json_text(index)
     assert request.messages[-1].content == raw
+
+
+def test_large_body_keeps_small_business_diagnostic_attributes():
+    from tracemind.agent.workflow.context import _evidence_preview
+    from test_mcp_evidence_ingress import log_item
+
+    fields = {"feature_flag.key": "productCatalogFailure",
+              "db.statement": "SELECT * FROM products",
+              "rpc.method": "GetProduct"}
+    item = log_item(attributes=fields, body="large body " * 1000)
+    shown = _evidence_preview(item)
+    assert shown["attributes"]["diagnostic"] == fields
+    assert "diagnostic" not in shown["truncated_attribute_keys"]
+
+
+def test_large_diagnostic_keeps_network_status_and_omission_marker():
+    from tracemind.agent.workflow.context import _evidence_preview
+    from test_mcp_evidence_ingress import span_item
+
+    fields = {"upstream.host": "172.18.0.25:8080",
+              "server.address": "172.18.0.27:8080",
+              "rpc.grpc.status_code": 0, "otel.status_code": "OK"}
+    item = span_item(span_tags={**fields, "db.statement": "SELECT " * 1000})
+    shown = _evidence_preview(item)
+    assert shown["attributes"]["diagnostic"] == fields
+    assert shown["attributes"]["diagnostic_source"] == "jaeger.span.tags"
+    assert "diagnostic" in shown["truncated_attribute_keys"]

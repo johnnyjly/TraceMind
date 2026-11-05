@@ -339,6 +339,12 @@ def test_packet_preserves_uncited_counterevidence_and_all_attributes():
     extra = subject.evidence[0].model_copy(deep=True)
     extra.id = uuid4()
     extra.attributes["unusual_detail"] = "x" * 70000
+    extra.attributes["diagnostic"] = {
+        "upstream.host": "172.18.0.25:8080",
+        "server.address": "172.18.0.27:8080",
+        "rpc.grpc.status_code": 0, "otel.status_code": "OK",
+    }
+    extra.attributes["diagnostic_source"] = "jaeger.span.tags"
     subject.evidence.append(extra)
     packet = review_packet(subject)
     assert len(packet["evidence"]) == len(subject.evidence)

@@ -200,6 +200,7 @@ run state. Telemetry comes from an independent read-only HTTP MCP service.
 - Context limits, bounded retries, optional fallback and controlled finalization.
 - Persistent queued runs, worker leases, checkpoints, cancellation and recovery.
 - Durable SSE progress and incident follow-up questions.
+- Initial triage available before review via `/api/v1/runs/{id}/triage`, with per-item evidence/review labels and later updates; see [delivery contract](docs/operations.md#read-initial-triage-while-review-is-running).
 - Completion verification, enabled by default, with explicit partial/failure outcomes.
 - Optional snapshot-based RAG and feedback memory, disabled by default.
 - Langfuse tracing and evaluation, scripted regression replays and live fault cases.

@@ -55,7 +55,7 @@ class Diagnosis(BaseModel):
     remediation: list[str] = Field(default_factory=list)
     items: list[TriageItem] = Field(default_factory=list)
     review_status: Literal[
-        "not_requested", "completed", "timed_out", "unavailable"
+        "not_requested", "pending", "completed", "timed_out", "unavailable"
     ] = "not_requested"
     review_error_code: str | None = None
     triage_status: Literal["ready", "partial", "no_findings"] | None = None

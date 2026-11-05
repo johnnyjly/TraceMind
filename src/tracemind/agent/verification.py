@@ -31,7 +31,7 @@ from tracemind.models.verification import (
 from tracemind.models.run import StopReason
 from tracemind.observability.langfuse import observation
 
-VERSION = "diagnosis-review-v31-initial-triage"
+VERSION = "diagnosis-review-v32-evidence-semantics"
 RUBRIC = """
 Review EVERY numbered item against ALL supplied observations, including
 uncited
@@ -78,8 +78,20 @@ retained
 in-window telemetry establishes incident observations. Trace/span identifiers
 inside attributes are linking data, not citation handles.
 Match exact operation, service, client, population, time and predicate.
-Success
-of one operation does not prove another succeeded; a service-list summary
+Network fields retain their original roles and source. server.address alone
+is not an upstream-host observation; prefer explicit upstream.host and the
+actual instrumentation/log format and span kind. Never guess log column
+positions. In the Demo Envoy proxy.access format server.address is the
+downstream local address, not upstream.host.
+is_error=false means no recognized error marker, not explicit OK. Missing
+status is unknown. Even an explicit RPC/HTTP OK only supports the reported
+operation status; it does not establish committed order state, settled funds,
+a final empty cart or safe retry. Those claims require linked business-state
+evidence and, for retries, idempotency/transaction-state checks. With only
+protocol status, a business-completion assertion is insufficient; name the
+missing business observation without weakening the assertion.
+Success of one operation does not prove another succeeded; a service-list
+summary
 does
 not establish operation status. Separate traces do not establish one
 transaction
@@ -847,6 +859,16 @@ class DiagnosisVerifier:
                     "run_remaining_seconds": harness.remaining_seconds,
                 },
             )
+            from tracemind.agent.workflow.triage import current_triage
+
+            if current_triage(state, evidence) is not None:
+                harness.emit(
+                    "triage.available",
+                    data={"candidate_id": record.input_sha256,
+                          "triage_url": f"/api/v1/runs/{state.id}/triage",
+                          "review_status": "pending"},
+                )
+            await harness.checkpoint()
             if (
                 review_input_bytes(messages, policy.provider)
                 > policy.input_bytes
@@ -860,7 +882,9 @@ class DiagnosisVerifier:
         if record.error_code:
             harness.emit(
                 "verification.failed",
-                data={"code": record.error_code, "attempts": record.attempts},
+                data={"code": record.error_code, "attempts": record.attempts,
+                      "candidate_id": record.input_sha256,
+                      "triage_url": f"/api/v1/runs/{state.id}/triage"},
             )
         await harness.checkpoint()
         if record.status != "completed":
@@ -986,6 +1010,8 @@ class DiagnosisVerifier:
                     harness.emit(
                         "verification.completed",
                         data={
+                            "candidate_id": record.input_sha256,
+                            "triage_url": f"/api/v1/runs/{state.id}/triage",
                             "verdict": review.verdict,
                             "accepted": review.accepted,
                             "claims": len(review.claims),

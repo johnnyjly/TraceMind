@@ -359,7 +359,7 @@ class MultiAgentRunner:
             raise ValueError("multi-agent does not support memory writes")
         if state.collaboration is None:
             state.collaboration = CollaborationState()
-            state.prompt_version = "multi-agent-graph-v9-focused-triage"
+            state.prompt_version = "multi-agent-graph-v10-evidence-semantics"
             await harness.checkpoint()
         workflow = state.collaboration
         if workflow.phase == "completed":

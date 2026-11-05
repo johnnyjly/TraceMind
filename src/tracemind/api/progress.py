@@ -37,6 +37,8 @@ MESSAGES = {
         "investigating", "Investigating specific verification gaps"),
     "collaboration.task_incomplete": (
         "synthesizing", "Task budget reached; retaining evidence and gaps"),
+    "triage.available": (
+        "triage_ready", "Initial triage available; semantic review pending"),
     "verification.started": (
         "verifying", "Reviewing diagnosis against retained evidence"),
     "verification.completed": ("verified", "Diagnosis review completed"),
@@ -85,6 +87,7 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
         "applied", "skipped", "rejected_count", "verdict", "accepted", "code",
         "role", "phase", "task_id", "round",
         "triage_status", "review_status", "review_error_code",
+        "candidate_id", "triage_url",
     } and isinstance(value, (str, int, float, bool))}
     if event.kind.startswith("tool."):
         tool = TOOLS.get(data.get("tool"), "tool")

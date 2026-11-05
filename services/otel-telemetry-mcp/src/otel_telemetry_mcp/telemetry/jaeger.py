@@ -316,6 +316,7 @@ class JaegerClient:
                 break
         diagnostic = diagnostic_attributes(tags)
         attributes["diagnostic"] = diagnostic
+        attributes["diagnostic_source"] = "jaeger.span.tags"
         for key in ("error.type", "otel.status_description", "status.message"):
             if key in diagnostic:
                 attributes[key.replace(".", "_")] = diagnostic[key]

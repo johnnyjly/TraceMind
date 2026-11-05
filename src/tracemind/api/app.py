@@ -34,6 +34,7 @@ from tracemind.agent.storage.memory_repository import (
 from tracemind.agent.storage.run_repository import RunRepository
 from tracemind.agent.runtime.runner import LangChainAgentRunner
 from tracemind.agent.service import DiagnosisService
+from tracemind.agent.workflow.triage import current_triage
 from tracemind.api.progress import stream_progress
 from tracemind.api.schemas import (
     DiagnosisRequest,
@@ -42,6 +43,7 @@ from tracemind.api.schemas import (
     InvestigationResponse,
     InvestigationTurn,
     RunStatusResponse,
+    RunTriageResponse,
 )
 from tracemind.config import Settings, get_settings
 from tracemind.mcp.client import open_telemetry_backend
@@ -147,6 +149,7 @@ def run_status(record: StoredRun) -> RunStatusResponse:
         evidence_count=len(record.evidence),
         started_at=state.started_at if record.attempt else None,
         finished_at=state.finished_at,
+        triage_url=f"/api/v1/runs/{state.id}/triage",
     )
 
 
@@ -270,9 +273,9 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v9-focused-triage"
+                "multi-agent-graph-v10-evidence-semantics"
                 if settings.agent_mode == "multi"
-                else "single-agent-v14-focused-triage"
+                else "single-agent-v15-evidence-semantics"
             ),
             incident=request.incident,
             initial_context=request.initial_context,
@@ -314,6 +317,38 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=404, detail="run not found"
             ) from exc
+
+    @application.get(
+        "/api/v1/runs/{run_id}/triage",
+        response_model=RunTriageResponse,
+        tags=["runs"],
+    )
+    def get_run_triage(
+        run_id: UUID,
+        response: Response,
+        repository: Annotated[RunRepository, Depends(get_run_repository)],
+    ) -> RunTriageResponse:
+        """Read a marked initial result before semantic review finishes."""
+        try:
+            record = repository.get(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(
+                status_code=404, detail="run not found",
+            ) from exc
+        diagnosis = current_triage(
+            record.state, record.evidence,
+            cancel_requested=record.cancel_requested,
+        )
+        if diagnosis is None:
+            raise HTTPException(status_code=409,
+                                detail="run has no current initial triage")
+        response.headers["Cache-Control"] = "no-store"
+        return RunTriageResponse(
+            run_id=run_id, candidate_id=record.state.verification.input_sha256,
+            status=record.state.status,
+            cancel_requested=record.cancel_requested,
+            diagnosis=diagnosis, evidence=record.evidence,
+        )
 
     @application.get("/api/v1/runs/{run_id}/result", tags=["runs"])
     def get_run_result(
@@ -390,9 +425,9 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v9-focused-triage"
+                "multi-agent-graph-v10-evidence-semantics"
                 if settings.agent_mode == "multi"
-                else "single-agent-v14-focused-triage"
+                else "single-agent-v15-evidence-semantics"
             ),
             investigation_id=uuid4(),
             incident=request.incident,
@@ -461,6 +496,7 @@ def create_app() -> FastAPI:
                     investigation_end=s.investigation_end,
                     user_message=s.user_message,
                     diagnosis=s.diagnosis,
+                    triage_url=f"/api/v1/runs/{s.id}/triage",
                 )
                 for s in record.runs
             ],

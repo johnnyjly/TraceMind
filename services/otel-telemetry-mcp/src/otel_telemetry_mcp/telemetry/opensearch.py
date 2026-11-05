@@ -194,6 +194,7 @@ class OpenSearchClient:
             "severity_number": severity.get("number"),
             "trace_id": source.get("traceId"),
             "span_id": source.get("spanId"),
+            "diagnostic_source": "opensearch.attributes",
             "diagnostic": diagnostic_attributes(
                 source.get("attributes") or {}
             ),

@@ -129,6 +129,9 @@ def _evidence_preview(item: Evidence, *, max_bytes: int = 2000) -> dict:
     priority = (
         "trace_id",
         "span_id",
+        "diagnostic_source",
+        "diagnostic",
+        "is_error",
         "resource",
         "code",
         "exceptions",
@@ -163,6 +166,25 @@ def _evidence_preview(item: Evidence, *, max_bytes: int = 2000) -> dict:
         shortened = isinstance(value, str) and len(value) > 320
         if shortened:
             value = value[:320]
+        elif (
+            key == "diagnostic" and isinstance(value, dict)
+            and len(json_text(
+                {**preview["attributes"], key: value},
+            ).encode()) > allowance
+        ):
+            fields = {
+                "event.name", "upstream.host", "upstream.cluster",
+                "destination.address", "source.address", "server.address",
+                "server.port", "span.kind", "otel.status_code", "error",
+                "rpc.grpc.status_code", "rpc.response.status_code",
+                "grpc.status_code", "http.response.status_code",
+                "http.status_code",
+            }
+            fields |= {f + suffix for f in fields
+                       for suffix in (".redacted", ".truncated")}
+            value = {k: _bounded_text(v, 100) if isinstance(v, str) else v
+                     for k, v in value.items() if k in fields}
+            shortened = value != item.attributes[key]
         elif key == "code" and isinstance(value, dict):
             value = _location_preview(value)
             shortened = value != item.attributes[key]

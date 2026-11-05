@@ -167,3 +167,42 @@ def test_no_findings_does_not_hide_a_useful_next_check():
     assert result.items[0].section == "proposed_check"
     assert len(result.remediation) == 1
     assert "UNREVIEWED" in result.remediation[0]
+
+
+def test_rpc_success_and_business_outcome_keep_independent_support():
+    rpc = uuid4()
+    items = [
+        ReviewItem(id="F1", section="finding",
+                   text="Charge RPC returned OK.", evidence_ids=[rpc]),
+        ReviewItem(id="F2", section="finding",
+                   text="Payment funds settled.", evidence_ids=[rpc]),
+        ReviewItem(id="P1", section="proposed_check",
+                   text="Check linked transaction state and idempotency "
+                   "before retry."),
+    ]
+    candidate = render_items(items, status="complete", confidence=.9)
+    result = DiagnosisReview(
+        claims=[
+            Claim(item_id="F1", text=items[0].text, kind="diagnostic",
+                  verdict="supported", supporting_ids=[rpc],
+                  rationale="The protocol status is explicit."),
+            Claim(item_id="F2", text=items[1].text, kind="diagnostic",
+                  verdict="insufficient",
+                  missing_observations=["Linked settlement/transaction state"],
+                  rationale="RPC success alone does not establish "
+                  "settlement."),
+            Claim(item_id="P1", text=items[2].text, kind="proposal",
+                  verdict="supported", rationale="Future transaction check."),
+        ], uncertainty_appropriate=True, root_cause_correctness=None,
+        rationale="Scripted labels exercise rendering, not model accuracy.",
+    )
+    delivered = reviewed_draft(candidate, items, result)
+    assert [item.evidence_support for item in delivered.items] == [
+        "supported", "insufficient", "not_applicable",
+    ]
+    assert delivered.items[1].text == items[1].text
+    assert delivered.items[1].missing_observations == [
+        "Linked settlement/transaction state",
+    ]
+    assert "[F2] [REVIEWED; insufficient evidence]" in delivered.root_cause
+    assert "idempotency" in delivered.remediation[0]

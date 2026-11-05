@@ -204,7 +204,7 @@ class RunState(BaseModel):
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
     collaboration: CollaborationState | None = None
     agent_mode: Literal["single", "multi"] = "single"
-    prompt_version: str = "single-agent-v14-focused-triage"
+    prompt_version: str = "single-agent-v15-evidence-semantics"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None

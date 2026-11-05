@@ -154,9 +154,9 @@ class DiagnosisService:
         state = RunState(
             agent_mode=self._agent_mode,
             prompt_version=(
-                "multi-agent-graph-v9-focused-triage"
+                "multi-agent-graph-v10-evidence-semantics"
                 if (self._agent_mode == "multi")
-                else "single-agent-v14-focused-triage"
+                else "single-agent-v15-evidence-semantics"
             ),
             incident=incident,
             initial_context=(initial_context.model_copy(deep=True)
