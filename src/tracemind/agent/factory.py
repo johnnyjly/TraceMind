@@ -87,6 +87,7 @@ def build_service(
         memory_lookup=memory_lookup,
         guidance_lookup=guidance_lookup,
         knowledge_policy=knowledge_policy,
+        source_catalog=settings.agent_source_catalog,
         knowledge_search=knowledge_search,
         knowledge_completion=knowledge_completion,
         knowledge_model_name=knowledge_model_name,

@@ -14,6 +14,7 @@ from tracemind.models import (
     Incident,
 )
 from tracemind.models.run import RunState
+from tracemind.models.verification import ReviewSubject
 
 
 class FaultInjection(BaseModel):
@@ -71,6 +72,7 @@ class ExperimentOutput(BaseModel):
     diagnosis: Diagnosis | None = None
     evidence: list[Evidence] = Field(default_factory=list)
     run_state: RunState | None = None
+    verification_subject: ReviewSubject | None = None
     error_type: str | None = None
     elapsed_ms: float = Field(default=0, ge=0)
     model_provider: str = ""
@@ -82,6 +84,7 @@ class ExperimentOutput(BaseModel):
     memory_corpus_id: str | None = None
     telemetry_transport: str = "mcp"
     retrieval: dict[str, Any] | None = None
+    sources: list[dict[str, Any]] = Field(default_factory=list)
     knowledge: list[dict[str, Any]] = Field(default_factory=list)
 
     @classmethod
@@ -92,6 +95,7 @@ class ExperimentOutput(BaseModel):
             diagnosis=saved.get("diagnosis"),
             evidence=saved.get("evidence", []),
             run_state=state or None,
+            verification_subject=saved.get("verification_subject"),
             error_type=saved.get("error_type"),
             investigation_start=(
                 saved.get("investigation_start")
@@ -105,5 +109,6 @@ class ExperimentOutput(BaseModel):
             model_provider=saved.get("model_provider", "unknown"),
             model_name=saved.get("model_name", "unknown"),
             execution_mode="saved",
+            sources=saved.get("sources") or state.get("sources", []),
             knowledge=saved.get("knowledge") or state.get("knowledge", []),
         )

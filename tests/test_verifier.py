@@ -155,7 +155,7 @@ def make_service(monkeypatch, model, *, policy=None, calls=8, script=None):
         LangChainAgentRunner(investigator),
         tool_client=ReplayTelemetry(FIXTURE.responses),
         limits=settings.run_limits,
-        verification_policy=policy or VerificationPolicy(),
+        verification_policy=policy or VerificationPolicy(revise_on_rejection=False),
         verifier=DiagnosisVerifier(settings),
     )
     return service, investigator
@@ -435,7 +435,7 @@ def test_completed_verification_resumes_without_model_or_tool_calls(
         investigation_end=FIXTURE.end,
         allowed_tools=service._allowed_tools,
         limits=service._limits,
-        verification_policy=VerificationPolicy(),
+        verification_policy=VerificationPolicy(revise_on_rejection=False),
     )
     snapshots = []
     asyncio.run(persisted_run(service, state, [], snapshots))
@@ -480,7 +480,7 @@ def test_interrupted_review_does_not_repeat_on_resume(monkeypatch):
         investigation_end=FIXTURE.end,
         allowed_tools=service._allowed_tools,
         limits=service._limits,
-        verification_policy=VerificationPolicy(),
+        verification_policy=VerificationPolicy(revise_on_rejection=False),
     )
     snapshots = []
     asyncio.run(persisted_run(service, state, [], snapshots))
@@ -925,3 +925,78 @@ def test_deadline_at_verifier_admission_returns_unreviewed_candidate(monkeypatch
     assert all(i.evidence_support == "not_assessed" for i in result.diagnosis.items)
     assert model.calls == 0
     assert trace_issues(result.state) == []
+
+
+def test_mixed_inline_and_shared_resource_identity_is_lossless():
+    subject = seed()
+    original = subject.evidence[0]
+    original.attributes["resource"] = {
+        "service.version": "v1", "service.instance.id": "old-instance",
+    }
+    for _ in range(2):
+        extra = original.model_copy(deep=True)
+        extra.id = uuid4()
+        extra.attributes["resource"] = {
+            "service.version": "v2", "service.instance.id": "new-instance",
+        }
+        subject.evidence.append(extra)
+    missing = original.model_copy(deep=True)
+    missing.id = uuid4()
+    missing.attributes.pop("resource")
+    subject.evidence.append(missing)
+    before = subject.model_dump_json()
+    packet = review_packet(subject)
+    assert subject.model_dump_json() == before
+    assert [r.get("runtime_identity") for r in packet["evidence"]] == [
+        {"service.version": "v1", "service.instance.id": "old-instance"},
+        {"service.version": "v2", "service.instance.id": "new-instance"},
+        {"service.version": "v2", "service.instance.id": "new-instance"},
+        None,
+    ]
+    assert packet["evidence"][0]["attributes"]["resource"] == (
+        original.attributes["resource"]
+    )
+    assert "resource" not in packet["evidence"][0].get("attribute_refs", {})
+    assert packet["shared_attributes"]["resource"] == [
+        subject.evidence[1].attributes["resource"]
+    ]
+    for row, evidence in zip(packet["evidence"], subject.evidence):
+        attributes = dict(row["attributes"])
+        for field, index in row.get("attribute_refs", {}).items():
+            attributes[field] = packet["shared_attributes"][field][index]
+        assert attributes == evidence.attributes
+
+
+def test_review_preserves_query_selectors_and_concurrent_span_pairing():
+    subject = seed()
+    a, b = str(uuid4()), str(uuid4())
+    subject.execution_events = [
+        {"sequence": 41, "kind": "tool.started", "span_id": a,
+         "data": {"tool": "search_logs", "service": "payment",
+                  "trace_id": "a" * 32, "arguments_sha256": "hash"}},
+        {"sequence": 42, "kind": "tool.started", "span_id": b,
+         "data": {"tool": "search_logs", "service": "payment",
+                  "text": "currency", "text_redacted": False,
+                  "text_truncated": False}},
+        {"sequence": 43, "kind": "tool.completed", "span_id": b,
+         "data": {"tool": "search_logs", "result_count": 0}},
+        {"sequence": 44, "kind": "tool.failed", "span_id": a,
+         "data": {"tool": "search_logs", "error_type": "TimeoutError"}},
+        {"sequence": 45, "kind": "tool.started",
+         "data": {"tool": "search_logs", "service": "payment"}},
+    ]
+    before = subject.model_dump_json()
+    events = review_packet(subject)["query_events"]
+    assert subject.model_dump_json() == before
+    assert [e.get("span_id") for e in events] == [a, b, b, a, None]
+    assert events[0]["data"]["trace_id"] == "a" * 32
+    assert "arguments_sha256" not in events[0]["data"]
+    assert events[1]["data"]["text"] == "currency"
+    assert events[1]["data"]["text_redacted"] is False
+    assert "span_id" not in events[-1]
+    fingerprint = subject_hash(subject)
+    subject.execution_events[0]["data"]["trace_id"] = "b" * 32
+    assert subject_hash(subject) != fingerprint
+    fingerprint = subject_hash(subject)
+    subject.execution_events[1]["data"]["text"] = "other"
+    assert subject_hash(subject) != fingerprint

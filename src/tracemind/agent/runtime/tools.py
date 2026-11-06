@@ -26,12 +26,17 @@ from tracemind.mcp.results import (
 )
 from tracemind.models import Evidence, EvidenceSource
 from tracemind.models.run import StopReason, ToolName
+from tracemind.models.sources import SOURCE_TOOLS
 from tracemind.telemetry.errors import RemoteTelemetryError
 
-
-LOCAL_TOOL_NAMES = frozenset({
-    "read_evidence", "search_knowledge", "read_knowledge",
-})
+LOCAL_TOOL_NAMES = frozenset(
+    {
+        "read_evidence",
+        "search_knowledge",
+        "read_knowledge",
+        *SOURCE_TOOLS,
+    }
+)
 RESERVED_TOOL_NAMES = LOCAL_TOOL_NAMES | {"DiagnosisProposal"}
 EVIDENCE_PAGE_SIZE = 20
 MAX_EVIDENCE_PREVIEWS = 100
@@ -50,15 +55,19 @@ class EvidenceCollector:
     """
 
     def __init__(
-        self, *, max_bytes: int = 8_388_608,
+        self,
+        *,
+        max_bytes: int = 8_388_608,
         initial: Sequence[Evidence] = (),
         on_change: Callable[[], None] | None = None,
+        reserved_bytes: Callable[[], int] | None = None,
     ) -> None:
         """Initialize an evidence index with a serialized-byte capacity."""
         self._evidence: dict[str, Evidence] = {}
         self._fingerprints: dict[str, str] = {}
         self._documents: dict[str, str] = {}
         self._max_bytes = max_bytes
+        self._reserved_bytes = reserved_bytes or (lambda: 0)
         self._on_change = None
         self.bytes_used = 0
         self.add(initial)
@@ -83,7 +92,10 @@ class EvidenceCollector:
                 evidence_id = str(item.id)
                 document = json_text(item.model_dump(mode="json"))
                 size = len(document.encode())
-                if self.bytes_used + size > self._max_bytes:
+                if (
+                    self.bytes_used + size + self._reserved_bytes()
+                    > self._max_bytes
+                ):
                     raise EvidenceCapacityError
                 # Own the stored observation; external mutation must not change
                 # the evidence behind a previously issued citation.

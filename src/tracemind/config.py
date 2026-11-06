@@ -40,7 +40,8 @@ class Settings(BaseSettings):
     verifier_provider: Literal["google", "openai", "deepseek"] = "deepseek"
     verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
     verifier_deepseek_thinking: bool = True
-    verifier_reasoning_effort: Literal["low", "high", "max"] = "low"
+    verifier_reasoning_effort: Literal["low", "high", "max"] = "high"
+    verifier_revise_on_rejection: bool = True
     verifier_timeout_seconds: float = Field(
         default=180, gt=0, allow_inf_nan=False
     )
@@ -66,11 +67,11 @@ class Settings(BaseSettings):
     agent_output_tokens: int = Field(default=16384, ge=1)
     agent_max_total_tokens: int | None = Field(default=None, ge=1)
     agent_observation_bytes: int = Field(default=8_388_608, ge=1)
-    agent_max_model_calls: int = Field(default=8, ge=1)
+    agent_max_model_calls: int = Field(default=12, ge=1)
     agent_max_tool_calls: int = Field(default=12, ge=1)
     agent_max_identical_tool_calls: int = Field(default=2, ge=1)
     agent_timeout_seconds: float | None = Field(
-        default=None, gt=0, allow_inf_nan=False
+        default=600, gt=0, allow_inf_nan=False
     )
     agent_model_timeout_seconds: float = Field(
         default=180, gt=0, allow_inf_nan=False
@@ -95,6 +96,7 @@ class Settings(BaseSettings):
     agent_diagnosis_repairs: int = Field(default=1, ge=0, le=3)
     agent_no_progress_rounds: int = Field(default=3, ge=1)
     agent_memory_enabled: bool = False
+    agent_source_catalog: Path | None = None
     agent_knowledge_enabled: bool = False
     agent_knowledge_snapshot: str | None = Field(
         default=None,
@@ -135,6 +137,7 @@ class Settings(BaseSettings):
             output_tokens=self.verifier_output_tokens,
             deepseek_thinking=self.verifier_deepseek_thinking,
             deepseek_reasoning_effort=self.verifier_reasoning_effort,
+            revise_on_rejection=self.verifier_revise_on_rejection,
         )
 
     @model_validator(mode="after")
@@ -159,11 +162,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_multi_agent(self) -> "Settings":
+        if (
+            self.agent_mode == "multi"
+            and self.agent_source_catalog is not None
+        ):
+            raise ValueError(
+                "source access currently supports single-agent runs only"
+            )
         if self.agent_mode == "multi" and (self.agent_memory_enabled):
             raise ValueError(
                 "multi-agent does not support historical memory writes"
             )
         return self
+
+    @property
+    def source_policy(self):
+        from tracemind.sources.provider import load_source_policy
+
+        return load_source_policy(self.agent_source_catalog)
 
     @property
     def knowledge_policy(self):

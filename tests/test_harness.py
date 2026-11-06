@@ -195,8 +195,8 @@ def test_real_loop_success_records_usage_evidence_and_terminal_event(tmp_path):
     assert run.state.usage.reported_total_tokens == 30
     assert run.state.usage.unreported_model_calls == 0
     assert model.inputs[0][0] == model.inputs[1][0]
-    assert "8 model calls" in model.inputs[0][-1].text
-    assert "7 model calls" in model.inputs[1][-1].text
+    assert "12 model calls" in model.inputs[0][-1].text
+    assert "11 model calls" in model.inputs[1][-1].text
     assert model.inputs[1][:len(model.inputs[0])] == model.inputs[0]
     events = events_at(tmp_path)
     assert [event["sequence"] for event in events] == list(
@@ -1070,3 +1070,61 @@ def test_unlimited_service_uses_count_snapshot(tmp_path):
     assert "No overall time deadline" in snapshot
     assert "calls are held for synthesis, repairs and review" in snapshot
     assert run.state.stop_reason is StopReason.COMPLETED
+
+
+@pytest.mark.parametrize("text, expected, redacted, truncated", [
+    ("currency", "currency", False, False),
+    ('password="' + "s" * 600 + '"', 'password=[REDACTED]', True, False),
+    ("x" * 600, "x" * 512, False, True),
+    ("", None, None, None),
+], ids=["text", "redacted-before-truncation", "truncated", "empty"])
+def test_log_predicates_keep_concurrent_call_identity(
+    tmp_path, text, expected, redacted, truncated,
+):
+    run = RunHarness(RunState(
+        incident=INCIDENT, investigation_start=START, investigation_end=END,
+        allowed_tools=("search_logs",), limits=RunLimits(),
+    ), event_directory=tmp_path)
+    trace_id = "a" * 16
+
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow():
+            entered.set()
+            await release.wait()
+            return []
+
+        async def fast():
+            return []
+
+        first = asyncio.create_task(run.tool_call(
+            "search_logs", {"service": "payment", "trace_id": trace_id}, slow,
+        ))
+        await entered.wait()
+        await run.tool_call("search_logs", {
+            "service": "payment", "text": text,
+            "unexpected": "private-unlisted-argument",
+        }, fast)
+        release.set()
+        await first
+        run.finish(RunStatus.SUCCEEDED, StopReason.COMPLETED)
+
+    asyncio.run(exercise())
+    events = events_at(tmp_path)
+    starts = [e for e in events if e["kind"] == "tool.started"]
+    ends = [e for e in events if e["kind"] == "tool.completed"]
+    assert [e["span_id"] for e in starts] == [
+        e["span_id"] for e in reversed(ends)
+    ]
+    assert starts[0]["data"]["trace_id"] == trace_id
+    data = starts[1]["data"]
+    if expected is None:
+        assert "text" not in data
+    else:
+        assert data["text"] == expected
+        assert data["text_redacted"] is redacted
+        assert data["text_truncated"] is truncated
+    assert all(e["data"]["result_count"] == 0 for e in ends)
+    assert "private-unlisted-argument" not in json.dumps(events)
+    assert "s" * 600 not in json.dumps(events)

@@ -32,13 +32,25 @@ _PRIVATE_KEY = re.compile(
 )
 
 
-def redact_reported_text(value: str) -> str:
-    """Redact known credential forms, not every possible secret."""
-    value = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", value)
-    value = _URL_CREDENTIAL.sub(r"\1[REDACTED]@", value)
-    value = _HEADER.sub(r"\1[REDACTED]", value)
-    value = _AUTHORIZATION.sub(r"\1[REDACTED]", value)
-    return _CREDENTIAL.sub(r"\1[REDACTED]", value)
+def redact_reported_text(value: str, *, preserve_lines: bool = False) -> str:
+    """Redact known credential forms, optionally retaining line numbers."""
+    for pattern, replacement in (
+        (_PRIVATE_KEY, "[REDACTED PRIVATE KEY]"),
+        (_URL_CREDENTIAL, r"\1[REDACTED]@"),
+        (_HEADER, r"\1[REDACTED]"),
+        (_AUTHORIZATION, r"\1[REDACTED]"),
+        (_CREDENTIAL, r"\1[REDACTED]"),
+    ):
+
+        def replace(match):
+            cleaned = match.expand(replacement)
+            if preserve_lines:
+                missing = match.group().count("\n") - cleaned.count("\n")
+                cleaned += "\n[REDACTED]" * max(0, missing)
+            return cleaned
+
+        value = pattern.sub(replace, value)
+    return value
 
 
 class ReportedContext(BaseModel):

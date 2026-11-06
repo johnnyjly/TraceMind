@@ -117,8 +117,13 @@ SYSTEM_PROMPT = INVESTIGATION_PROMPT + (
     "priorities, not truncation rules: retain additional transaction-state "
     "or safe-retry gaps when they change the engineer's next decision. "
     "Each item should make one independently assessable assertion. Keep "
-    "reported country/version labels separate from telemetry-observed "
-    "operations and timings; omit unverified labels from observed findings. "
+    "reported details separate from telemetry-observed facts. Incident "
+    "titles/descriptions and initial-context labels are reporter claims, "
+    "including URL paths, request bodies, country and version labels. "
+    "Only call a detail observed when the cited E records contain it. "
+    "An observed version does not verify the request body or URL path. "
+    "Omit unsupported labels or explicitly attribute them to the reporter "
+    "in the same item; a separate limitation does not qualify a finding. "
     "If logs establish a mechanism, do not repeat it as wholly unconfirmed; "
     "identify only the still-unknown configuration origin or change time. "
     "Absent server spans do not prove non-execution or no charge. RPC/API "
@@ -220,7 +225,7 @@ class LangChainAgentRunner:
             "callbacks": self._callbacks,
         }
         if self._checkpointer is not None:
-            config["configurable"] = {"thread_id": str(harness.state.id)}
+            config["configurable"] = {"thread_id": harness.state.graph_thread_id}
         result = await agent.ainvoke(
             (
                 None

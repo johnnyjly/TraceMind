@@ -16,6 +16,7 @@ def validate_draft(
     start: datetime,
     end: datetime,
     knowledge: Sequence[KnowledgeReference] = (),
+    sources=(),
 ) -> None:
     """Reject unsupported citations, blank explanations, and invalid
     times.
@@ -25,6 +26,13 @@ def validate_draft(
     These checks establish provenance and time relevance, not causal
     correctness.
     """
+    source_ids = {r.id for r in sources}
+    if not set(draft.source_refs) <= source_ids or len(
+        set(draft.source_refs)
+    ) != len(draft.source_refs):
+        raise DiagnosisValidationError(
+            "invalid source references", code="unknown_source"
+        )
     observed = {item.id: item for item in evidence}
     known_refs = {item.id for item in knowledge}
     unknown_refs = [ref for ref in draft.knowledge_refs
@@ -95,16 +103,34 @@ def resolve_proposal(proposal, state, evidence):
     items = []
     for field, section, prefix in sections:
         for number, statement in enumerate(getattr(proposal, field), 1):
-            refs = statement.evidence_refs + statement.knowledge_refs
+            refs = (
+                statement.evidence_refs
+                + statement.knowledge_refs
+                + statement.source_refs
+            )
             unknown = [ref for ref in refs if ref not in state.reference_map]
-            wrong = ([ref for ref in statement.evidence_refs
-                      if not ref.startswith("E")]
-                     + [ref for ref in statement.knowledge_refs
-                        if not ref.startswith("K")])
+            wrong = (
+                [
+                    ref
+                    for ref in statement.evidence_refs
+                    if not ref.startswith("E")
+                ]
+                + [
+                    ref
+                    for ref in statement.knowledge_refs
+                    if not ref.startswith("K")
+                ]
+                + [
+                    ref
+                    for ref in statement.source_refs
+                    if not ref.startswith("R")
+                ]
+            )
             if unknown or wrong:
                 raise DiagnosisValidationError(
                     "Use only available E references for telemetry and K "
-                    "references for knowledge.", code="unknown_reference",
+                    "references for knowledge and R for direct sources.",
+                    code="unknown_reference",
                     references=list(dict.fromkeys(unknown + wrong)),
                 )
             if len(refs) != len(set(refs)):
@@ -113,13 +139,25 @@ def resolve_proposal(proposal, state, evidence):
                     code="duplicate_reference",
                     references=list(dict.fromkeys(refs)),
                 )
-            items.append(ReviewItem(
-                id=f"{prefix}{number}", section=section, text=statement.text,
-                evidence_ids=[UUID(state.reference_map[ref])
-                              for ref in statement.evidence_refs],
-                knowledge_refs=[state.reference_map[ref]
-                                for ref in statement.knowledge_refs],
-            ))
+            items.append(
+                ReviewItem(
+                    id=f"{prefix}{number}",
+                    section=section,
+                    text=statement.text,
+                    evidence_ids=[
+                        UUID(state.reference_map[ref])
+                        for ref in statement.evidence_refs
+                    ],
+                    source_refs=[
+                        state.reference_map[ref]
+                        for ref in statement.source_refs
+                    ],
+                    knowledge_refs=[
+                        state.reference_map[ref]
+                        for ref in statement.knowledge_refs
+                    ],
+                )
+            )
     if proposal.status is DiagnosisStatus.COMPLETE and not proposal.findings:
         raise DiagnosisValidationError(
             "A complete proposal needs an observed finding.",
@@ -129,8 +167,14 @@ def resolve_proposal(proposal, state, evidence):
             "Return findings or specific limitations.", code="empty_proposal")
     draft = render_items(items, proposal.status, proposal.confidence)
     draft.feedback_updates = proposal.feedback_updates
-    validate_draft(draft, evidence, start=state.investigation_start,
-                   end=state.investigation_end, knowledge=state.knowledge)
+    validate_draft(
+        draft,
+        evidence,
+        start=state.investigation_start,
+        end=state.investigation_end,
+        knowledge=state.knowledge,
+        sources=state.sources,
+    )
     state.candidate_items = items
     return draft
 
@@ -146,12 +190,19 @@ def render_items(items, status="inconclusive", confidence=0):
             parts.append(label + ":\n" + "\n".join(
                 f"- [{i.id}] {i.text}" for i in selected))
     return DiagnosisDraft(
-        status=status, confidence=confidence,
-        root_cause=("\n\n".join(parts)
-                    or "No incident finding was established."),
-        evidence_ids=list(dict.fromkeys(
-            r for i in items for r in i.evidence_ids)),
-        knowledge_refs=list(dict.fromkeys(
-            r for i in items for r in i.knowledge_refs)),
+        status=status,
+        confidence=confidence,
+        root_cause=(
+            "\n\n".join(parts) or "No incident finding was established."
+        ),
+        evidence_ids=list(
+            dict.fromkeys(r for i in items for r in i.evidence_ids)
+        ),
+        source_refs=list(
+            dict.fromkeys(r for i in items for r in i.source_refs)
+        ),
+        knowledge_refs=list(
+            dict.fromkeys(r for i in items for r in i.knowledge_refs)
+        ),
         remediation=[i.text for i in items if i.section == "proposed_check"],
     )

@@ -94,8 +94,16 @@ async def execute_service(
         investigation_start=start,
         investigation_end=end,
         diagnosis=run.diagnosis,
-        knowledge=([r.model_dump(mode="json") for r in run.state.knowledge]
-                   if run.state else []),
+        sources=(
+            [r.model_dump(mode="json") for r in run.state.sources]
+            if run.state
+            else []
+        ),
+        knowledge=(
+            [r.model_dump(mode="json") for r in run.state.knowledge]
+            if run.state
+            else []
+        ),
         evidence=run.evidence,
         run_state=run.state,
         execution_mode=execution_mode,

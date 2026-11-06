@@ -21,17 +21,23 @@ class TriageItem(BaseModel):
     section: Literal["finding", "hypothesis", "limitation", "proposed_check"]
     text: str = Field(min_length=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)
     review_status: Literal["reviewed", "unreviewed"]
-    kind: Literal[
-        "diagnostic", "uncertainty", "process", "proposal"
-    ] | None = None
+    kind: (
+        Literal[
+            "diagnostic", "uncertainty", "process", "proposal", "source_fact"
+        ]
+        | None
+    ) = None
     evidence_support: Literal[
         "supported", "insufficient", "contradicted", "not_assessed",
         "not_applicable",
     ]
     supporting_evidence_ids: list[UUID] = Field(default_factory=list)
     conflicting_evidence_ids: list[UUID] = Field(default_factory=list)
+    supporting_source_refs: list[str] = Field(default_factory=list)
+    conflicting_source_refs: list[str] = Field(default_factory=list)
     supporting_event_sequences: list[int] = Field(default_factory=list)
     conflicting_event_sequences: list[int] = Field(default_factory=list)
     missing_observations: list[str] = Field(default_factory=list)
@@ -51,6 +57,7 @@ class Diagnosis(BaseModel):
         description="Legacy uncalibrated model estimate, not a probability.",
     )
     evidence_ids: list[UUID] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
     items: list[TriageItem] = Field(default_factory=list)

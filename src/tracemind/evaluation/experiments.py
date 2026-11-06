@@ -52,9 +52,13 @@ def make_task(
             policy = settings.model_copy(
                 update={"verifier_enabled": True}).verification_policy
             state = RunState(
-                incident=subject.incident, investigation_start=subject.start,
-                investigation_end=subject.end, limits=settings.run_limits,
-                allowed_tools=(), knowledge=subject.knowledge,
+                incident=subject.incident,
+                investigation_start=subject.start,
+                investigation_end=subject.end,
+                limits=settings.run_limits,
+                allowed_tools=(),
+                knowledge=subject.knowledge,
+                sources=subject.sources,
                 candidate_items=subject.items,
                 verification_policy=policy,
             )
@@ -65,9 +69,13 @@ def make_task(
             try:
                 validate_draft(
                     DiagnosisDraft.model_validate(
-                        subject.diagnosis.model_dump()),
-                    subject.evidence, start=subject.start, end=subject.end,
+                        subject.diagnosis.model_dump()
+                    ),
+                    subject.evidence,
+                    start=subject.start,
+                    end=subject.end,
                     knowledge=state.knowledge,
+                    sources=state.sources,
                 )
                 async with asyncio.timeout(harness.remaining_seconds):
                     await DiagnosisVerifier(
@@ -88,12 +96,18 @@ def make_task(
             finally:
                 harness.finish(terminal, reason)
             return ExperimentOutput(
-                diagnosis=subject.diagnosis, evidence=subject.evidence,
-                run_state=state, error_type=error, elapsed_ms=state.elapsed_ms,
+                diagnosis=subject.diagnosis,
+                evidence=subject.evidence,
+                verification_subject=subject,
+                run_state=state,
+                error_type=error,
+                elapsed_ms=state.elapsed_ms,
                 investigation_start=subject.start,
                 investigation_end=subject.end,
+                sources=[r.model_dump(mode="json") for r in subject.sources],
                 knowledge=subject.knowledge,
-                model_provider=policy.provider, model_name=policy.model,
+                model_provider=policy.provider,
+                model_name=policy.model,
             ).model_dump(mode="json")
         if kind == "agent":
             request = AgentInput.model_validate(supplied)

@@ -121,7 +121,7 @@ class RunWorker:
                 str(checkpoint_path)
             ) as saver:
                 checkpoint = await saver.aget_tuple({
-                    "configurable": {"thread_id": str(run_id)}
+                    "configurable": {"thread_id": state.graph_thread_id}
                 }) if state.agent_mode == "single" else None
                 async with (
                     open_telemetry_backend(self.settings) as tool_client

@@ -9,6 +9,7 @@ from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.evidence import Evidence
 from tracemind.models.incident import Incident
 from tracemind.models.intake import InitialContext
+from tracemind.models.sources import SourceReference
 
 
 class ReviewItem(BaseModel):
@@ -19,6 +20,7 @@ class ReviewItem(BaseModel):
     section: Literal["finding", "hypothesis", "limitation", "proposed_check"]
     text: str = Field(min_length=1)
     evidence_ids: list[UUID] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)
 
 
@@ -26,7 +28,9 @@ class Claim(BaseModel):
     model_config = ConfigDict(extra="forbid")
     item_id: str = ""
     text: str = Field(min_length=1)
-    kind: Literal["diagnostic", "uncertainty", "process", "proposal"]
+    kind: Literal[
+        "diagnostic", "uncertainty", "process", "proposal", "source_fact"
+    ]
     verdict: Literal["supported", "insufficient", "contradicted"]
     supporting_ids: list[UUID] = Field(
         default_factory=list,
@@ -38,6 +42,8 @@ class Claim(BaseModel):
         ),
     )
     conflicting_ids: list[UUID] = Field(default_factory=list)
+    supporting_source_refs: list[str] = Field(default_factory=list)
+    conflicting_source_refs: list[str] = Field(default_factory=list)
     supporting_event_sequences: list[int] = Field(
         default_factory=list,
         description=(
@@ -141,6 +147,8 @@ class ReviewSubject(BaseModel):
     items: list[ReviewItem] = Field(default_factory=list)
     start: AwareDatetime
     end: AwareDatetime
+    sources: list[SourceReference] = Field(default_factory=list)
+    source_snapshot_id: str | None = None
     knowledge: list[dict] = Field(default_factory=list)
     execution_events: list[dict] = Field(default_factory=list)
 
@@ -149,7 +157,8 @@ class VerificationPolicy(BaseModel):
     provider: Literal["google", "openai", "deepseek"] = "deepseek"
     model: str = Field(default="deepseek-v4-pro", min_length=1)
     deepseek_thinking: bool = True
-    deepseek_reasoning_effort: Literal["low", "high", "max"] = "low"
+    deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    revise_on_rejection: bool = True
     timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     input_bytes: int = Field(default=524288, ge=1)
     output_tokens: int = Field(default=32768, ge=1)
@@ -167,3 +176,4 @@ class VerificationRecord(BaseModel):
     status: Literal["running", "completed", "failed"] = "running"
     review: DiagnosisReview | None = None
     error_code: str | None = None
+    subject: ReviewSubject | None = None

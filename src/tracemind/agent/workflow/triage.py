@@ -15,6 +15,8 @@ def _label(item):
         return "REVIEWED; insufficient evidence"
     if item.evidence_support == "contradicted":
         return "REVIEWED; conflicting evidence"
+    if item.kind == "source_fact":
+        return "REVIEWED SOURCE FACT; not proof of runtime execution"
     if item.kind == "proposal":
         return "REVIEWED PROPOSED CHECK; not an observed incident fact"
     if item.kind == "process":
@@ -55,21 +57,43 @@ def _delivery(candidate, items, *, status, triage_status, review_status,
     if not items:
         parts.append("No incident finding was retained.")
     return DiagnosisDraft(
-        status=status, root_cause="\n\n".join(parts),
+        status=status,
+        root_cause="\n\n".join(parts),
         confidence=candidate.confidence,
-        evidence_ids=list(dict.fromkeys(
-            ref for item in items for ref in (
-                item.evidence_ids + item.supporting_evidence_ids
-                + item.conflicting_evidence_ids
+        evidence_ids=list(
+            dict.fromkeys(
+                ref
+                for item in items
+                for ref in (
+                    item.evidence_ids
+                    + item.supporting_evidence_ids
+                    + item.conflicting_evidence_ids
+                )
             )
-        )),
-        knowledge_refs=list(dict.fromkeys(
-            ref for item in items for ref in item.knowledge_refs
-        )),
-        remediation=[_statement(item) for item in items
-                     if item.section == "proposed_check"],
-        items=items, review_status=review_status,
-        review_error_code=error_code, triage_status=triage_status,
+        ),
+        source_refs=list(
+            dict.fromkeys(
+                ref
+                for item in items
+                for ref in (
+                    item.source_refs
+                    + item.supporting_source_refs
+                    + item.conflicting_source_refs
+                )
+            )
+        ),
+        knowledge_refs=list(
+            dict.fromkeys(ref for item in items for ref in item.knowledge_refs)
+        ),
+        remediation=[
+            _statement(item)
+            for item in items
+            if item.section == "proposed_check"
+        ],
+        items=items,
+        review_status=review_status,
+        review_error_code=error_code,
+        triage_status=triage_status,
         feedback_updates=[],
     )
 
@@ -83,16 +107,22 @@ def reviewed_draft(candidate, items, review):
         support = claim.verdict
         if support == "supported" and claim.kind in {"proposal", "process"}:
             support = "not_applicable"
-        delivered.append(TriageItem(
-            **item.model_dump(), review_status="reviewed", kind=claim.kind,
-            evidence_support=support,
-            supporting_evidence_ids=claim.supporting_ids,
-            conflicting_evidence_ids=claim.conflicting_ids,
-            supporting_event_sequences=claim.supporting_event_sequences,
-            conflicting_event_sequences=claim.conflicting_event_sequences,
-            missing_observations=claim.missing_observations,
-            rationale=claim.rationale,
-        ))
+        delivered.append(
+            TriageItem(
+                **item.model_dump(),
+                review_status="reviewed",
+                kind=claim.kind,
+                evidence_support=support,
+                supporting_source_refs=claim.supporting_source_refs,
+                conflicting_source_refs=claim.conflicting_source_refs,
+                supporting_evidence_ids=claim.supporting_ids,
+                conflicting_evidence_ids=claim.conflicting_ids,
+                supporting_event_sequences=claim.supporting_event_sequences,
+                conflicting_event_sequences=claim.conflicting_event_sequences,
+                missing_observations=claim.missing_observations,
+                rationale=claim.rationale,
+            )
+        )
     has_findings = any(
         claim.kind == "diagnostic" and claim.verdict == "supported"
         for claim in review.claims
@@ -130,6 +160,30 @@ def unreviewed_draft(candidate, items, error_code, *, pending=False):
     )
 
 
+def latest_verification(state):
+    """Find the latest candidate; a history record is not current support."""
+    return state.verification or (
+        state.verification_history[-1] if state.verification_history else None
+    )
+
+
+def revision_fallback(state, evidence, error_code, *, pending=False):
+    """Preserve a provenance-valid report without borrowing stale support."""
+    from tracemind.agent.workflow.validation import validate_draft
+
+    record = latest_verification(state)
+    if record is None:
+        return None
+    raw = DiagnosisDraft(**record.candidate.model_dump(
+        exclude={"incident_id"},
+    ))
+    validate_draft(raw, evidence, start=state.investigation_start,
+                   end=state.investigation_end, knowledge=state.knowledge,
+                   sources=state.sources)
+    return unreviewed_draft(record.candidate, record.items, error_code,
+                            pending=pending)
+
+
 def current_triage(state, evidence, *, cancel_requested=False):
     """Project only the current, provenance-valid candidate and its review.
 
@@ -144,10 +198,11 @@ def current_triage(state, evidence, *, cancel_requested=False):
     from tracemind.models.diagnosis import Diagnosis
     from tracemind.models.storage import TERMINAL
 
-    record = state.verification
+    record = latest_verification(state)
     if record is None or record.candidate.incident_id != state.incident.id:
         return None
-    if state.candidate_items and state.candidate_items != record.items:
+    if (state.verification is not None and state.candidate_items
+            and state.candidate_items != record.items):
         return None
     subject = subject_for(state, record.candidate, evidence).model_copy(
         update={"items": record.items},
@@ -156,10 +211,28 @@ def current_triage(state, evidence, *, cancel_requested=False):
         exclude={"incident_id"},
     ))
     try:
-        validate_draft(raw, evidence, start=subject.start, end=subject.end,
-                       knowledge=state.knowledge)
+        validate_draft(
+            raw,
+            evidence,
+            start=subject.start,
+            end=subject.end,
+            knowledge=state.knowledge,
+            sources=state.sources,
+        )
         if review_items(subject) != record.items:
             return None
+        if state.verification is None and state.verification_history:
+            draft = revision_fallback(
+                state, evidence,
+                "cancelled" if cancel_requested else (
+                    state.stop_reason.value if state.status in TERMINAL
+                    and state.stop_reason else None
+                ),
+                pending=not cancel_requested and state.status not in TERMINAL,
+            )
+            return Diagnosis(incident_id=state.incident.id, **draft.model_dump(
+                exclude={"feedback_updates"},
+            ))
         if not review_still_current(state, record, evidence):
             return None
     except (DiagnosisValidationError, ValueError):

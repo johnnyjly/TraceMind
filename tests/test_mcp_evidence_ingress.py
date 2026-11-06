@@ -396,3 +396,19 @@ def test_absent_status_is_not_normalized_to_explicit_success(fields, is_error):
     assert item.attributes["is_error"] is is_error
     assert item.attributes["diagnostic"] == fields
     assert item.attributes["diagnostic_source"] == "jaeger.span.tags"
+
+
+def test_image_repo_digest_arrays_are_bounded_and_attributable():
+    digest = "example.invalid/app@sha256:" + "a" * 64
+    item = span_item(resource={"container.image.repo_digests": [digest]})
+    assert item.attributes["resource"]["container.image.repo_digests"] == [
+        digest
+    ]
+    item = span_item(resource={"container.image.repo_digests": [digest] * 9})
+    assert (
+        len(item.attributes["resource"]["container.image.repo_digests"]) == 8
+    )
+    assert (
+        "container.image.repo_digests"
+        in item.attributes["resource_metadata"]["truncated_fields"]
+    )

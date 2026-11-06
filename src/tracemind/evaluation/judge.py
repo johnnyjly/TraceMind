@@ -50,11 +50,20 @@ def diagnosis_judge(settings, client, budget):
         subject_kind = "delivery"
         diagnosis = observed.diagnosis
         if delivery:
-            fields = {"id", "section", "text", "evidence_ids", "knowledge_refs"}
-            if (record is None
-                    or record.candidate.incident_id != diagnosis.incident_id
-                    or [i.model_dump(include=fields) for i in diagnosis.items]
-                    != [i.model_dump() for i in record.items]):
+            fields = {
+                "id",
+                "section",
+                "text",
+                "evidence_ids",
+                "knowledge_refs",
+                "source_refs",
+            }
+            if (
+                record is None
+                or record.candidate.incident_id != diagnosis.incident_id
+                or [i.model_dump(include=fields) for i in diagnosis.items]
+                != [i.model_dump() for i in record.items]
+            ):
                 return [
                     metric("judge_subject", "unavailable"),
                     metric("judge_completed", False,
@@ -72,19 +81,30 @@ def diagnosis_judge(settings, client, budget):
                     or (record.review and record.review.accepted)
                 ) else []
             )
-        subject = ReviewSubject(
-            incident=(observed.run_state.incident
-                      if observed.run_state else None),
-            purpose=(observed.run_state.purpose.value
-                     if observed.run_state else None),
-            user_message=(observed.run_state.user_message
-                          if observed.run_state else None),
+        subject = observed.verification_subject or ReviewSubject(
+            incident=(
+                observed.run_state.incident if observed.run_state else None
+            ),
+            purpose=(
+                observed.run_state.purpose.value
+                if observed.run_state
+                else None
+            ),
+            user_message=(
+                observed.run_state.user_message if observed.run_state else None
+            ),
             initial_context=(state.initial_context if state else None),
             diagnosis=diagnosis,
             evidence=observed.evidence,
             items=items,
             start=observed.investigation_start,
             end=observed.investigation_end,
+            sources=observed.sources or (state.sources if state else []),
+            source_snapshot_id=(
+                state.source_policy.snapshot_id
+                if state and state.source_policy
+                else None
+            ),
             knowledge=observed.knowledge,
             execution_events=(
                 [e.model_dump(mode="json") for e in observed.run_state.events]

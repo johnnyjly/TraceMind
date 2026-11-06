@@ -4,13 +4,14 @@
 
 TraceMind 的近期定位是**面向值班工程师的发布故障初查助手**：从已有故障线索出发，整理指标、链路追踪和日志，输出包含证据、假设和明确缺口的结构化诊断。项目使用 OpenTelemetry Demo 中可复现的故障场景进行验证；尚未证明在生产值班中比人工更快或更准确。
 
-第一阶段先补齐证据入口：让 Agent 接住已知 trace/span、异常位置和服务版本，减少重复寻找线索。后续再验证部署到源码的映射与变更关联；只有拿到真实运行版本对应的代码，才能进一步判断发布是否导致故障。
+第一阶段补齐已知 trace/span、异常位置和服务版本的证据入口。第二阶段提供可选的[源码与发布记录接入](docs/source-release.md)：从运行时身份映射到固定提交，读取报错位置与发布差异，并区分代码事实、运行时结论和待验证假设。
 
 默认采用受预算约束的 LangGraph 单 Agent。可选的多 Agent 工作流包含协调者、最多两个并发调查任务，以及有限轮次的验证反馈。两种模式共用权限控制、模型与工具调用预算、保留证据和持久化运行状态。遥测数据由独立的只读 HTTP MCP 服务提供。
 
 ### 已实现能力
 
 - 固定调查时间窗口、证据引用与来源校验。
+- 可选本地发布快照与只读 Git 源码接入，独立 R 引用、版本映射状态和源码事实审核；默认关闭，仅支持单 Agent。
 - 可选结构化初始线索、首轮模型前的有界 trace/span 读取，以及资源版本、代码位置和异常事件的保留；用法及边界见[证据入口](docs/operations.md#initial-evidence-ingress)。
 - 上下文限制、有界重试、可选备用模型与受控收尾。
 - 持久化任务队列、worker 租约、checkpoint、取消与恢复。
@@ -148,7 +149,7 @@ uv run python scripts/run_experiment.py --task agent --name payment-baseline \
   --env-file .env --env-file deploy/.env.langfuse --judge --max-model-calls 20
 ```
 
-完成验证器根据保留证据检查编号断言。单 Agent 模式下，验证拒绝会保留有证据支持的部分结论，不会自动重新调查；多 Agent 模式可以根据有界反馈修订或继续调查。验证失败不能批准未经审查的草稿。机制尚不明确时，已有证据支持的服务定位仍可保留。
+完成验证器根据保留证据检查编号断言。单 Agent 模式默认使用 high 审核；断言被拒或初查目标未完成时，最多进行一轮修订，按需补查证据，再以全部当前材料独立复核。两轮共用默认 600 秒总截止时间和 12 次模型调用预算，修订或恢复不会重置预算。首稿和审核记录保留；复核仍被拒或超时时，交付已有且引用有效的调查内容，明确标注争议、未知项和后续检查。首次成稿前中断不能保证产生完整报告。多 Agent 模式仍使用其独立的有界反馈流程。机制尚不明确时，有证据支持的故障定位和具体下一步可以完成初查；审核通过不等于诊断正确性保证。详见[交付与审核语义](docs/operations.md#online-verifier-and-optional-langfuse)。
 
 模型质量结论需要来自受控评估，并保留失败、结论不足和超时的尝试。评估方法及其适用范围见[评估文档](docs/evaluation.md)。
 
@@ -184,9 +185,10 @@ evidence, hypotheses and explicit gaps. It runs against reproducible faults in
 the OpenTelemetry Demo; a production speed or accuracy advantage over manual
 investigation has not been established.
 
-The first phase fills evidence-entry gaps so the agent can use known trace/span
-IDs, exception locations and observed service versions. Deployment-to-source
-mapping and change correlation remain later work.
+The first phase connects known trace/span IDs, exception locations and observed
+service versions. The second phase adds optional [direct source and release
+access](docs/source-release.md), mapping runtime identity to immutable commits
+and inspecting error locations and release diffs with explicit evidence limits.
 
 A bounded LangGraph agent is the default. An opt-in multi-agent workflow adds a
 coordinator, up to two concurrent investigators and bounded verifier feedback.
@@ -196,6 +198,7 @@ run state. Telemetry comes from an independent read-only HTTP MCP service.
 ### What is implemented
 
 - Fixed investigation windows, evidence references and source validation.
+- Optional local release snapshots and read-only Git source access with separate R references, mapping status and source-fact review; disabled by default and single-agent only.
 - Optional structured initial hints, bounded trace/span lookups before the first model call, and retained resource, code and exception fields; see [evidence ingress](docs/operations.md#initial-evidence-ingress).
 - Context limits, bounded retries, optional fallback and controlled finalization.
 - Persistent queued runs, worker leases, checkpoints, cancellation and recovery.
@@ -382,8 +385,16 @@ evidence support and review labels, including counterevidence and missing
 observations. A supported location/propagation finding plus a concrete next
 inspection can complete triage without proving a unique root cause. Verification
 timeout returns a marked, unreviewed initial result when the candidate's
-citations are valid; it does not count as verification success. Multi-agent
-mode can use bounded feedback when the triage objective remains incomplete.
+citations are valid; it does not count as verification success. Single-agent
+review defaults to high reasoning. A rejected assertion or incomplete triage
+objective can trigger one revision, targeted evidence collection and a full
+independent re-review. Both rounds share the default 600-second deadline and
+12-model-call budget; revision and recovery do not reset them. The original
+candidate and review are retained. If re-review fails or times out, retained
+provenance-valid findings remain available with explicit disputed or unreviewed
+labels. Interruption before the first candidate cannot guarantee a full report.
+Multi-agent mode keeps its own bounded feedback workflow. Review approval is
+not a guarantee of diagnostic correctness.
 See [delivery semantics](docs/operations.md#online-verifier-and-optional-langfuse).
 
 Model quality claims require controlled evaluations that retain failed,

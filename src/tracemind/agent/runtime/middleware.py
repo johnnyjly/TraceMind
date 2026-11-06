@@ -519,9 +519,10 @@ class HarnessMiddleware(AgentMiddleware):
         )
         if output_name == "InvestigationReport":
             feedback = (
-                f"Structured output rejected. Return one valid {output_name}. "
-                "Cite E telemetry and separate K knowledge handles; record "
-                "supported findings and gaps in missing_observations."
+                f"Structured output rejected. Return one valid {output_name}."
+                " Cite E telemetry, K knowledge and R direct-source handles"
+                " separately; record supported findings and gaps in"
+                " missing_observations."
             )
         elif output_name == "CoordinatorDecision":
             feedback = (

@@ -55,7 +55,11 @@ def plan_follow_up(
     cited = set(prior.evidence_ids) if prior else set()
     candidates.sort(key=lambda item: item.id not in cited)
     evidence = []
-    size = 0
+    size = sum(len(r.model_dump_json().encode()) for r in parent.state.sources)
+    if size >= limits.observation_bytes:
+        raise RunConflict(
+            "observation budget cannot retain prior source records"
+        )
     for item in candidates:
         item_size = len(item.model_dump_json().encode())
         if size + item_size <= limits.observation_bytes:
@@ -78,7 +82,7 @@ def plan_follow_up(
                 parent.state.agent_mode == "multi"
                 and purpose is RunPurpose.INVESTIGATE
             )
-            else "single-agent-followup-v8-evidence-semantics"
+            else "single-agent-followup-v9-report-provenance"
         ),
         user_message=message,
         previous_messages=[s.user_message for s in history if s.user_message],
@@ -108,6 +112,12 @@ def plan_follow_up(
             if parent.state.knowledge_policy
             else None
         ),
+        source_policy=(
+            parent.state.source_policy.model_copy(deep=True)
+            if parent.state.source_policy
+            else None
+        ),
+        sources=[r.model_copy(deep=True) for r in parent.state.sources],
         knowledge=[
             item.model_copy(deep=True) for item in parent.state.knowledge
         ],

@@ -165,8 +165,8 @@ def test_wire_messages_keep_previous_request_prefix(tmp_path, finalizing):
     snapshots = [m for m in second["messages"]
                  if m.get("name") == "runtime_budget"]
     assert len(snapshots) == 2
-    assert "8 model calls" in snapshots[0]["content"]
-    assert "7 model calls" in snapshots[1]["content"]
+    assert "12 model calls" in snapshots[0]["content"]
+    assert "11 model calls" in snapshots[1]["content"]
     if finalizing:
         assert [t["function"]["name"] for t in second["tools"]] == [
             "DiagnosisProposal"]
@@ -210,7 +210,7 @@ def test_snapshots_preserve_history_through_recovery(tmp_path, failure):
     snapshots = [m for m in model.inputs[-1] if m.name == "runtime_budget"]
     assert len(snapshots) == len({m.id for m in snapshots}) == 3
     assert [f"{remaining} model calls" in message.text
-            for remaining, message in zip((8, 7, 6), snapshots)] == [True] * 3
+            for remaining, message in zip((12, 11, 10), snapshots)] == [True] * 3
     assert result.state.usage.unreported_cache_model_calls == 3
 
 

@@ -62,6 +62,17 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
     citation_valid = (
         len(citations) == len(set(citations)) and set(citations) <= eligible
     )
+    sources = result.sources or (
+        [r.model_dump(mode="json") for r in result.run_state.sources]
+        if result.run_state
+        else []
+    )
+    source_ids = {r["id"] for r in sources}
+    if diagnosis:
+        citation_valid = citation_valid and (
+            set(diagnosis.source_refs) <= source_ids
+            and len(diagnosis.source_refs) == len(set(diagnosis.source_refs))
+        )
     if diagnosis and diagnosis.status is DiagnosisStatus.COMPLETE:
         citation_valid = citation_valid and bool(citations)
     state = result.run_state
@@ -152,13 +163,23 @@ def diagnosis_scores(*, output, expected_output=None, **kwargs):
             scores.append(metric("runtime_verification", bool(
                 record and record.status == "completed" and record.review
                 and record.review.accepted and record.review.task_completed)))
+        records = [*state.verification_history,
+                   *([record] if record is not None else [])]
+        if records:
+            first = records[0]
+            scores.extend([
+                metric("verification_rounds", len(records)),
+                metric("verification_attempts",
+                       sum(r.attempts for r in records)),
+                metric("verification_format_repairs",
+                       sum(max(0, r.attempts - 1) for r in records)),
+                metric("first_verification_verdict",
+                       first.review.verdict if first.review else first.status),
+            ])
         if record is not None:
             scores.extend([
                 metric("verification_status", record.status),
                 metric("verification_completed", record.status == "completed"),
-                metric("verification_attempts", record.attempts),
-                metric("verification_format_repairs",
-                       max(0, record.attempts - 1)),
             ])
             if record.error_code:
                 scores.append(metric("verification_error", record.error_code))

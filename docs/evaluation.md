@@ -226,8 +226,11 @@ usage and answer quality alongside cache statistics.
 Runtime verification is enabled by default. Single-agent deployments can set
 `TRACEMIND_VERIFIER_ENABLED=false`; multi-agent mode always requires verification.
 The reviewer uses independent `TRACEMIND_VERIFIER_*` settings. Its code defaults
-are a 180-second deadline, 524288 input bytes and 12288 output tokens; environment
-settings can override them for newly admitted runs.
+are high reasoning, a 180-second first-output/idle timeout per request,
+524288 input bytes and 32768 output tokens. Meaningful streaming progress can
+extend a request beyond its idle interval, but not the default 600-second
+absolute run deadline. Environment settings can override these defaults for
+newly admitted runs.
 
 The investigator submits structured findings, hypotheses, limits and proposed
 checks with run-local evidence references. Application code validates these
@@ -240,7 +243,7 @@ not establish service health.
 | Outcome | Behavior |
 | --- | --- |
 | Supported statements and satisfied completion criteria | The candidate can pass review |
-| Insufficient support or unmet criteria | Preserve all items with support labels, counterevidence, gaps and proposed checks |
+| Insufficient support or unmet criteria | Single-agent runs may revise once within the shared budget, then re-review all current evidence; preserve history and explicit support/gap labels |
 | Malformed review or invalid references | At most one format-repair attempt |
 | Timeout, provider failure, exhausted repair or oversized input | Deliver provenance-validated initial triage marked unreviewed; never count it as approved |
 
@@ -259,10 +262,16 @@ separately. Strict held-out root-cause/expected-status benchmarks remain strict;
 a timed-out review is retained as an unverified primary attempt, not a success
 in semantic verification.
 
-Single-agent rejection does not automatically revise the investigation.
-Collaborative mode can use bounded feedback to investigate or submit again.
-The verifier itself does not retry a semantic rejection. Review and format
-repair share the run's call budgets. Each review request has its own timeout; an optional overall run deadline still caps both attempts.
+Single-agent rejection or incomplete triage can trigger one feedback round by
+default (TRACEMIND_VERIFIER_REVISE_ON_REJECTION=true). The investigator revises
+the report and can collect targeted evidence; a new review checks all current
+materials independently. The original candidate, frozen review input and verdict
+remain in verification_history. Collaborative mode keeps its own bounded
+feedback workflow. The verifier does not repeat an unchanged rejected candidate
+until it passes. Investigation, revision, review and format repair share the
+default 12-call budget and 600-second hard deadline; recovery cannot reset them.
+Record both review rounds and retain failed or inconclusive final attempts in
+the evaluation denominator.
 
 Run the verifier against manufactured cases with held-out expected decisions:
 

@@ -12,6 +12,7 @@ def register_references(state: RunState) -> None:
     for prefix, values in (
         ("E", state.evidence_ids),
         ("K", [r.id for r in state.knowledge]),
+        ("R", [r.id for r in state.sources]),
     ):
         number = sum(key.startswith(prefix) for key in state.reference_map)
         for value in values:
@@ -32,6 +33,11 @@ def model_references(value, state: RunState):
         "evidence_ids",
         "knowledge_ref",
         "knowledge_refs",
+        "source_ref",
+        "source_refs",
+        "deployment_ref",
+        "supporting_source_refs",
+        "conflicting_source_refs",
         "reference_id",
         "supporting_ids",
         "conflicting_ids",
@@ -59,9 +65,14 @@ def normalize_reference_handles(output: BaseModel, available):
     for repair, not evidence that the referenced observation supports a claim.
     """
     fields = {
-        "evidence_refs": "E", "counterevidence_refs": "E",
-        "supporting_refs": "E", "conflicting_refs": "E",
+        "evidence_refs": "E",
+        "counterevidence_refs": "E",
+        "supporting_refs": "E",
+        "conflicting_refs": "E",
         "knowledge_refs": "K",
+        "source_refs": "R",
+        "supporting_source_refs": "R",
+        "conflicting_source_refs": "R",
     }
     repairs = []
 

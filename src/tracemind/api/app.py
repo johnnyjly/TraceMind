@@ -34,7 +34,7 @@ from tracemind.agent.storage.memory_repository import (
 from tracemind.agent.storage.run_repository import RunRepository
 from tracemind.agent.runtime.runner import LangChainAgentRunner
 from tracemind.agent.service import DiagnosisService
-from tracemind.agent.workflow.triage import current_triage
+from tracemind.agent.workflow.triage import current_triage, latest_verification
 from tracemind.api.progress import stream_progress
 from tracemind.api.schemas import (
     DiagnosisRequest,
@@ -282,6 +282,7 @@ def create_app() -> FastAPI:
             memory_policy=settings.memory_policy,
             learning_policy=settings.memory_policy,
             knowledge_policy=settings.knowledge_policy,
+            source_policy=settings.source_policy,
             verification_policy=settings.verification_policy,
             investigation_start=request.investigation_start,
             investigation_end=request.investigation_end,
@@ -344,10 +345,13 @@ def create_app() -> FastAPI:
                                 detail="run has no current initial triage")
         response.headers["Cache-Control"] = "no-store"
         return RunTriageResponse(
-            run_id=run_id, candidate_id=record.state.verification.input_sha256,
+            run_id=run_id,
+            candidate_id=latest_verification(record.state).input_sha256,
             status=record.state.status,
             cancel_requested=record.cancel_requested,
-            diagnosis=diagnosis, evidence=record.evidence,
+            diagnosis=diagnosis,
+            evidence=record.evidence,
+            sources=record.state.sources,
         )
 
     @application.get("/api/v1/runs/{run_id}/result", tags=["runs"])
@@ -435,6 +439,7 @@ def create_app() -> FastAPI:
             memory_policy=settings.memory_policy,
             learning_policy=settings.memory_policy,
             knowledge_policy=settings.knowledge_policy,
+            source_policy=settings.source_policy,
             verification_policy=settings.verification_policy,
             investigation_start=request.investigation_start,
             investigation_end=request.investigation_end,

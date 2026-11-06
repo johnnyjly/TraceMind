@@ -33,10 +33,21 @@ _USERINFO = re.compile(
 _API_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
 
 RESOURCE_FIELDS = {
-    key: (key,) for key in (
-        "service.name", "service.namespace", "service.version",
-        "service.instance.id", "k8s.namespace.name", "k8s.pod.name",
-        "k8s.pod.uid", "k8s.cluster.name", "container.id", "host.name",
+    key: (key,)
+    for key in (
+        "service.name",
+        "service.namespace",
+        "service.version",
+        "service.instance.id",
+        "k8s.namespace.name",
+        "k8s.pod.name",
+        "k8s.pod.uid",
+        "k8s.cluster.name",
+        "container.id",
+        "host.name",
+        "container.image.id",
+        "container.image.name",
+        "container.image.repo_digests",
     )
 }
 RESOURCE_FIELDS["deployment.environment.name"] = (
@@ -117,6 +128,32 @@ def _fields(sources, aliases):
                 if canonical == "line":
                     if type(item) is not int or item < 1:
                         continue
+                elif (
+                    canonical == "container.image.repo_digests"
+                    and isinstance(item, list)
+                ):
+                    if not item or not all(
+                        isinstance(v, str) and v for v in item
+                    ):
+                        continue
+                    raw_values.append(item)
+                    cleaned = [sanitize_text(v)[0] for v in item[:8]]
+                    if cleaned != item[:8]:
+                        metadata.setdefault("redacted_fields", []).append(
+                            canonical
+                        )
+                    bounded = [clip_text(v, 512) for v in cleaned]
+                    if len(item) > 8 or bounded != cleaned:
+                        metadata.setdefault("truncated_fields", {})[
+                            canonical
+                        ] = {
+                            "original_bytes": _size(item),
+                            "retained_bytes": _size(bounded),
+                        }
+                    candidates.append(
+                        {"source": source, "field": name, "value": bounded}
+                    )
+                    continue
                 elif not isinstance(item, str) or not item:
                     continue
                 raw_values.append(item)

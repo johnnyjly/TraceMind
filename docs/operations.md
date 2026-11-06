@@ -4,6 +4,8 @@ Start with [README](../README.md) for installation and API/worker/Demo startup.
 Commands run from the repository root. Full API schemas are at
 `http://127.0.0.1:8000/docs`.
 
+Optional source/release mapping is documented in [direct source access](source-release.md).
+
 ## Requests and lifecycle
 
 Diagnosis, run and investigation creation share this request shape:
@@ -159,9 +161,9 @@ profile overrides smaller code defaults when copied into `.env`:
 | `OUTPUT_TOKENS` | 16384 | 16384 |
 | `OBSERVATION_BYTES` | 8388608 | 8388608 |
 | `RECURSION_LIMIT` | 50 | 12 |
-| `MAX_MODEL_CALLS` | 15 | 8 |
+| `MAX_MODEL_CALLS` | 12 | 12 |
 | `MAX_TOOL_CALLS` | 25 | 12 |
-| `TIMEOUT_SECONDS` | none | none |
+| `TIMEOUT_SECONDS` | 600 | 600 |
 
 First-output/idle timeouts default to 180 seconds for models; tool requests have
 a 20-second total timeout. These limits
@@ -273,9 +275,12 @@ an interrupted review does not remain pending forever; it is marked
 `unavailable` with a reason. A review already completed before cancellation
 keeps its assessment. Run lifecycle and review state are independent.
 
-Only the current candidate is projected. Reinvestigation removes the current
-candidate until a new one is ready. Changed evidence, candidate, query history
-or rubric cannot reuse old support; this endpoint returns 409 for a stale
+During single-agent revision, the previous candidate stays readable as pending
+and explicitly unreviewed until the new candidate is ready. Refresh on
+`investigation.revision_started` as well. Multi-agent reinvestigation removes
+the current candidate until a new one is ready. Changed evidence, candidate, query history
+or rubric cannot reuse old support. Outside the explicit revision fallback,
+this endpoint returns 409 for a stale
 fingerprint/rubric. Older-version candidates therefore may not be available
 through this new endpoint after an upgrade. Persisted historical records and
 existing terminal `/result` remain available under their previous semantics.
@@ -383,8 +388,19 @@ snapshots, receipts, checkpoints and reports. Evaluation uses separate
 Online verification is enabled by default for newly created runs. Set
 `TRACEMIND_VERIFIER_ENABLED=false` consistently in API and worker settings to
 explicitly disable it. Restart existing API and worker processes after changes.
-One tool-free completion review consumes the existing model-call/time budgets
-and shared token accounting; it never automatically repairs a diagnosis.
+A tool-free completion review consumes shared model-call/time/token budgets.
+For single-agent runs, a rejected or incomplete review starts at most one
+revision by default (`TRACEMIND_VERIFIER_REVISE_ON_REJECTION=true`). The agent
+receives item-specific feedback, corrects overstatements and can collect targeted
+missing evidence. A second independent review checks the entire revised report
+against all current evidence, including counterevidence. It does not inherit
+first-round approval. There is no third round or automatic approval downgrade.
+The first candidate, exact review input and verdict remain in
+`verification_history`; the revision uses a distinct resumable graph checkpoint.
+If revision or re-review exhausts the shared budget/deadline, the latest retained
+provenance-valid candidate remains available with explicit review uncertainty.
+New evidence invalidates old support labels. Unknown causes can be stated
+explicitly alongside supported observations and concrete human follow-ups.
 The product delivers initial triage for an on-call engineer. Completion means
 an evidence-supported failure location or propagation finding and a concrete
 next inspection. A unique implementation root cause or release attribution is
@@ -412,15 +428,15 @@ unchanged and metadata defaults to `not_requested`.
 
 Persisted policy and review state govern resumed runs. Existing reviews from
 older rubric versions are not silently reused. The default overall deadline is
-disabled (`TRACEMIND_AGENT_TIMEOUT_SECONDS=none`); a positive value enables it.
+600 seconds (`TRACEMIND_AGENT_TIMEOUT_SECONDS=600`), including both investigation
+and review rounds. Explicit `none` disables it.
 Direct and worker runs retain the frozen policy on resume, including any
 existing absolute deadline. Model timeouts bound the wait for first meaningful
 output and each subsequent idle gap, not the total request duration. Reasoning,
 answer text and tool-argument deltas refresh the deadline; heartbeats, empty
 chunks and transport headers do not. Continuous output may exceed the configured
 seconds. Output-token and model-call budgets still apply, as do cancellation and
-an explicitly configured overall deadline. Tool timeouts remain total request
-limits.
+the overall deadline. Tool timeouts remain total request limits.
 If a provider's Retry-After exceeds the configured maximum backoff, automatic
 retry is declined rather than waiting indefinitely or retrying too early.
 
@@ -428,14 +444,20 @@ Model/tool calls, repeated queries, no-progress rounds and graph steps bound
 investigation. Failed attempts also consume the shared budget. Before each
 investigation attempt the harness reserves calls for candidate synthesis,
 remaining diagnosis repair, and two review attempts (initial plus at most one
-output-contract repair). Runtime snapshots show the discovery allocation and
+output-contract repair). With revision enabled and a model-call cap of at least
+ten, the first phase additionally reserves five model calls and up to two tools
+for revision and re-review. The default cap is twelve model calls. Smaller
+budgets may permit only a text correction or skip revision with an explicit
+`investigation.revision_skipped` event. Reservations do not guarantee enough
+wall-clock time for another round. Counters, permissions and the absolute
+deadline never reset. Runtime snapshots show the discovery allocation and
 reserved calls. Graph recursion limits count graph steps, not model turns.
 
 The verifier uses `TRACEMIND_VERIFIER_TIMEOUT_SECONDS` as the **first-output and
 idle timeout for each request**, independently of `TRACEMIND_AGENT_MODEL_TIMEOUT_SECONDS`.
 A format repair receives a new progress monitor but still consumes the shared
 model-call budget. The offline Judge likewise uses its timeout per request.
-If an overall deadline is explicitly enabled, progress cannot extend it.
+Progress cannot extend an enabled overall deadline.
 `model.started` records `timeout_mode=progress_idle` and the configured interval;
 `model.progress` records bounded numeric summaries (first phase output and at
 most once per ten seconds), never provider text. Completion events retain first
@@ -447,7 +469,7 @@ refresh a deadline. A stream ending without a terminal response is a transport
 failure, not a completed answer;
 `verification.started` records input size and remaining run time (null when
 disabled). Timed-out review returns an explicitly unreviewed candidate.
-The online verifier defaults to `low` reasoning; the investigator and offline
+The online verifier defaults to `high` reasoning; the investigator and offline
 Judge keep their separately configured reasoning levels. The default review
 output budget is 32768 tokens, including provider reasoning.
 Provider-truncated/incomplete responses return `incomplete_output` without

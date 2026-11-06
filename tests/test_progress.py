@@ -81,6 +81,8 @@ def test_progress_omits_raw_payloads_and_internal_events():
                          "tool": "search_logs", "service": "payment",
                          "expression": "secret-query", "logs": "private",
                          "arguments_sha256": "hash-only",
+                         "text": "private-selector", "trace_id": "a" * 32,
+                         "text_redacted": False, "text_truncated": False,
                      })
     progress = readable_event(event)
     assert "payment" in progress.message

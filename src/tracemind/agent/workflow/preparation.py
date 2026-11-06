@@ -186,4 +186,20 @@ async def prepare_context(
             "follow as bounded JSON; omitted/truncated text is not evidence "
             "of absence:\n" + knowledge_context(state)
         )
+    if state.source_policy is not None or state.sources:
+        from tracemind.agent.runtime.sources import (
+            SOURCE_GUIDANCE,
+            source_context,
+        )
+
+        prompt += (
+            "\n"
+            + SOURCE_GUIDANCE
+            + "\nRetained sources: "
+            + source_context(state)
+        )
+    if state.verification_history:
+        from tracemind.agent.workflow.revision import revision_context
+
+        prompt += "\n" + revision_context(state, evidence)
     return prompt

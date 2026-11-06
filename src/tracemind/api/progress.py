@@ -17,11 +17,16 @@ from tracemind.models.storage import TERMINAL
 TOOLS = {
     "query_metrics": "monitoring metrics",
     "search_traces": "distributed traces",
-    "get_trace_detail": "trace details", "search_logs": "service logs",
+    "get_trace_detail": "trace details",
+    "search_logs": "service logs",
     "read_evidence": "saved evidence",
     "discover_metrics": "metric names and labels",
     "search_knowledge": "reference knowledge",
     "read_knowledge": "saved reference sections",
+    "resolve_deployment": "deployment records",
+    "read_source": "deployed source code",
+    "get_release_diff": "release changes",
+    "read_source_reference": "saved source references",
 }
 MESSAGES = {
     "intake.started": (
@@ -41,7 +46,10 @@ MESSAGES = {
         "triage_ready", "Initial triage available; semantic review pending"),
     "verification.started": (
         "verifying", "Reviewing diagnosis against retained evidence"),
-    "verification.completed": ("verified", "Diagnosis review completed"),
+    "investigation.revision_started": (
+        "revising", "Revising findings and checking specific evidence gaps"),
+    "investigation.revision_skipped": (
+        "finalizing", "Revision budget unavailable; retaining findings and gaps"),
     "verification.failed": (
         "review_incomplete", "Review unavailable; preparing marked initial triage"),
     "diagnosis.delivered": (
@@ -125,6 +133,13 @@ def readable_event(event: RunEvent) -> ProgressEvent | None:
             "cancelled": "Investigation cancelled",
             "failed": "Investigation failed",
         }.get(data.get("status"), "Investigation finished")
+    elif event.kind == "verification.completed":
+        phase, message = (
+            ("verified", "Diagnosis review accepted") if data.get("accepted")
+            else ("review_rejected", "Review identified claims needing revision")
+        )
+    elif event.kind == "verification.started" and data.get("round", 0):
+        phase, message = "verifying", "Reviewing revised findings and all evidence"
     elif event.kind in {"agent.phase_started", "agent.phase_completed"}:
         phase = str(data.get("phase", "analyzing"))
         action = ("Starting" if event.kind.endswith("started") else "Finished")

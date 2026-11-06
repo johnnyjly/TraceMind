@@ -25,6 +25,7 @@ from tracemind.agent.memory.lookup import (
     MemoryLookup,
 )
 from tracemind.agent.workflow.preparation import prepare_context
+from tracemind.agent.workflow.revision import request_revision
 from tracemind.agent.workflow.intake import collect_initial_evidence
 from tracemind.agent.workflow.observations import (
     mark_exception_window, scope_status,
@@ -35,8 +36,13 @@ from tracemind.agent.runtime.runner import (
     SYSTEM_PROMPT as SYSTEM_PROMPT,
 )
 from tracemind.agent.runtime.tools import EvidenceCollector, create_mcp_tools
+from tracemind.agent.runtime.sources import create_source_tools
+from tracemind.sources.provider import load_source_policy
 from tracemind.agent.workflow.validation import validate_draft
-from tracemind.agent.workflow.triage import reviewed_draft, unreviewed_draft
+
+from tracemind.agent.workflow.triage import (
+    reviewed_draft, revision_fallback, unreviewed_draft,
+)
 from tracemind.mcp.client import ToolClient
 from tracemind.models import Diagnosis, DiagnosisStatus, Evidence, Incident
 from tracemind.models.intake import InitialContext
@@ -81,6 +87,7 @@ class DiagnosisService:
         memory_lookup: MemoryLookup | None = None,
         guidance_lookup: GuidanceLookup | None = None,
         knowledge_policy: KnowledgePolicy | None = None,
+        source_catalog: Path | None = None,
         knowledge_search: KnowledgeSearch | None = None,
         knowledge_completion: Completion | None = None,
         knowledge_model_name: str = "rag-auxiliary",
@@ -105,6 +112,7 @@ class DiagnosisService:
         self._guidance_lookup = guidance_lookup
         self._tool_client = tool_client
         self._knowledge_policy = knowledge_policy
+        self._source_catalog = source_catalog
         self._knowledge_search = knowledge_search
         self._knowledge_completion = knowledge_completion
         self._knowledge_model_name = knowledge_model_name
@@ -156,15 +164,19 @@ class DiagnosisService:
             prompt_version=(
                 "multi-agent-graph-v10-evidence-semantics"
                 if (self._agent_mode == "multi")
-                else "single-agent-v15-evidence-semantics"
+                else "single-agent-v17-review-revision"
             ),
             incident=incident,
-            initial_context=(initial_context.model_copy(deep=True)
-                             if initial_context is not None else None),
+            initial_context=(
+                initial_context.model_copy(deep=True)
+                if initial_context is not None
+                else None
+            ),
             investigation_start=start,
             investigation_end=end,
             limits=self._limits.model_copy(deep=True),
             allowed_tools=self._allowed_tools,
+            source_policy=load_source_policy(self._source_catalog),
             verification_policy=(
                 self._verification_policy.model_copy(deep=True)
                 if self._verification_policy
@@ -182,7 +194,12 @@ class DiagnosisService:
                 else None
             ),
         )
-        collector = EvidenceCollector(max_bytes=state.limits.observation_bytes)
+        collector = EvidenceCollector(
+            max_bytes=state.limits.observation_bytes,
+            reserved_bytes=lambda: sum(
+                len(r.model_dump_json().encode()) for r in state.sources
+            ),
+        )
         return await self._execute(state, collector)
 
     async def run_persisted(
@@ -216,6 +233,9 @@ class DiagnosisService:
         collector = EvidenceCollector(
             max_bytes=state.limits.observation_bytes,
             initial=evidence,
+            reserved_bytes=lambda: sum(
+                len(r.model_dump_json().encode()) for r in state.sources
+            ),
         )
         return await self._execute(
             state,
@@ -315,6 +335,7 @@ class DiagnosisService:
             start=start,
             end=end,
             knowledge=state.knowledge,
+            sources=state.sources,
         )
         terminal_status = RunStatus.FAILED
         reason = StopReason.INTERNAL_ERROR
@@ -322,82 +343,90 @@ class DiagnosisService:
             async with asyncio.timeout(harness.remaining_seconds):
                 if state.contract_version != "diagnosis-items-v1":
                     harness.stop(StopReason.CONTRACT_CHANGED)
-                if (
-                    state.verification is not None
-                    and state.agent_mode != "multi"
-                ):
-                    draft = DiagnosisDraft(
-                        **state.verification.candidate.model_dump(
-                            exclude={"incident_id"}
-                        ),
-                        feedback_updates=state.feedback_updates,
-                    )
-                else:
-                    tools = await create_mcp_tools(
-                        self._tool_client,
+                while True:
+                    if (
+                        state.verification is not None
+                        and state.agent_mode != "multi"
+                    ):
+                        draft = DiagnosisDraft(
+                            **state.verification.candidate.model_dump(
+                                exclude={"incident_id"}
+                            ),
+                            feedback_updates=state.feedback_updates,
+                        )
+                    else:
+                        tools = await create_mcp_tools(
+                            self._tool_client,
+                            start=start,
+                            end=end,
+                            collector=collector,
+                            harness=harness,
+                            local_tools=[
+                                *create_source_tools(harness, collector),
+                                *create_knowledge_tools(
+                                    harness,
+                                    search=self._knowledge_search,
+                                    completion=self._knowledge_completion,
+                                    model_name=self._knowledge_model_name,
+                                ),
+                            ],
+                        )
+                        await collect_initial_evidence(
+                            state, collector, harness, tools,
+                        )
+                        prompt = await prepare_context(
+                            state,
+                            collector.evidence,
+                            harness,
+                            memory_lookup=self._memory_lookup,
+                            guidance_lookup=self._guidance_lookup,
+                            learning_enabled=feedback_writer is not None,
+                        )
+                        await harness.checkpoint()
+                        draft = await self._runner.run(
+                            prompt,
+                            tools,
+                            recursion_limit=self._recursion_limit,
+                            harness=harness,
+                        )
+                    await harness.checkpoint()
+                    validate_draft(
+                        draft,
+                        collector.evidence,
                         start=start,
                         end=end,
-                        collector=collector,
-                        harness=harness,
-                        local_tools=create_knowledge_tools(
+                        knowledge=state.knowledge,
+                        sources=state.sources,
+                    )
+                    state.feedback_updates = draft.feedback_updates
+                    if state.verification_policy is not None:
+                        if self._verifier is None:
+                            harness.stop(StopReason.VERIFICATION_FAILED)
+                        candidate = Diagnosis(
+                            incident_id=incident.id,
+                            **draft.model_dump(exclude={"feedback_updates"}),
+                        )
+                        review = await self._verifier.verify(
+                            state,
+                            candidate,
+                            collector.evidence,
                             harness,
-                            search=self._knowledge_search,
-                            completion=self._knowledge_completion,
-                            model_name=self._knowledge_model_name,
-                        ),
-                    )
-                    await collect_initial_evidence(state, collector, harness,
-                                                   tools)
-                    prompt = await prepare_context(
-                        state,
-                        collector.evidence,
-                        harness,
-                        memory_lookup=self._memory_lookup,
-                        guidance_lookup=self._guidance_lookup,
-                        learning_enabled=feedback_writer is not None,
-                    )
-                    await harness.checkpoint()
-                    draft = await self._runner.run(
-                        prompt,
-                        tools,
-                        recursion_limit=self._recursion_limit,
-                        harness=harness,
-                    )
-                await harness.checkpoint()
-                validate_draft(
-                    draft,
-                    collector.evidence,
-                    start=start,
-                    end=end,
-                    knowledge=state.knowledge,
-                )
-                state.feedback_updates = draft.feedback_updates
-                if state.verification_policy is not None:
-                    if self._verifier is None:
-                        harness.stop(StopReason.VERIFICATION_FAILED)
-                    candidate = Diagnosis(
-                        incident_id=incident.id,
-                        **draft.model_dump(exclude={"feedback_updates"}),
-                    )
-                    review = await self._verifier.verify(
-                        state,
-                        candidate,
-                        collector.evidence,
-                        harness,
-                    )
-                    if not review.accepted or (
-                        draft.status is DiagnosisStatus.COMPLETE
-                        and not review.task_completed
-                    ):
-                        state.feedback_updates = []
-                        harness.stop(StopReason.VERIFICATION_REJECTED)
-                    draft = reviewed_draft(
-                        candidate, state.verification.items, review,
-                    )
-                    if review.accepted and review.task_completed:
-                        draft.feedback_updates = state.feedback_updates
-                    else:
-                        state.feedback_updates = []
+                        )
+                        if not review.accepted or not review.task_completed:
+                            state.feedback_updates = []
+                            if await request_revision(
+                                state, collector.evidence, harness,
+                            ):
+                                continue
+                            harness.stop(StopReason.VERIFICATION_REJECTED)
+                        draft = reviewed_draft(
+                            candidate, state.verification.items, review,
+                        )
+                        if review.accepted and review.task_completed:
+                            draft.feedback_updates = state.feedback_updates
+                        else:
+                            state.feedback_updates = []
+                    break
                 harness.emit(
                     "diagnosis.accepted",
                     parent_span_id=state.id,
@@ -486,6 +515,34 @@ class DiagnosisService:
                         "evidence_ids": [str(i) for i in draft.evidence_ids]
                     },
                 )
+            elif (
+                state.verification_history
+                and reason in {
+                    StopReason.DEADLINE, StopReason.VERIFICATION_FAILED,
+                    StopReason.MODEL_BUDGET, StopReason.TOKEN_BUDGET,
+                    StopReason.TOOL_BUDGET, StopReason.REPEATED_TOOL_CALL,
+                    StopReason.RECURSION_LIMIT, StopReason.CONTEXT_LIMIT,
+                    StopReason.NO_PROGRESS, StopReason.INVALID_DIAGNOSIS,
+                    StopReason.MODEL_TIMEOUT, StopReason.MODEL_ERROR,
+                    StopReason.TOOL_TIMEOUT, StopReason.TOOL_ERROR,
+                }
+            ):
+                # A new query can invalidate the old semantic review without
+                # erasing the useful candidate or its citation provenance.
+                if retained is not None:
+                    draft = reviewed_draft(
+                        retained.candidate, retained.items, retained.review,
+                    )
+                    draft.status = DiagnosisStatus.INCONCLUSIVE
+                else:
+                    record = state.verification
+                    if record is not None and reason is StopReason.DEADLINE:
+                        record.status, record.error_code = "failed", "deadline"
+                    error = record.error_code if record else None
+                    draft = revision_fallback(
+                        state, collector.evidence, error or reason.value,
+                    )
+                terminal_status = RunStatus.INCONCLUSIVE
             elif (
                 reason in {StopReason.DEADLINE, StopReason.VERIFICATION_FAILED}
                 and retained is None

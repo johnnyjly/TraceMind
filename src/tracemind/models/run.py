@@ -11,7 +11,9 @@ from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.budget import TokenLedger
 from tracemind.models.incident import Incident
 from tracemind.models.intake import InitialContext
+from tracemind.models.sources import SourcePolicy, SourceReference
 from tracemind.models.collaboration import CollaborationState
+
 from tracemind.models.verification import (
     VerificationPolicy, VerificationRecord, ReviewItem,
 )
@@ -41,11 +43,11 @@ class RunLimits(BaseModel):
     output_tokens: int = Field(default=16384, ge=1)
     total_tokens: int | None = Field(default=None, ge=1)
     observation_bytes: int = Field(default=8_388_608, ge=1)
-    model_calls: int = Field(default=8, ge=1)
+    model_calls: int = Field(default=12, ge=1)
     tool_calls: int = Field(default=12, ge=1)
     identical_tool_calls: int = Field(default=2, ge=1)
     duration_seconds: float | None = Field(
-        default=None, gt=0, allow_inf_nan=False
+        default=600, gt=0, allow_inf_nan=False
     )
     model_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     tool_timeout_seconds: float = Field(default=20, gt=0, allow_inf_nan=False)
@@ -174,10 +176,23 @@ class RunState(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def mark_legacy_checkpoint(cls, value):
-        if (isinstance(value, dict) and "events" in value
-                and "contract_version" not in value):
-            value = {**value, "contract_version": "legacy"}
+        if isinstance(value, dict) and "events" in value:
+            if "contract_version" not in value:
+                value = {**value, "contract_version": "legacy"}
+            policy = value.get("verification_policy")
+            if (isinstance(policy, dict)
+                    and "revise_on_rejection" not in policy):
+                # Existing checkpoints retain their admission-time policy.
+                value = {**value, "verification_policy": {
+                    **policy, "revise_on_rejection": False,
+                }}
         return value
+
+    @model_validator(mode="after")
+    def source_mode(self):
+        if self.agent_mode == "multi" and (self.source_policy or self.sources):
+            raise ValueError("direct sources require single-agent execution")
+        return self
 
     id: UUID = Field(default_factory=uuid4)
     investigation_id: UUID | None = None
@@ -200,11 +215,13 @@ class RunState(BaseModel):
     investigation_end: datetime
     limits: RunLimits
     allowed_tools: tuple[ToolName, ...]
+    source_policy: SourcePolicy | None = None
+    sources: list[SourceReference] = Field(default_factory=list)
     knowledge_policy: KnowledgePolicy | None = None
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
     collaboration: CollaborationState | None = None
     agent_mode: Literal["single", "multi"] = "single"
-    prompt_version: str = "single-agent-v15-evidence-semantics"
+    prompt_version: str = "single-agent-v17-review-revision"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None
@@ -231,6 +248,17 @@ class RunState(BaseModel):
     reference_map: dict[str, str] = Field(default_factory=dict)
     candidate_items: list[ReviewItem] = Field(default_factory=list)
     verification: VerificationRecord | None = None
+    verification_history: list[VerificationRecord] = Field(
+        default_factory=list, max_length=1,
+    )
+
+    @property
+    def graph_thread_id(self) -> str:
+        """Keep revision checkpoints separate without resetting run budgets."""
+        suffix = (f":revision:{len(self.verification_history)}"
+                  if self.verification_history else "")
+        return str(self.id) + suffix
+
     usage: TokenUsage = Field(default_factory=TokenUsage)
     tokens: TokenLedger = Field(default_factory=TokenLedger)
     events: list[RunEvent] = Field(default_factory=list)

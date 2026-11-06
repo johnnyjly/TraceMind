@@ -11,6 +11,7 @@ import logging
 import os
 from pathlib import Path
 import random
+import re
 from time import monotonic
 from typing import Any, NoReturn, TypeVar
 from uuid import UUID, uuid4
@@ -27,6 +28,7 @@ from tracemind.agent.runtime.recovery import (
     ToolUnavailable,
     classify_failure,
 )
+from tracemind.models.intake import redact_reported_text
 from tracemind.models.run import RunEvent, RunState, RunStatus, StopReason
 from tracemind.telemetry.errors import TelemetryClientError
 
@@ -143,11 +145,16 @@ class RunHarness:
         self._last_progress = state.last_progress
         # The durable phase event survives a restart independently of the
         # graph checkpoint, including a pending tool-node replay.
+        revision_started = max(
+            (e.sequence for e in state.events
+             if e.kind == "investigation.revision_started"), default=0,
+        )
         self.finalization_reason = next(
             (
                 StopReason(event.data["reason"])
                 for event in reversed(state.events)
                 if event.kind == "policy.finalizing"
+                and event.sequence > revision_started
             ),
             None,
         )
@@ -470,11 +477,40 @@ class RunHarness:
             self.begin_finalization(StopReason.DEADLINE)
 
     @property
+    def revision_reserve_calls(self) -> int:
+        policy = self.state.verification_policy
+        return 5 * int(
+            policy is not None and policy.revise_on_rejection
+            and self.state.agent_mode == "single"
+            and not self.state.verification_history
+            and self.state.limits.model_calls >= 10
+        )
+
+    @property
     def verification_calls(self) -> int:
-        return 2 * int(
+        return (2 + self.revision_reserve_calls) * int(
             self.state.verification_policy is not None
             and self.state.verification is None
         )
+
+    @property
+    def available_tool_limit(self) -> int:
+        # Two calls remain available for targeted evidence after rejection.
+        reserve = min(2, self.state.limits.tool_calls // 3)
+        return self.state.limits.tool_calls - (
+            reserve if self.revision_reserve_calls else 0
+        )
+
+    def start_revision(self) -> None:
+        """Reopen the soft phase only; all hard budgets remain shared."""
+        self.check_active()
+        self.finalization_reason = None
+        self.graph_resuming = False
+        self.state.stalled_rounds = 0
+        self.state.last_progress = self._last_progress = None
+        self.emit("investigation.revision_started", data={
+            "round": len(self.state.verification_history),
+        })
 
     @property
     def finalization_calls(self) -> int:
@@ -1083,7 +1119,7 @@ class RunHarness:
     ) -> list[dict[str, object]]:
         """Reserve a shared attempt slot and record one backend execution."""
         self.authorize_tool(name)
-        if sum(self.state.tool_calls.values()) >= self.state.limits.tool_calls:
+        if sum(self.state.tool_calls.values()) >= self.available_tool_limit:
             self.begin_finalization(StopReason.TOOL_BUDGET)
             raise InvestigationClosed()
         record = self.check_task_tool_budget()
@@ -1107,6 +1143,22 @@ class RunHarness:
             display["service"] = "".join(
                 c for c in service if c.isprintable()
             )[:120]
+        # Audit only bounded log selectors, never arbitrary tool arguments.
+        if name in {"search_logs", "get_trace_detail"}:
+            trace_id = arguments.get("trace_id")
+            if isinstance(trace_id, str) and re.fullmatch(
+                r"[0-9a-fA-F]{16,32}", trace_id
+            ):
+                display["trace_id"] = trace_id
+        if name == "search_logs" and arguments.get("text"):
+            text = arguments["text"]
+            if isinstance(text, str):
+                redacted = redact_reported_text(text)
+                display.update({
+                    "text": redacted[:512],
+                    "text_redacted": redacted != text,
+                    "text_truncated": len(redacted) > 512,
+                })
         if remote:
             display.update(
                 {

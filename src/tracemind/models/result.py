@@ -37,6 +37,7 @@ class DiagnosisDraft(BaseModel):
         description="Legacy uncalibrated model estimate, not a probability.",
     )
     evidence_ids: list[UUID] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
     items: list[TriageItem] = Field(default_factory=list)
@@ -60,13 +61,17 @@ class ProposalStatement(BaseModel):
             "One independently assessable assertion with its necessary "
             "scope/conditions. Separate protocol status, business outcome "
             "and safe-retry assumptions into distinct items. A future check "
-            "must not assert an unobserved outcome as its premise."
+            "must not assert an unobserved outcome as its premise. Attribute "
+            "unverified reporter labels in this item, including request path "
+            "or body; do not rely on a separate limitation. Code behavior "
+            "is conditional unless E establishes this request's conditions."
         ),
     )
     evidence_refs: list[str] = Field(
         default_factory=list,
         description='Exact retained handles, e.g. ["E17", "E18"]. '
         'Repeat the E prefix on every entry; never use bare numbers.')
+    source_refs: list[str] = Field(default_factory=list)
     knowledge_refs: list[str] = Field(default_factory=list)
 
 

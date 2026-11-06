@@ -9,6 +9,7 @@ from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from tracemind.models import Diagnosis, Evidence, Incident
 from tracemind.models.intake import InitialContext
+from tracemind.models.sources import SourceReference
 from tracemind.models.run import RunPurpose, RunStatus, StopReason
 
 
@@ -58,6 +59,7 @@ class RunTriageResponse(BaseModel):
     cancel_requested: bool
     diagnosis: Diagnosis
     evidence: list[Evidence]
+    sources: list[SourceReference] = Field(default_factory=list)
 
 
 class FollowUpRequest(BaseModel):
