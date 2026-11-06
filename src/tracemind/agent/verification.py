@@ -312,7 +312,7 @@ def review_options(
             },
         }
         options["reasoning"] = getattr(model, "reasoning", None) or {
-            "effort": "high"
+            "effort": "low"
         }
     return options
 

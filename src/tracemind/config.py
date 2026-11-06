@@ -40,12 +40,12 @@ class Settings(BaseSettings):
     verifier_provider: Literal["google", "openai", "deepseek"] = "deepseek"
     verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
     verifier_deepseek_thinking: bool = True
-    verifier_reasoning_effort: Literal["low", "high", "max"] = "high"
+    verifier_reasoning_effort: Literal["low", "high", "max"] = "low"
     verifier_timeout_seconds: float = Field(
         default=180, gt=0, allow_inf_nan=False
     )
     verifier_input_bytes: int = Field(default=524288, ge=1)
-    verifier_output_tokens: int = Field(default=16384, ge=1)
+    verifier_output_tokens: int = Field(default=32768, ge=1)
     telemetry_transport: Literal["mcp"] = "mcp"
     telemetry_mcp_url: AnyHttpUrl = "http://127.0.0.1:8012/mcp"
     telemetry_mcp_response_bytes: int = Field(default=16_777_216, ge=1024)

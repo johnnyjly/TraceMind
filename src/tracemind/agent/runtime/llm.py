@@ -11,6 +11,7 @@ from openai import APIError, LengthFinishReasonError
 
 from tracemind.agent.errors import ModelConfigurationError
 from tracemind.config import Settings
+from tracemind.agent.runtime.progress import ModelProgressCallback
 
 
 MODEL_SERVICE_ERRORS = (
@@ -38,6 +39,8 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             model=settings.llm_model,
             api_key=settings.google_api_key,
             temperature=1.0,
+            streaming=True,
+            callbacks=[ModelProgressCallback()],
             max_retries=0,
         )
 
@@ -74,6 +77,9 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
         model=settings.llm_model,
         api_key=settings.openai_api_key,
         use_responses_api=True,
+        streaming=True,
+        stream_chunk_timeout=None,
+        callbacks=[ModelProgressCallback()],
         max_retries=0,
     )
 

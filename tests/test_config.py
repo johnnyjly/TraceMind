@@ -33,6 +33,11 @@ def test_example_covers_all_settings_and_loads_diagnostic_profile():
 
     assert settings.verifier_enabled
     assert settings.verification_policy is not None
+    assert settings.verification_policy.deepseek_reasoning_effort == "low"
+    assert settings.verification_policy.output_tokens == 32768
+    assert settings.verification_policy.timeout_seconds == 180
+    assert settings.deepseek_reasoning_effort == "high"
+    assert settings.eval_judge_reasoning_effort == "high"
 
 
 def test_verifier_defaults_on_and_can_be_explicitly_disabled(monkeypatch):
@@ -63,6 +68,9 @@ def test_token_defaults_match_direct_policies_and_leave_discovery_budget():
     assert settings.agent_knowledge_model_output_tokens == (
         KnowledgePolicy(snapshot="test").model_output_tokens
     )
+    assert settings.verification_policy.deepseek_reasoning_effort == (
+        VerificationPolicy().deepseek_reasoning_effort
+    ) == "low"
     assert settings.run_limits.total_tokens is None
     state = RunState(
         incident=Incident(title="test", description="budget admission"),

@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 from tracemind.agent.errors import DiagnosisError
 from tracemind.agent.runtime.llm import MODEL_SERVICE_ERRORS
 from tracemind.agent.runtime.token_count import ESTIMATOR_VERSION
+from tracemind.agent.runtime.progress import model_progress_timeout
 from tracemind.agent.storage.io import run_io
 from tracemind.agent.workflow.tool_policy import resolve_tool_policy
 from tracemind.agent.runtime.recovery import (
@@ -725,8 +726,6 @@ class RunHarness:
             if timeout_seconds is None else timeout_seconds
         )
         remaining = self.remaining_seconds
-        if remaining is not None:
-            timeout_seconds = min(timeout_seconds, remaining)
         self.emit(
             "model.started",
             span_id=span,
@@ -736,6 +735,8 @@ class RunHarness:
                 "call": call_number,
                 "purpose": purpose,
                 "timeout_seconds": timeout_seconds,
+                "timeout_mode": "progress_idle",
+                "run_remaining_seconds": remaining,
                 "estimated_tokens": estimated_tokens,
                 "token_estimator": ESTIMATOR_VERSION,
             },
@@ -745,8 +746,17 @@ class RunHarness:
         reasoning_reported = False
         call_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         valid_usage = []
+        progress = None
         try:
-            async with asyncio.timeout(timeout_seconds):
+            async with model_progress_timeout(
+                timeout_seconds, remaining_seconds=remaining,
+                on_progress=lambda data: self.emit(
+                    "model.progress", span_id=span, parent_span_id=parent,
+                    duration_ms=(monotonic() - started) * 1000,
+                    data={"model": model_name, "purpose": purpose,
+                          "call": call_number, **data},
+                ),
+            ) as progress:
                 await self.checkpoint()
                 response = await call()
             # Main-loop responses wrap AIMessage; auxiliary calls return it.
@@ -817,6 +827,7 @@ class RunHarness:
                     "purpose": purpose,
                     "call": call_number,
                     "usage_reported": reported,
+                    **progress.summary(),
                     "cache_usage_reported": cache_reported,
                     "cache_hit_tokens": cache_hit,
                     "cache_miss_tokens": cache_miss,
@@ -836,7 +847,13 @@ class RunHarness:
                 span_id=span,
                 parent_span_id=parent,
                 duration_ms=(monotonic() - started) * 1000,
-                data={"error_type": "TimeoutError"},
+                data={"error_type": "TimeoutError",
+                      "timeout_phase": (
+                          "overall_deadline" if self.remaining_seconds is not None
+                          and self.remaining_seconds <= 0 else
+                          "idle" if progress and progress.first else "first_output"
+                      ),
+                      **(progress.summary() if progress else {})},
             )
             self.check_active()
             raise

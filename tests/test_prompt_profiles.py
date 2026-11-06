@@ -172,17 +172,19 @@ def test_verification_preserves_original_process_events(
 
 
 def test_review_settings_independent_and_policy_persisted():
-    settings = Settings(_env_file=None, deepseek_reasoning_effort="low")
-    assert settings.verification_policy.deepseek_reasoning_effort == "high"
+    settings = Settings(_env_file=None, deepseek_reasoning_effort="high")
+    assert settings.verification_policy.deepseek_reasoning_effort == "low"
     assert settings.eval_judge_reasoning_effort == "high"
     policy = settings.model_copy(
-        update={"verifier_reasoning_effort": "low"}
+        update={"verifier_reasoning_effort": "high"}
     ).verification_policy
+    assert policy.deepseek_reasoning_effort == "high"
+    assert settings.verification_policy.deepseek_reasoning_effort == "low"
     assert (
         VerificationPolicy.model_validate_json(policy.model_dump_json())
         == policy
     )
-    assert VerificationPolicy().deepseek_reasoning_effort == "high"
+    assert VerificationPolicy().deepseek_reasoning_effort == "low"
     model = create_review_model(
         Settings(
             _env_file=None,

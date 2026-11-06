@@ -193,7 +193,7 @@ def test_supported_review_precedes_acceptance_and_shares_usage(monkeypatch):
     )
     assert run.state.verification.review.accepted
     assert model.captured[0][1]["response_format"]["type"] == "json_schema"
-    assert model.captured[0][1]["reasoning"] == {"effort": "high"}
+    assert model.captured[0][1]["reasoning"] == {"effort": "low"}
     packet = json.loads(model.captured[0][0][1].content)
     assert packet["items"][0]["id"] == "F1"
     assert "quote_sources" not in packet

@@ -62,17 +62,18 @@ def test_reasoning_survives_tool_turn_and_message_serialization():
                 "content": "Done",
                 "reasoning_content": "Read completed.",
             }
+        assert payload["stream"] is True
+        delta = dict(message)
+        for index, call in enumerate(delta.get("tool_calls", [])):
+            call["index"] = index
+        chunk = {
+            "id": "mock", "object": "chat.completion.chunk", "created": 0,
+            "model": "deepseek-v4-pro",
+            "choices": [{"index": 0, "finish_reason": "stop", "delta": delta}],
+        }
         return httpx.Response(
-            200,
-            json={
-                "id": "mock",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "deepseek-v4-pro",
-                "choices": [
-                    {"index": 0, "finish_reason": "stop", "message": message}
-                ],
-            },
+            200, headers={"content-type": "text/event-stream"},
+            content="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n",
         )
 
     async def exercise():

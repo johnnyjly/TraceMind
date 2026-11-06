@@ -1,10 +1,9 @@
 """A Langfuse SDK evaluator for diagnosis support and held-out correctness."""
 
-import asyncio
-
 from pydantic import ValidationError
 
 from tracemind.agent.runtime.llm import MODEL_SERVICE_ERRORS
+from tracemind.agent.runtime.progress import model_progress_timeout
 from tracemind.agent.errors import ModelCallBudgetExceeded
 from tracemind.evaluation.evaluators import finding_scores, metric
 from tracemind.evaluation.models import ExperimentOutput
@@ -119,19 +118,21 @@ def diagnosis_judge(settings, client, budget):
         )
         reference_repairs = []
         try:
-            async with asyncio.timeout(settings.eval_judge_timeout_seconds):
-                for attempt in range(2):
-                    if (
-                        review_input_bytes(
-                            messages, settings.eval_judge_provider
-                        )
-                        > settings.eval_judge_input_bytes
-                        or review_input_tokens(
-                            messages, settings.eval_judge_provider,
-                        ) + settings.eval_judge_output_tokens
-                        > settings.agent_context_tokens
-                    ):
-                        raise ValueError("input_limit; no evidence dropped")
+            for attempt in range(2):
+                if (
+                    review_input_bytes(
+                        messages, settings.eval_judge_provider
+                    )
+                    > settings.eval_judge_input_bytes
+                    or review_input_tokens(
+                        messages, settings.eval_judge_provider,
+                    ) + settings.eval_judge_output_tokens
+                    > settings.agent_context_tokens
+                ):
+                    raise ValueError("input_limit; no evidence dropped")
+                async with model_progress_timeout(
+                    settings.eval_judge_timeout_seconds,
+                ):
                     response = await model.ainvoke(
                         messages,
                         config={
@@ -139,36 +140,36 @@ def diagnosis_judge(settings, client, budget):
                         },
                         **options,
                     )
-                    attempt_repairs = []
-                    try:
-                        review = parse_review(
-                            response, subject, expected_output,
-                            reference_repairs=attempt_repairs,
-                        )
-                        break
-                    except ValueError as exc:
-                        if attempt:
-                            raise
-                        feedback = (
-                            "Correct the output contract: "
-                            + str(exc)[:700]
-                            + ". Assess each item once. With a held-out "
-                            "reference correctness must be boolean; otherwise "
-                            "null. Reassess fields and verdict against the "
-                            "original assertion; do not change the verdict "
-                            "merely to satisfy a field rule. "
-                            "Return ItemReview."
-                        )
-                        messages = [
-                            *messages,
-                            {"role": "assistant", "content": response.text},
-                            {"role": "user", "content": feedback},
-                        ]
-                    finally:
-                        reference_repairs.extend(
-                            {"attempt": attempt + 1, **repair}
-                            for repair in attempt_repairs
-                        )
+                attempt_repairs = []
+                try:
+                    review = parse_review(
+                        response, subject, expected_output,
+                        reference_repairs=attempt_repairs,
+                    )
+                    break
+                except ValueError as exc:
+                    if attempt:
+                        raise
+                    feedback = (
+                        "Correct the output contract: "
+                        + str(exc)[:700]
+                        + ". Assess each item once. With a held-out "
+                        "reference correctness must be boolean; otherwise "
+                        "null. Reassess fields and verdict against the "
+                        "original assertion; do not change the verdict "
+                        "merely to satisfy a field rule. "
+                        "Return ItemReview."
+                    )
+                    messages = [
+                        *messages,
+                        {"role": "assistant", "content": response.text},
+                        {"role": "user", "content": feedback},
+                    ]
+                finally:
+                    reference_repairs.extend(
+                        {"attempt": attempt + 1, **repair}
+                        for repair in attempt_repairs
+                    )
         except (
             TimeoutError,
             *MODEL_SERVICE_ERRORS,

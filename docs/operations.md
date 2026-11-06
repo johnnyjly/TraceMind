@@ -161,9 +161,10 @@ profile overrides smaller code defaults when copied into `.env`:
 | `RECURSION_LIMIT` | 50 | 12 |
 | `MAX_MODEL_CALLS` | 15 | 8 |
 | `MAX_TOOL_CALLS` | 25 | 12 |
-| `TIMEOUT_SECONDS` | 600 | 600 |
+| `TIMEOUT_SECONDS` | none | none |
 
-Attempt timeouts default to 180 seconds for models and 20 for tools. These limits
+First-output/idle timeouts default to 180 seconds for models; tool requests have
+a 20-second total timeout. These limits
 are not model capacity declarations. Retries/repairs consume attempts; evidence
 reads consume tool attempts. Evaluation also applies the case's tool-call cap.
 Context admission uses the locally bundled `cl100k_base` tokenizer, with
@@ -177,8 +178,8 @@ for the ledger; events retain the estimator version. UTF-8 byte limits
 remain independent storage and payload guards, never token quantities.
 
 Investigation and knowledge-helper output limits are 16384 tokens. Online
-verification and the offline judge allow 12288 output tokens and 524288 input
-bytes. Thinking tokens consume the output allowance too. These are maxima,
+verification allows 32768 output tokens; the offline judge allows 12288.
+Both retain the 524288-byte input guard. Thinking tokens consume the output allowance too. These are maxima,
 not targets for response length, and they do not extend any deadline.
 Existing persisted runs keep their original limits; explicit environment
 values override defaults. Restart API/worker processes after configuration
@@ -413,8 +414,13 @@ Persisted policy and review state govern resumed runs. Existing reviews from
 older rubric versions are not silently reused. The default overall deadline is
 disabled (`TRACEMIND_AGENT_TIMEOUT_SECONDS=none`); a positive value enables it.
 Direct and worker runs retain the frozen policy on resume, including any
-existing absolute deadline. Per-model and per-tool request timeouts remain
-finite, so a stuck external request cannot hang an otherwise bounded run.
+existing absolute deadline. Model timeouts bound the wait for first meaningful
+output and each subsequent idle gap, not the total request duration. Reasoning,
+answer text and tool-argument deltas refresh the deadline; heartbeats, empty
+chunks and transport headers do not. Continuous output may exceed the configured
+seconds. Output-token and model-call budgets still apply, as do cancellation and
+an explicitly configured overall deadline. Tool timeouts remain total request
+limits.
 If a provider's Retry-After exceeds the configured maximum backoff, automatic
 retry is declined rather than waiting indefinitely or retrying too early.
 
@@ -425,14 +431,25 @@ remaining diagnosis repair, and two review attempts (initial plus at most one
 output-contract repair). Runtime snapshots show the discovery allocation and
 reserved calls. Graph recursion limits count graph steps, not model turns.
 
-The verifier uses `TRACEMIND_VERIFIER_TIMEOUT_SECONDS` for **each request**,
-independently of the ordinary per-model timeout. A format repair receives its
-own request timeout but still consumes the shared model-call budget. If an
-overall deadline is explicitly enabled, both attempts use only its remaining
-time. `model.started` records the effective attempt timeout;
+The verifier uses `TRACEMIND_VERIFIER_TIMEOUT_SECONDS` as the **first-output and
+idle timeout for each request**, independently of `TRACEMIND_AGENT_MODEL_TIMEOUT_SECONDS`.
+A format repair receives a new progress monitor but still consumes the shared
+model-call budget. The offline Judge likewise uses its timeout per request.
+If an overall deadline is explicitly enabled, progress cannot extend it.
+`model.started` records `timeout_mode=progress_idle` and the configured interval;
+`model.progress` records bounded numeric summaries (first phase output and at
+most once per ten seconds), never provider text. Completion events retain first
+output times and maximum progress gap; timeout events distinguish `first_output`,
+`idle` and `overall_deadline`. The DeepSeek adapter consumes Chat/Responses
+streams internally, preserving reasoning for tool turns and terminal usage.
+OpenAI/Google use native streaming callbacks; unexposed internal reasoning cannot
+refresh a deadline. A stream ending without a terminal response is a transport
+failure, not a completed answer;
 `verification.started` records input size and remaining run time (null when
 disabled). Timed-out review returns an explicitly unreviewed candidate.
-The default review output budget is 16384 tokens, including provider reasoning.
+The online verifier defaults to `low` reasoning; the investigator and offline
+Judge keep their separately configured reasoning levels. The default review
+output budget is 32768 tokens, including provider reasoning.
 Provider-truncated/incomplete responses return `incomplete_output` without
 repeating the same request as a format repair; all candidate items remain
 explicitly unreviewed. Complete responses with invalid JSON/contracts can still
