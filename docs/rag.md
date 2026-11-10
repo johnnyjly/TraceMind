@@ -47,7 +47,8 @@ uv run --extra rag python scripts/rag.py build --corpus knowledge --profile core
 uv run --extra rag python scripts/rag.py verify --snapshot runbooks-v2
 ```
 
-Use `--demo-repo` if the referenced Demo is not at `../opentelemetry-demo`.
+Use `--demo-repo` if the referenced Demo is not at `.local/opentelemetry-demo`
+under the TraceMind workspace.
 Docling converts Markdown, HTML, authored JSON text and PDF. Structural parents
 retain full sections; HybridChunker uses the pinned tokenizer with a 320-token
 child cap. Provenance retains hashes/revisions, headings and element pointers.

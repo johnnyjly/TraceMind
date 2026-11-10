@@ -5,6 +5,11 @@
 !.env.example
 !*.env.example
 
+# Workstation runtime assets kept inside the TraceMind workspace.
+/.venv/
+/.local/opentelemetry-demo/
+/artifacts/otel-demo/
+
 # Local runs, evaluations, checkpoints, knowledge and model snapshots.
 artifacts/
 knowledge/

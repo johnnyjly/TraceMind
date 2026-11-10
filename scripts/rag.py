@@ -300,7 +300,8 @@ def main() -> None:
     parser.add_argument("--corpus", type=Path, default=Path("knowledge"))
     parser.add_argument("--profile", default="core")
     parser.add_argument(
-        "--demo-repo", type=Path, default=Path("../opentelemetry-demo")
+        "--demo-repo", type=Path,
+        default=Path(__file__).resolve().parents[1] / ".local/opentelemetry-demo",
     )
     parser.add_argument("--prepare-output", type=Path)
     parser.add_argument("--max-model-calls", type=int)

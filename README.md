@@ -60,7 +60,7 @@ TRACEMIND_VERIFIER_MODEL=deepseek-v4-pro
 
 #### 2. 启动 Demo 与遥测服务
 
-将固定版本的 Demo 放在 `../opentelemetry-demo`，并启动 Docker：
+将固定版本的 Demo 放在 `.local/opentelemetry-demo`（已加入 Git 忽略），并启动 Docker：
 
 ```bash
 uv run python scripts/demo_scenario.py prepare
@@ -261,7 +261,7 @@ admitted runs retain their saved limits and policies.
 
 #### 2. Start the Demo and telemetry service
 
-With the pinned Demo at `../opentelemetry-demo` and Docker running:
+With the pinned Demo at `.local/opentelemetry-demo` (ignored by Git) and Docker running:
 
 ```bash
 uv run python scripts/demo_scenario.py prepare

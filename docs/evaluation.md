@@ -315,11 +315,13 @@ Prepare the snapshot before held-out incident windows, keep it under ignored
 
 ## OpenTelemetry Demo
 
-Keep the upstream Demo in a sibling checkout pinned to version 3.1.0:
+Keep the upstream Demo in the ignored `.local/opentelemetry-demo` checkout,
+pinned to version 3.1.0:
 
 ```bash
-git clone https://github.com/open-telemetry/opentelemetry-demo.git ../opentelemetry-demo
-git -C ../opentelemetry-demo checkout dedc0178918e260823323b8d95005a8cb924b007
+mkdir -p .local
+git clone https://github.com/open-telemetry/opentelemetry-demo.git .local/opentelemetry-demo
+git -C .local/opentelemetry-demo checkout dedc0178918e260823323b8d95005a8cb924b007
 uv run python scripts/demo_scenario.py prepare
 uv run python scripts/demo_scenario.py start
 uv run python scripts/demo_scenario.py status

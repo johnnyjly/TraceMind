@@ -25,7 +25,7 @@ logger = logging.getLogger("tracemind.evaluation.demo_cli")
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DEMO_PATH = PROJECT_ROOT.parent / "opentelemetry-demo"
+DEFAULT_DEMO_PATH = PROJECT_ROOT / ".local" / "opentelemetry-demo"
 CASE_PATH = PROJECT_ROOT / "evals" / "cases" / "payment_failure.json"
 OVERRIDE_PATH = PROJECT_ROOT / "evals" / "compose.payment-failure.yaml"
 GENERATED_FLAG_PATH = (
