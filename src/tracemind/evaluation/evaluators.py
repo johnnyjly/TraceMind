@@ -398,16 +398,19 @@ def verification_scores(*, output, expected_output=None, **kwargs):
             metric("support_verdict", review.verdict),
             metric("would_accept", review.accepted),
         ])
-    if expected is not None:
+    if expected in {"supported", "insufficient", "contradicted"}:
         scores.extend([
             metric(
                 "expected_verdict",
                 review is not None and review.verdict == expected),
             metric("expected_decision", review is not None
                    and review.accepted == (expected == "supported")),
-            metric("false_acceptance", bool(review and review.accepted
-                                            and expected != "supported")),
-            metric("false_rejection", bool(review and not review.accepted
-                                           and expected == "supported")),
         ])
+        if review is not None:
+            scores.append(metric("decision_agreement",
+                                 review.accepted == (expected == "supported")))
+            if expected == "supported":
+                scores.append(metric("false_rejection", not review.accepted))
+            else:
+                scores.append(metric("false_acceptance", review.accepted))
     return scores

@@ -195,7 +195,10 @@ def review_version(subject):
         or getattr(subject, "source_policy", None)
         or subject.sources
     )
-    return VERSION + "-sources-v1" if enabled else VERSION
+    version = VERSION + "-sources-v1" if enabled else VERSION
+    snapshot = (getattr(subject, "prompt", None)
+                or getattr(subject, "prompts", {}).get("verifier"))
+    return version + ":" + snapshot.sha256 if snapshot else version
 
 
 def _compatible_candidate(value):
@@ -638,8 +641,18 @@ def review_messages(subject, expected=None, *, provider=None):
     packet = review_packet(subject, expected)
     if provider != "deepseek":
         packet["output_schema"] = review_schema(packet)
-    rubric = RUBRIC
-    if subject.sources or subject.source_snapshot_id:
+    rubric = (subject.prompt.content if subject.prompt is not None
+              else render_rubric(subject, RUBRIC))
+    return [
+        {"role": "system", "content": rubric},
+        {"role": "user", "content": json.dumps(
+            packet, ensure_ascii=False, separators=(",", ":"))},
+    ]
+
+
+def render_rubric(subject, rubric):
+    if (subject.sources or getattr(subject, "source_snapshot_id", None)
+            or getattr(subject, "source_policy", None)):
         rubric += (
             "\nR handles are direct source/release/diff records, not E"
             " telemetry or K runbooks. Classify assertions about what a code"
@@ -669,15 +682,17 @@ def review_messages(subject, expected=None, *, provider=None):
             "event marked outside the window or with unknown event time "
             "cannot establish in-window exception occurrence."
         )
-    return [
-        {"role": "system", "content": rubric},
-        {
-            "role": "user",
-            "content": json.dumps(
-                packet, ensure_ascii=False, separators=(",", ":")
-            ),
-        },
-    ]
+    return rubric
+
+
+async def pin_review_prompt(state, subject, settings, client):
+    from tracemind.observability.prompts import pin_prompt
+
+    return await pin_prompt(
+        state, "verifier", client=client,
+        label=settings.langfuse_prompt_label, contract=VERSION,
+        render=lambda text: render_rubric(subject, text),
+    )
 
 
 def review_input_bytes(messages, provider):
@@ -926,6 +941,7 @@ def parse_review(response, subject, expected=None, *, reference_repairs=None):
 def subject_for(state, candidate, evidence):
     return ReviewSubject(
         incident=state.incident,
+        prompt=state.prompts.get("verifier"),
         initial_context=state.initial_context,
         purpose=state.purpose.value,
         user_message=state.user_message,
@@ -1010,6 +1026,12 @@ class DiagnosisVerifier:
         # Saved evaluations retain their original query-event sequences;
         # those events must not enter this fresh run's execution ledger.
         subject = subject or subject_for(state, candidate, evidence)
+        snapshot = await pin_review_prompt(
+            state, subject, self.settings, self.client,
+        )
+        # Standalone experiments use the selected target rubric, not the
+        # archived candidate's previous reviewer prompt.
+        subject = subject.model_copy(update={"prompt": snapshot})
         fingerprint = subject_hash(subject)
         if state.verification is not None:
             record = state.verification
@@ -1029,6 +1051,7 @@ class DiagnosisVerifier:
                 items=review_items(subject),
                 input_sha256=fingerprint,
                 rubric_version=review_version(subject),
+                subject=subject.model_copy(deep=True),
             )
             state.verification = record
             messages = review_messages(subject, provider=policy.provider)
@@ -1116,6 +1139,9 @@ class DiagnosisVerifier:
                 self.client,
                 "diagnosis.verification",
                 input=review_packet(subject),
+                metadata={"run_id": str(state.id),
+                          "candidate_sha256": record.input_sha256,
+                          "review_round": len(state.verification_history)},
             ) as span:
                 for attempt in range(2):
                     if (
@@ -1132,11 +1158,15 @@ class DiagnosisVerifier:
                     record.attempts += 1
 
                     async def invoke():
-                        return await model.ainvoke(
-                            messages,
-                            config={"callbacks": self.callbacks},
-                            **options,
+                        from tracemind.observability.prompts import (
+                            prompt_context,
                         )
+                        with prompt_context(subject.prompt):
+                            return await model.ainvoke(
+                                messages,
+                                config={"callbacks": self.callbacks},
+                                **options,
+                            )
 
                     response = await harness.model_call(
                         invoke,
@@ -1210,6 +1240,13 @@ class DiagnosisVerifier:
                     record.review, record.status = review, "completed"
                     if span is not None:
                         span.update(output=review.model_dump(mode="json"))
+                        from tracemind.observability.metrics import (
+                            publish_review_score,
+                        )
+                        publish_review_score(
+                            self.client, trace_id=span.trace_id,
+                            observation_id=span.id, record=record,
+                        )
                     harness.emit(
                         "verification.completed",
                         data={

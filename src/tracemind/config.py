@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     langfuse_enabled: bool = False
+    langfuse_prompt_label: str | None = None
     langfuse_timeout_seconds: float = Field(
         default=5, gt=0, allow_inf_nan=False
     )

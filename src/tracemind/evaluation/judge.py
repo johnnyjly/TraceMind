@@ -112,6 +112,7 @@ def diagnosis_judge(settings, client, budget):
                 else []
             ),
         )
+        subject = subject.model_copy(update={"prompt": None})
         messages = review_messages(
             subject, expected_output, provider=settings.eval_judge_provider
         )

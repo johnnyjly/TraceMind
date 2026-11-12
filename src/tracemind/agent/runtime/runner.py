@@ -228,7 +228,9 @@ class LangChainAgentRunner:
         agent = create_agent(
             model=self._model,
             tools=tools,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=(harness.state.prompts["investigator"].content
+                           if "investigator" in harness.state.prompts
+                           else SYSTEM_PROMPT),
             response_format=DiagnosisProposal,
             middleware=[HarnessMiddleware(harness, self._fallback_model)],
             checkpointer=self._checkpointer,

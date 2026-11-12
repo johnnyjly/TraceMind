@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
+from tracemind.models.prompts import PromptSnapshot
 from tracemind.models.diagnosis import Diagnosis
 from tracemind.models.budget import TokenLedger
 from tracemind.models.incident import Incident
@@ -225,6 +226,8 @@ class RunState(BaseModel):
     collaboration: CollaborationState | None = None
     agent_mode: Literal["single", "multi"] = "single"
     prompt_version: str = "single-agent-v18-evidence-timing-budget"
+    prompts: dict[str, PromptSnapshot] = Field(default_factory=dict)
+    observability_metadata: dict = Field(default_factory=dict)
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None

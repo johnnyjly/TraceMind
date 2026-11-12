@@ -96,8 +96,10 @@ class DiagnosisService:
         verification_policy: VerificationPolicy | None = None,
         verifier: DiagnosisVerifier | None = None,
         agent_mode: Literal["single", "multi"] = "single",
+        settings=None,
     ) -> None:
         """Configure telemetry dependencies, runner, and per-run controls."""
+        self._settings = settings
         self._langfuse = langfuse_client
         self._agent_mode = agent_mode
         self._verification_policy = verification_policy
@@ -265,6 +267,10 @@ class DiagnosisService:
                 try:
                     return await self._investigate(state, collector, **kwargs)
                 finally:
+                    from tracemind.observability.metrics import (
+                        publish_run_metrics,
+                    )
+                    publish_run_metrics(self._langfuse, state)
                     if span is not None:
                         span.update(
                             output={
@@ -279,6 +285,11 @@ class DiagnosisService:
                                 ],
                             },
                             metadata={
+                                **state.observability_metadata,
+                                "prompt_versions": {role: {
+                                    "name": p.name, "version": p.version,
+                                    "sha256": p.sha256,
+                                } for role, p in state.prompts.items()},
                                 "run_id": str(state.id),
                                 "status": state.status.value,
                                 "stop_reason": (
@@ -343,6 +354,34 @@ class DiagnosisService:
             async with asyncio.timeout(harness.remaining_seconds):
                 if state.contract_version != "diagnosis-items-v1":
                     harness.stop(StopReason.CONTRACT_CHANGED)
+                if self._settings is not None:
+                    from tracemind.observability.prompts import (
+                        pin_prompt, INVESTIGATOR_CONTRACT,
+                    )
+                    from tracemind.agent.verification import (
+                        pin_review_prompt,
+                    )
+                    if not state.model_calls:
+                        state.observability_metadata.setdefault("model_profile", {
+                            "investigator_model": self._settings.llm_model,
+                            "thinking": self._settings.deepseek_thinking,
+                            "reasoning_effort": (
+                                self._settings.deepseek_reasoning_effort
+                            ),
+                            "model_budgets": self._settings.model_budgets,
+                        })
+                    if state.agent_mode == "single":
+                        await pin_prompt(
+                            state, "investigator", client=self._langfuse,
+                            label=self._settings.langfuse_prompt_label,
+                            contract=INVESTIGATOR_CONTRACT,
+                        )
+                    if state.verification_policy:
+                        await pin_review_prompt(
+                            state, state,
+                            self._settings, self._langfuse,
+                        )
+                    await harness.checkpoint()
                 while True:
                     if (
                         state.verification is not None

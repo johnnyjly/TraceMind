@@ -437,3 +437,5 @@ The Python distribution and import package are both `tracemind`; application
 settings use `TRACEMIND_`. Existing local deployments must update their environment
 keys, import paths and response-header consumers. Renamed Compose projects and
 named volumes do not automatically migrate existing local service data.
+
+- Langfuse 界面、prompt 发布与人工标注：[使用指南](docs/langfuse.md)。

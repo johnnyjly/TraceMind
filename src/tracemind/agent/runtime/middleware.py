@@ -184,7 +184,13 @@ class HarnessMiddleware(AgentMiddleware):
                 """Retain provider output and usage after schema rejection."""
                 nonlocal malformed, validation
                 try:
-                    return await handler(prepared)
+                    from tracemind.observability.prompts import (
+                        prompt_context,
+                    )
+                    snapshot = (state.prompts.get("investigator")
+                                if state.agent_mode == "single" else None)
+                    with prompt_context(snapshot):
+                        return await handler(prepared)
                 except StructuredOutputError as exc:
                     malformed = True
                     validation = self._schema_failure(exc, self._output_name)

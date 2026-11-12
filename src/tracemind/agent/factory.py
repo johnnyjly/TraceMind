@@ -78,6 +78,7 @@ def build_service(
     return DiagnosisService(
         runner,
         agent_mode=settings.agent_mode,
+        settings=settings,
         tool_client=tool_client,
         recursion_limit=settings.agent_recursion_limit,
         limits=limits or settings.run_limits,

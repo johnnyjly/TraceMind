@@ -430,3 +430,7 @@ does not prove the conclusion correct or establish a production accuracy gain.
 Do not switch models, enlarge budgets, drop evidence or reset deadlines during
 an attempt. If live traces are absent, record failed preflight before any model
 call; frozen-packet review must be labeled separately from live investigation.
+
+## 人工标注与审核器校准
+
+[Langfuse 使用指南](langfuse.md) 包含绑定具体审核轮次的人工队列、开发/留出集导出、误放误拒分母及 UI 操作。未知、冲突和未完成人审不作为确定标签。

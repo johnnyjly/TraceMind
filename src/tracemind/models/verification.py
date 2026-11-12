@@ -3,6 +3,8 @@
 from typing import Literal
 from uuid import UUID
 
+from tracemind.models.prompts import PromptSnapshot
+
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from tracemind.models.diagnosis import Diagnosis
@@ -151,6 +153,7 @@ class ReviewSubject(BaseModel):
     source_snapshot_id: str | None = None
     knowledge: list[dict] = Field(default_factory=list)
     execution_events: list[dict] = Field(default_factory=list)
+    prompt: PromptSnapshot | None = None
 
 
 class VerificationPolicy(BaseModel):
