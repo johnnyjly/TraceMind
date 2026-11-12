@@ -273,9 +273,9 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v10-evidence-semantics"
+                "multi-agent-graph-v11-evidence-timing"
                 if settings.agent_mode == "multi"
-                else "single-agent-v15-evidence-semantics"
+                else "single-agent-v18-evidence-timing-budget"
             ),
             incident=request.incident,
             initial_context=request.initial_context,
@@ -429,9 +429,9 @@ def create_app() -> FastAPI:
         state = RunState(
             agent_mode=settings.agent_mode,
             prompt_version=(
-                "multi-agent-graph-v10-evidence-semantics"
+                "multi-agent-graph-v11-evidence-timing"
                 if settings.agent_mode == "multi"
-                else "single-agent-v15-evidence-semantics"
+                else "single-agent-v18-evidence-timing-budget"
             ),
             investigation_id=uuid4(),
             incident=request.incident,

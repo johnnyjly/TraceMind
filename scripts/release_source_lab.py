@@ -23,11 +23,10 @@ from dotenv import dotenv_values
 from tracemind.agent.storage.run_repository import RunRepository
 from tracemind.agent.worker import RunWorker
 from tracemind.api.app import create_app, get_request_settings
-from tracemind.config import Settings
+from tracemind.config import Settings, settings_files
 from tracemind.evaluation.preflight import verify_captured_traces
 from tracemind.mcp.client import HttpMcpClient
 from tracemind.mcp.results import telemetry_reply
-from tracemind.models.run import TOOL_NAMES
 from tracemind.models.sources import SOURCE_TOOLS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -346,15 +345,31 @@ async def capture(args):
         save(folder / "cleanup.json", cleanup)
 
 
+def evaluation_settings(args) -> Settings:
+    """Share API/worker configuration, with explicit lab-only overrides."""
+    overrides = {}
+    if args.mcp_url:
+        overrides["telemetry_mcp_url"] = args.mcp_url
+    if args.credential_file:
+        # Preserve the existing key-only CLI option for older lab invocations.
+        supplied = dotenv_values(args.credential_file)
+        key = supplied.get("TRACEMIND_DEEPSEEK_API_KEY") or supplied.get(
+            "OPS_PILOT_DEEPSEEK_API_KEY")
+        if not key:
+            raise RuntimeError("authorized DeepSeek credential is missing")
+        overrides["deepseek_api_key"] = key
+    return Settings(_env_file=settings_files(args.env_file), **overrides)
+
+
 async def evaluate(args, *, selected_cases=None, primary=True):
+    profile = evaluation_settings(args)
+    if profile.agent_mode != "single":
+        raise ValueError(
+            "source release acceptance requires single-agent mode")
     folder = args.output.resolve()
     capture_data = json.loads((folder / "capture.json").read_text())
     captured = json.loads((folder / "telemetry.json").read_text())
-    supplied = dotenv_values(args.credential_file)
-    key = supplied.get("TRACEMIND_DEEPSEEK_API_KEY") or supplied.get(
-        "OPS_PILOT_DEEPSEEK_API_KEY"
-    )
-    if not key:
+    if profile.llm_provider == "deepseek" and not profile.deepseek_api_key:
         raise RuntimeError("authorized DeepSeek credential is missing")
     requests = {r["name"]: r for r in capture_data["requests"]}
     service = capture_data["service"]
@@ -413,14 +428,19 @@ async def evaluate(args, *, selected_cases=None, primary=True):
     ]
     if selected_cases is not None:
         cases = [case for case in cases if case[0] in selected_cases]
-    profile = Settings(_env_file=None, llm_provider="deepseek",
-                       llm_model="deepseek-v4-pro")
     save(
         folder / "protocol.json",
         {
             "cases": [c[0] for c in cases],
             "primary_attempts_only": primary,
-            "model": "deepseek-v4-pro",
+            "model_budgets": profile.model_budgets,
+            "provider": profile.llm_provider,
+            "model": profile.llm_model,
+            "verifier_model": profile.verifier_model,
+            "fallback_provider": profile.agent_fallback_provider,
+            "fallback_model": profile.agent_fallback_model,
+            "knowledge_enabled": profile.agent_knowledge_enabled,
+            "memory_enabled": profile.agent_memory_enabled,
             "investigator_reasoning": profile.deepseek_reasoning_effort,
             "verifier_reasoning": profile.verifier_reasoning_effort,
             "max_model_calls_per_case": profile.agent_max_model_calls,
@@ -428,7 +448,9 @@ async def evaluate(args, *, selected_cases=None, primary=True):
             "max_source_calls_per_case": 6,
             "idle_timeout_seconds": profile.agent_model_timeout_seconds,
             "overall_timeout_seconds": profile.agent_timeout_seconds,
-            "revision_rounds": int(profile.verifier_revise_on_rejection),
+            "verifier_enabled": profile.verifier_enabled,
+            "revision_rounds": int(profile.verifier_enabled
+                                   and profile.verifier_revise_on_rejection),
             "comparison": (
                 "canary-source and canary-telemetry share"
                 " input/window/backend; one attempt per condition; no accuracy"
@@ -456,35 +478,24 @@ async def evaluate(args, *, selected_cases=None, primary=True):
             save(case / "preflight.json", proof)
         finally:
             await mcp.aclose()
-        settings = Settings(
-            _env_file=None,
-            llm_provider="deepseek",
-            llm_model="deepseek-v4-pro",
-            deepseek_api_key=key,
-            agent_recursion_limit=50,
-            agent_max_model_calls=profile.agent_max_model_calls,
-            agent_max_tool_calls=profile.agent_max_tool_calls,
-            agent_fallback_provider=None,
-            agent_fallback_model=None,
-            agent_source_catalog=folder / catalog if catalog else None,
-            agent_allowed_tools=(
-                (*TOOL_NAMES, *SOURCE_TOOLS) if catalog else TOOL_NAMES
+        settings = profile.model_copy(update={
+            "agent_source_catalog": folder / catalog if catalog else None,
+            "agent_allowed_tools": (
+                (*tuple(t for t in profile.agent_allowed_tools
+                        if t not in SOURCE_TOOLS), *SOURCE_TOOLS)
+                if catalog else tuple(t for t in profile.agent_allowed_tools
+                                      if t not in SOURCE_TOOLS)
             ),
-            agent_memory_enabled=False,
-            agent_knowledge_enabled=False,
-            langfuse_enabled=False,
-            telemetry_mcp_url=args.mcp_url,
-            agent_trace_directory=case / "events",
-            agent_run_database=case / "runs.sqlite3",
-            agent_checkpoint_database=case / "graph.sqlite3",
-        )
+            "agent_trace_directory": case / "events",
+            "agent_run_database": case / "runs.sqlite3",
+            "agent_checkpoint_database": case / "graph.sqlite3",
+        })
         save(
             case / "settings.json",
             dict(
                 limits=settings.run_limits.model_dump(mode="json"),
-                verification=settings.verification_policy.model_dump(
-                    mode="json"
-                ),
+                verification=(settings.verification_policy.model_dump(
+                    mode="json") if settings.verification_policy else None),
                 allowed_tools=settings.agent_allowed_tools,
                 source_snapshot_id=(
                     settings.source_policy.snapshot_id if catalog else None
@@ -622,14 +633,17 @@ async def main():
     )
     parser.add_argument("--network", default="opentelemetry-demo")
     parser.add_argument("--base-image", default=BASE_IMAGE)
-    parser.add_argument("--mcp-url", default="http://127.0.0.1:8019/mcp")
-    parser.add_argument("--credential-file", type=Path)
+    parser.add_argument("--mcp-url",
+                        help="override the configured MCP endpoint")
+    parser.add_argument("--env-file", type=Path, action="append",
+                        help="overlay on the application .env")
+    parser.add_argument("--credential-file", type=Path,
+                        help="legacy key-only override; otherwise use .env")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--capture-only", action="store_true")
     mode.add_argument("--run-captured", action="store_true")
     args = parser.parse_args()
-    if not args.capture_only and not args.credential_file:
-        parser.error("--credential-file required for authorized model calls")
+    args.mcp_url = str(evaluation_settings(args).telemetry_mcp_url)
     logging.basicConfig(level=logging.WARNING)
     if not args.run_captured:
         await capture(args)

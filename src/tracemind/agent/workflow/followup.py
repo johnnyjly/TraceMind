@@ -77,12 +77,12 @@ def plan_follow_up(
         parent_run_id=parent.state.id,
         purpose=purpose,
         prompt_version=(
-            "multi-agent-graph-v10-evidence-semantics"
+            "multi-agent-graph-v11-evidence-timing"
             if (
                 parent.state.agent_mode == "multi"
                 and purpose is RunPurpose.INVESTIGATE
             )
-            else "single-agent-followup-v9-report-provenance"
+            else "single-agent-followup-v10-evidence-timing"
         ),
         user_message=message,
         previous_messages=[s.user_message for s in history if s.user_message],

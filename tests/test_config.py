@@ -25,19 +25,21 @@ def test_example_covers_all_settings_and_loads_diagnostic_profile():
     assert settings.run_limits.model_calls == 12
     assert settings.run_limits.tool_calls == 25
     assert settings.llm_provider == "deepseek"
-    assert settings.llm_model == "deepseek-v4-pro"
-    assert settings.agent_fallback_provider == "deepseek"
-    assert settings.agent_fallback_model == "deepseek-flash"
+    assert settings.llm_model == "deepseek-flash"
+    assert settings.agent_fallback_provider is None
+    assert settings.agent_fallback_model is None
     assert settings.eval_judge_provider == "deepseek"
     assert settings.eval_judge_model == "deepseek-v4-pro"
 
     assert settings.verifier_enabled
     assert settings.verification_policy.revise_on_rejection
     assert settings.verification_policy is not None
-    assert settings.verification_policy.deepseek_reasoning_effort == "high"
+    assert settings.verification_policy.deepseek_reasoning_effort == "low"
+    assert settings.verification_policy.model == "deepseek-flash"
+    assert settings.verification_policy.context_tokens == 98304
     assert settings.verification_policy.output_tokens == 32768
     assert settings.verification_policy.timeout_seconds == 180
-    assert settings.deepseek_reasoning_effort == "high"
+    assert settings.deepseek_reasoning_effort == "low"
     assert settings.eval_judge_reasoning_effort == "high"
 
 
@@ -71,7 +73,7 @@ def test_token_defaults_match_direct_policies_and_leave_discovery_budget():
     )
     assert settings.verification_policy.deepseek_reasoning_effort == (
         VerificationPolicy().deepseek_reasoning_effort
-    ) == "high"
+    ) == "low"
     assert settings.run_limits.total_tokens is None
     state = RunState(
         incident=Incident(title="test", description="budget admission"),

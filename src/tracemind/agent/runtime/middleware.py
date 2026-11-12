@@ -621,7 +621,10 @@ class HarnessMiddleware(AgentMiddleware):
             budget += (
                 f" At most {discovery} discovery model attempts remain; "
                 f"{reserved} calls are held for synthesis, repairs and review. "
-                "Failed attempts also consume this budget. Stop discovery "
+                "Failed attempts also consume this budget. Inspect retained "
+                "controls before repeating queries; use remaining discovery "
+                "for the observation that distinguishes competing causes. "
+                "Stop discovery "
                 "once the failure location and next discriminating check "
                 "are established; unused calls need not be spent."
             )

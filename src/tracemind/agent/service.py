@@ -28,7 +28,7 @@ from tracemind.agent.workflow.preparation import prepare_context
 from tracemind.agent.workflow.revision import request_revision
 from tracemind.agent.workflow.intake import collect_initial_evidence
 from tracemind.agent.workflow.observations import (
-    mark_exception_window, scope_status,
+    mark_observation_window, scope_status,
 )
 from tracemind.agent.runtime.runner import (
     AgentRunner,
@@ -162,9 +162,9 @@ class DiagnosisService:
         state = RunState(
             agent_mode=self._agent_mode,
             prompt_version=(
-                "multi-agent-graph-v10-evidence-semantics"
+                "multi-agent-graph-v11-evidence-timing"
                 if (self._agent_mode == "multi")
-                else "single-agent-v17-review-revision"
+                else "single-agent-v18-evidence-timing-budget"
             ),
             incident=incident,
             initial_context=(
@@ -216,7 +216,7 @@ class DiagnosisService:
         """Continue a leased run with its evidence and admission ledger."""
         scope = state.initial_context.scope if state.initial_context else None
         retained = [
-            mark_exception_window(
+            mark_observation_window(
                 item, state.investigation_start, state.investigation_end,
             )
             for item in evidence

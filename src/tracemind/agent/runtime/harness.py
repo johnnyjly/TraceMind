@@ -479,7 +479,9 @@ class RunHarness:
     @property
     def revision_reserve_calls(self) -> int:
         policy = self.state.verification_policy
-        return 5 * int(
+        # One targeted tool batch, synthesis, then review. Optional format
+        # repair in this round uses spare budget rather than pre-reserving it.
+        return 3 * int(
             policy is not None and policy.revise_on_rejection
             and self.state.agent_mode == "single"
             and not self.state.verification_history
@@ -488,7 +490,8 @@ class RunHarness:
 
     @property
     def verification_calls(self) -> int:
-        return (2 + self.revision_reserve_calls) * int(
+        reviews = 1 if self.state.verification_history else 2
+        return (reviews + self.revision_reserve_calls) * int(
             self.state.verification_policy is not None
             and self.state.verification is None
         )
@@ -524,7 +527,8 @@ class RunHarness:
         )
         return (
             min(
-                1 + max(0, limits.diagnosis_repairs - used),
+                1 + (0 if self.state.verification_history
+                     else max(0, limits.diagnosis_repairs - used)),
                 max(1, limits.model_calls - 1 - self.verification_calls),
             )
             + self.verification_calls
@@ -945,19 +949,29 @@ class RunHarness:
         )
 
     @property
+    def revision_token_reserve(self):
+        # Revision contains two investigator calls and one semantic review.
+        if not self.revision_reserve_calls:
+            return 0
+        return (2 * self.state.limits.context_tokens
+                + self.state.verification_policy.context_tokens)
+
+    @property
     def verification_token_reserve(self):
-        policy = self.state.verification_policy
-        return (self.verification_calls * self.state.limits.context_tokens
-                if policy else 0)
+        if not self.verification_calls:
+            return 0
+        reviews = self.verification_calls - self.revision_reserve_calls
+        return (reviews * self.state.verification_policy.context_tokens
+                + self.revision_token_reserve)
 
     @property
     def investigation_token_pool(self):
         remaining = self.tokens_remaining
         if remaining is None:
             return None
-        return max(0, remaining - self.verification_token_reserve
-                   - (1 + self.state.limits.diagnosis_repairs)
-                   * self.state.limits.context_tokens)
+        synthesis = self.finalization_calls - self.verification_calls
+        return max(0, remaining - synthesis * self.state.limits.context_tokens
+                   - self.verification_token_reserve)
 
     def reserve_tokens(self, estimate, protected, *, required=True):
         """Reserve both ledgers without yielding to another parallel caller."""
@@ -1072,6 +1086,11 @@ class RunHarness:
                                     item, sort_keys=True, default=str
                                 ).encode()
                             ).hexdigest()
+                            # Intake may store previews not yet shown to the
+                            # model. Count first inspection separately, by
+                            # content so ignored query filters cannot fake it.
+                            if name == "read_evidence" and "id" in item:
+                                fingerprint = "read_evidence:" + fingerprint
                             if fingerprint not in self._result_fingerprints:
                                 self._result_fingerprints.add(fingerprint)
                                 self._progress += 1

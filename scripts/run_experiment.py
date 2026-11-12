@@ -4,10 +4,11 @@ import argparse
 from datetime import UTC, datetime, timedelta
 import json
 import logging
+import sys
 from math import isfinite
 from pathlib import Path
 
-from tracemind.config import Settings
+from tracemind.config import Settings, settings_files
 from tracemind.evaluation.budget import ModelCallBudget
 from tracemind.evaluation.models import EvaluationCase
 from tracemind.evaluation.experiments import (
@@ -102,7 +103,13 @@ def main():
         not name or not isfinite(value) for name, value in thresholds.items()
     ):
         parser.error("score thresholds must have names and finite values")
-    settings = Settings(_env_file=args.env_file or Path(".env"))
+    settings = Settings(_env_file=settings_files(args.env_file))
+    if args.task == "verification":
+        settings = settings.model_copy(update={
+            "verifier_enabled": True, "verifier_revise_on_rejection": False,
+        })
+    print(json.dumps({"model_budgets": settings.model_budgets}),
+          file=sys.stderr)
     client = client_for(settings, required=True)
     if not client.auth_check():
         raise SystemExit(
@@ -171,7 +178,7 @@ def main():
                     else args.run_name
                 ),
                 rag_settings=RagSettings(
-                    _env_file=args.env_file or Path(".env")
+                    _env_file=settings_files(args.env_file)
                 ),
             )
             print(result.format())

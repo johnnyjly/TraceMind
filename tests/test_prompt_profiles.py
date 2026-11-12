@@ -185,7 +185,7 @@ def test_review_settings_independent_and_policy_persisted():
         VerificationPolicy.model_validate_json(policy.model_dump_json())
         == policy
     )
-    assert VerificationPolicy().deepseek_reasoning_effort == "high"
+    assert VerificationPolicy().deepseek_reasoning_effort == "low"
     model = create_review_model(
         Settings(
             _env_file=None,

@@ -894,7 +894,9 @@ def test_review_context_admission_keeps_all_evidence_without_call(monkeypatch):
     model = ReviewModel(body=review())
     # Investigation fits; the larger reviewer output reservation does not.
     service, _ = make_service(
-        monkeypatch, model, policy=VerificationPolicy(output_tokens=65536),
+        monkeypatch, model, policy=VerificationPolicy(
+            context_tokens=65536, output_tokens=65535,
+        ),
     )
     result = diagnose(service)
     assert result.state.verification.error_code == "context_limit"

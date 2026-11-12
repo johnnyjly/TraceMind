@@ -13,7 +13,7 @@ from pydantic import Field
 
 from tracemind.agent.workflow.context import _evidence_preview, json_text
 from tracemind.agent.workflow.observations import (
-    mark_exception_window, scope_status,
+    mark_observation_window, scope_status,
 )
 from tracemind.agent.workflow.references import (
     model_references, original_reference, register_references,
@@ -229,7 +229,7 @@ def _query_executor(
                     scope_counts[status] += 1
                 else:
                     observations.append(
-                        mark_exception_window(item, start, end),
+                        mark_observation_window(item, start, end),
                     )
             if any(scope_counts.values()):
                 harness.emit("observations.scope_filtered", data=scope_counts)

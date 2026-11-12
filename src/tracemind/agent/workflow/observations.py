@@ -1,8 +1,9 @@
 """Apply declared investigation scope without promoting caller hints."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
+import math
 
-from tracemind.models import Evidence
+from tracemind.models import Evidence, EvidenceSource
 
 
 SCOPE_ATTRIBUTES = {
@@ -38,13 +39,36 @@ def scope_status(item: Evidence, scope) -> str:
     return "scope_unknown" if unknown else "matched"
 
 
-def mark_exception_window(item: Evidence, start, end) -> Evidence:
-    """Keep exception occurrence time distinct from its enclosing span."""
-    exceptions = item.attributes.get("exceptions")
-    if not isinstance(exceptions, list):
-        return item
+def mark_observation_window(item: Evidence, start, end) -> Evidence:
+    """Derive window context without assigning a time to final span status."""
     result = item.model_copy(deep=True)
-    for event in result.attributes["exceptions"]:
+    attributes = result.attributes
+    # Recompute on follow-up windows; backend-supplied derived tags are not
+    # authoritative. observed_at is only a start when provenance says so.
+    attributes.pop("span_window", None)
+    if (item.source == EvidenceSource.TRACE
+            and attributes.get("timestamp_source") == "span_startTime"):
+        duration = attributes.get("duration_ms")
+        finished = None
+        if (type(duration) in (int, float) and duration >= 0
+                and item.observed_at.utcoffset() is not None):
+            try:
+                if math.isfinite(duration):
+                    finished = item.observed_at + timedelta(
+                        milliseconds=duration,
+                    )
+            except OverflowError:
+                pass  # Invalid remote duration cannot establish completion.
+        attributes["span_window"] = {
+            "end": finished.isoformat() if finished is not None else None,
+            "end_in_investigation_window": (
+                start <= finished <= end if finished is not None else None
+            ),
+        }
+    exceptions = attributes.get("exceptions")
+    if not isinstance(exceptions, list):
+        return result
+    for event in exceptions:
         if not isinstance(event, dict):
             continue
         timestamp = event.get("timestamp")

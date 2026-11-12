@@ -169,7 +169,8 @@ Capture before spending model calls:
 
 ```bash
 uv run python scripts/release_source_lab.py \
-  --output artifacts/evaluations/source-release-example --capture-only
+  --output artifacts/evaluations/source-release-example --capture-only \
+  --mcp-url http://127.0.0.1:8019/mcp
 ```
 
 After authorizing data transmission, run the five primary conditions:
@@ -177,21 +178,26 @@ After authorizing data transmission, run the five primary conditions:
 ```bash
 uv run python scripts/release_source_lab.py \
   --output artifacts/evaluations/source-release-example --run-captured \
-  --credential-file /path/to/local.env
+  --mcp-url http://127.0.0.1:8019/mcp
 ```
 
-The file supplies only the DeepSeek key; full settings/environment are never
-saved. Cases cover a concrete exception, two-version canary, the same canary
+The lab reads the same repository-root `.env` as API and worker. Optional
+`--env-file` arguments overlay it; `--mcp-url` overrides just the endpoint used
+for capture and evaluation. The existing `--credential-file` option remains an
+explicit key-only override for older invocations, but is no longer required.
+Full settings/environment and credentials are never saved. Cases cover a concrete exception, two-version canary, the same canary
 without source access, missing mapping, and the counterexample. API admission,
 persistent worker, early triage and review all run. Measurements of first
 readability use local ASGI API polling, not network SSE delivery latency.
 
-Each condition runs once with the current default profile: at most twelve model
-and twelve tool calls, high investigator and verifier reasoning, a 180-second
-model progress-idle timeout and a shared 600-second hard deadline. One rejection
-feedback round is enabled; no fallback model or RAG is used. The saved protocol
-records these settings, and failures plus first-round verdicts remain in the
-ledger. Earlier artifacts retain their original frozen profiles. This small synthetic comparison can
+Source acceptance requires single-agent mode and rejects multi-agent settings
+before telemetry or model calls. Each condition runs once with the effective
+local model, verifier and budget
+configuration. Source mapping, scenario tool grants and output directories are
+the per-case differences. Configure fallback, RAG and memory explicitly for the
+comparison; they are no longer silently reset by the lab. The saved protocol
+records effective limits and enabled features, and failures plus first-round
+verdicts remain in the ledger. Earlier artifacts retain their original frozen profiles. This small synthetic comparison can
 show whether direct source evidence added a useful explanation; it cannot
 establish production accuracy, human time savings, general speed superiority
 or causal uplift over a deterministic baseline.

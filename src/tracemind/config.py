@@ -38,25 +38,26 @@ class Settings(BaseSettings):
     eval_judge_output_tokens: int = Field(default=12288, ge=1)
     verifier_enabled: bool = True
     verifier_provider: Literal["google", "openai", "deepseek"] = "deepseek"
-    verifier_model: str = Field(default="deepseek-v4-pro", min_length=1)
+    verifier_model: str = Field(default="deepseek-flash", min_length=1)
     verifier_deepseek_thinking: bool = True
-    verifier_reasoning_effort: Literal["low", "high", "max"] = "high"
+    verifier_reasoning_effort: Literal["low", "high", "max"] = "low"
     verifier_revise_on_rejection: bool = True
     verifier_timeout_seconds: float = Field(
         default=180, gt=0, allow_inf_nan=False
     )
     verifier_input_bytes: int = Field(default=524288, ge=1)
+    verifier_context_tokens: int = Field(default=98304, ge=1)
     verifier_output_tokens: int = Field(default=32768, ge=1)
     telemetry_transport: Literal["mcp"] = "mcp"
     telemetry_mcp_url: AnyHttpUrl = "http://127.0.0.1:8012/mcp"
     telemetry_mcp_response_bytes: int = Field(default=16_777_216, ge=1024)
-    llm_provider: Literal["google", "openai", "deepseek"] = "google"
-    llm_model: str = "gemini-3.7-flash"
+    llm_provider: Literal["google", "openai", "deepseek"] = "deepseek"
+    llm_model: str = "deepseek-flash"
     google_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     deepseek_api_key: SecretStr | None = None
     deepseek_thinking: bool = True
-    deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    deepseek_reasoning_effort: Literal["low", "high", "max"] = "low"
     agent_fallback_provider: Literal["google", "openai", "deepseek"] | None = (
         None
     )
@@ -134,11 +135,56 @@ class Settings(BaseSettings):
             model=self.verifier_model,
             timeout_seconds=self.verifier_timeout_seconds,
             input_bytes=self.verifier_input_bytes,
+            context_tokens=self.verifier_context_tokens,
             output_tokens=self.verifier_output_tokens,
             deepseek_thinking=self.verifier_deepseek_thinking,
             deepseek_reasoning_effort=self.verifier_reasoning_effort,
             revise_on_rejection=self.verifier_revise_on_rejection,
         )
+
+    @property
+    def model_budgets(self):
+        """Resolved, credential-free budgets for trial logs and manifests."""
+        def budget(provider, model, context, output, thinking, effort):
+            return {
+                "provider": provider, "model": model,
+                "thinking": thinking if provider == "deepseek" else None,
+                "reasoning_effort": (
+                    (effort if thinking else "none")
+                    if provider == "deepseek" else None
+                ),
+                "context_tokens": context,
+                "input_allowance": context - output,
+                "output_reserved": output,
+            }
+
+        policy = self.verification_policy
+        return {
+            "investigator": budget(
+                self.llm_provider, self.llm_model, self.agent_context_tokens,
+                self.agent_output_tokens, self.deepseek_thinking,
+                self.deepseek_reasoning_effort,
+            ),
+            "verifier": budget(
+                policy.provider, policy.model, policy.context_tokens,
+                policy.output_tokens, policy.deepseek_thinking,
+                policy.deepseek_reasoning_effort,
+            ) if policy else None,
+        }
+
+    @model_validator(mode="after")
+    def validate_context_budgets(self):
+        for role, context, output in (
+            ("agent", self.agent_context_tokens, self.agent_output_tokens),
+            ("verifier", self.verifier_context_tokens,
+             self.verifier_output_tokens),
+        ):
+            if output >= context:
+                raise ValueError(
+                    f"{role}_output_tokens must be less than "
+                    f"{role}_context_tokens"
+                )
+        return self
 
     @model_validator(mode="after")
     def validate_fallback(self) -> "Settings":
@@ -248,6 +294,14 @@ class Settings(BaseSettings):
             diagnosis_repairs=self.agent_diagnosis_repairs,
             no_progress_rounds=self.agent_no_progress_rounds,
         )
+
+
+def settings_files(overlays: list[Path] | None = None) -> list[Path]:
+    """Keep the application env file when CLIs add experiment overrides."""
+    default = Settings.model_config.get("env_file")
+    base = ([Path(default)] if isinstance(default, (str, Path))
+            else [Path(path) for path in default or ()])
+    return [*base, *(overlays or [])]
 
 
 @lru_cache

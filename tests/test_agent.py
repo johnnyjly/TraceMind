@@ -131,7 +131,10 @@ def test_service_rejects_evidence_id_not_returned_by_tool() -> None:
 
 
 def test_model_factory_supports_google_openai_and_deepseek() -> None:
-    google = create_chat_model(Settings(google_api_key="google-test-key"))
+    google = create_chat_model(Settings(
+        llm_provider="google", llm_model="gemini-3.7-flash",
+        google_api_key="google-test-key",
+    ))
     openai = create_chat_model(
         Settings(
             llm_provider="openai",
@@ -160,7 +163,7 @@ def test_model_factory_supports_google_openai_and_deepseek() -> None:
 
 def test_model_factory_requires_selected_provider_key() -> None:
     with pytest.raises(ValueError, match="TRACEMIND_GOOGLE_API_KEY"):
-        create_chat_model(Settings(google_api_key=""))
+        create_chat_model(Settings(llm_provider="google", google_api_key=""))
     with pytest.raises(ValueError, match="TRACEMIND_DEEPSEEK_API_KEY"):
         create_chat_model(Settings(
             _env_file=None, llm_provider="deepseek", deepseek_api_key="",

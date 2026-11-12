@@ -180,12 +180,15 @@ class RunState(BaseModel):
             if "contract_version" not in value:
                 value = {**value, "contract_version": "legacy"}
             policy = value.get("verification_policy")
-            if (isinstance(policy, dict)
-                    and "revise_on_rejection" not in policy):
+            if isinstance(policy, dict):
                 # Existing checkpoints retain their admission-time policy.
-                value = {**value, "verification_policy": {
-                    **policy, "revise_on_rejection": False,
-                }}
+                policy = dict(policy)
+                policy.setdefault("revise_on_rejection", False)
+                limits = value.get("limits", {})
+                context = (limits.context_tokens if isinstance(limits, RunLimits)
+                           else limits.get("context_tokens", 65536))
+                policy.setdefault("context_tokens", context)
+                value = {**value, "verification_policy": policy}
         return value
 
     @model_validator(mode="after")
@@ -221,7 +224,7 @@ class RunState(BaseModel):
     knowledge: list[KnowledgeReference] = Field(default_factory=list)
     collaboration: CollaborationState | None = None
     agent_mode: Literal["single", "multi"] = "single"
-    prompt_version: str = "single-agent-v17-review-revision"
+    prompt_version: str = "single-agent-v18-evidence-timing-budget"
     telemetry_transport: Literal["direct", "mcp", "replay"] = "direct"
     status: RunStatus = RunStatus.RUNNING
     stop_reason: StopReason | None = None

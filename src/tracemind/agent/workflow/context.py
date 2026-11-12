@@ -129,14 +129,18 @@ def _evidence_preview(item: Evidence, *, max_bytes: int = 2000) -> dict:
     priority = (
         "trace_id",
         "span_id",
-        "diagnostic_source",
-        "diagnostic",
+        "parent_span_id",
+        "operation",
+        "timestamp_source",
+        "span_window",
+        "duration_ms",
         "is_error",
+        "diagnostic",
+        "diagnostic_source",
         "resource",
         "code",
         "exceptions",
         "exception_coverage",
-        "operation",
         "error_type",
         "otel_status_description",
         "status_message",
@@ -173,6 +177,7 @@ def _evidence_preview(item: Evidence, *, max_bytes: int = 2000) -> dict:
             ).encode()) > allowance
         ):
             fields = {
+                "user.id.sha256", "demo.cart.items.count",
                 "event.name", "upstream.host", "upstream.cluster",
                 "destination.address", "source.address", "server.address",
                 "server.port", "span.kind", "otel.status_code", "error",
@@ -182,8 +187,24 @@ def _evidence_preview(item: Evidence, *, max_bytes: int = 2000) -> dict:
             }
             fields |= {f + suffix for f in fields
                        for suffix in (".redacted", ".truncated")}
-            value = {k: _bounded_text(v, 100) if isinstance(v, str) else v
-                     for k, v in value.items() if k in fields}
+            selected = {}
+            first = ("span.kind", "http.response.status_code",
+                     "http.status_code", "rpc.response.status_code",
+                     "rpc.grpc.status_code", "grpc.status_code",
+                     "demo.cart.items.count", "user.id.sha256")
+            for field in sorted(value, key=lambda k: (
+                first.index(k) if k in first else len(first), k,
+            )):
+                if field not in fields:
+                    continue
+                entry = value[field]
+                if isinstance(entry, str):
+                    entry = _bounded_text(entry, 100)
+                candidate = {**selected, field: entry}
+                if len(json_text({**preview["attributes"],
+                                  key: candidate}).encode()) <= allowance:
+                    selected = candidate
+            value = selected
             shortened = value != item.attributes[key]
         elif key == "code" and isinstance(value, dict):
             value = _location_preview(value)
@@ -238,7 +259,7 @@ def _evidence_preview(item: Evidence, *, max_bytes: int = 2000) -> dict:
 def _prioritized_evidence(
     state: RunState, evidence: list[Evidence], priority_ids=()
 ):
-    """Yield cited observations first, interleaving services and sources.
+    """Yield cited observations first, interleaving requests and sources.
 
     This is a coverage heuristic, not a causal ranking. It prevents a large
     batch from one service from displacing every downstream observation.
@@ -254,7 +275,18 @@ def _prioritized_evidence(
         groups = {}
         for item in evidence:
             if (item.id in cited) == is_cited:
-                groups.setdefault((item.service, item.source), []).append(item)
+                key = (item.attributes.get("trace_id") or item.service,
+                       item.source)
+                groups.setdefault(key, []).append(item)
+        for group in groups.values():
+            group.sort(key=lambda item: (
+                not bool(item.attributes.get("is_error")),
+                not any(key in (item.attributes.get("diagnostic") or {})
+                        for key in ("user.id.sha256", "demo.cart.items.count")),
+                -item.attributes.get("duration_ms", 0)
+                if type(item.attributes.get("duration_ms")) in (int, float)
+                else 0,
+            ))
         for offset in range(max(map(len, groups.values()), default=0)):
             for group in groups.values():
                 if offset < len(group):
@@ -377,7 +409,10 @@ def intake_context(state: RunState, evidence: list[Evidence]) -> str:
         ],
         "omitted_evidence_previews": max(0, len(evidence) - 12),
         "detail_retrieval": (
-            "Use read_evidence with an E handle for retained full details."
+            "Previews interleave requests/services, including failures and "
+            "business-state controls; this is not a causal ranking. Compare "
+            "them first. Use read_evidence with an E handle for missing "
+            "details, not a new telemetry query or an exhaustive page scan."
             if "read_evidence" in state.allowed_tools
             else "Detail retrieval is unavailable under current tool policy."
         ),

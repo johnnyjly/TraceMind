@@ -50,7 +50,9 @@ def make_task(
 
             subject = ReviewSubject.model_validate(supplied)
             policy = settings.model_copy(
-                update={"verifier_enabled": True}).verification_policy
+                update={"verifier_enabled": True,
+                        "verifier_revise_on_rejection": False},
+            ).verification_policy
             state = RunState(
                 incident=subject.incident,
                 investigation_start=subject.start,
@@ -166,6 +168,10 @@ def run_experiment(
     memory_snapshot=None,
     run_name=None,
 ):
+    if kind == "verification":
+        settings = settings.model_copy(update={
+            "verifier_enabled": True, "verifier_revise_on_rejection": False,
+        })
     if not data:
         raise ValueError("experiment dataset must not be empty")
     if kind in {"retrieval", "verification"} and judge:
@@ -216,6 +222,7 @@ def run_experiment(
             "model_call_cap": budget.limit,
             "model_calls_before_run": budget.calls,
             "investigator_model": settings.llm_model,
+            "model_budgets": settings.model_budgets,
             "agent_mode": settings.agent_mode,
             "verifier_model": (settings.verification_policy.model
                                if settings.verification_policy else "off"),

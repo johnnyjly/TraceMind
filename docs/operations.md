@@ -152,6 +152,25 @@ claimed by this phase.
 
 ## Configuration and budgets
 
+API, worker and acceptance commands share `Settings` and the `.env` in the
+startup working directory. Run all commands from the TraceMind repository root:
+relative run/checkpoint paths use that same directory. `.env.example` is a
+copyable template, not an automatic fallback. No entrypoint automatically reads
+the old OpsPilot checkout. Local `.env` stays ignored by Git.
+
+Configuration precedence is explicit constructor/CLI overrides, process
+`TRACEMIND_*` environment, later `--env-file` overlays, base `.env`, then code
+defaults. CLI overlays retain the base file, including its model credential.
+`evaluate_diagnosis.py --profile` is an optional credential-free experiment
+override; it sets process environment for that invocation. Never pass `.env` as
+`--profile`. API/worker settings are cached: restart both after editing `.env`.
+
+The release lab inherits model, verifier, budget and MCP settings; only its
+source scenario/tool grants and output databases are isolated per case.
+`--mcp-url` explicitly selects an alternate telemetry service.
+Langfuse evaluation commands still require the separately enabled/configured
+Langfuse integration; this does not apply to the local release-lab worker runs.
+
 [.env.example](../.env.example) is the settings reference. Its example diagnostic
 profile overrides smaller code defaults when copied into `.env`:
 
@@ -172,9 +191,10 @@ reads consume tool attempts. Evaluation also applies the case's tool-call cap.
 Context admission uses the locally bundled `cl100k_base` tokenizer, with
 20% headroom plus 1024 framing tokens. This is a proxy for DeepSeek and
 other provider tokenizers, not their exact count. Serialized messages,
-tools and output schemas are counted; output is reserved within the shared
-65536-token envelope for investigation, auxiliary retrieval and review.
-The offline judge uses the same configured envelope. Vocabulary loading is
+tools and output schemas are counted. Investigation and auxiliary retrieval
+use the configured investigator context (default 65536); online verification
+has its own context (default 98304). Output is reserved within each role's cap.
+The offline judge still uses the configured investigator envelope. Vocabulary loading is
 offline and checksum-verified. Actual provider usage remains authoritative
 for the ledger; events retain the estimator version. UTF-8 byte limits
 remain independent storage and payload guards, never token quantities.
@@ -227,7 +247,7 @@ and allows up to two targeted feedback rounds. The coordinator cannot expand
 tool permissions. Small model budgets may leave no room for parallel discovery
 or feedback; actual model attempts, repairs, auxiliary retrieval and verification
 all count against the same cap. Budget enough output tokens/time for DeepSeek
-thinking, enabled by default with effort `high`.
+thinking, enabled by default with effort `low` for investigation and review.
 
 Back up both ledger and graph-checkpoint databases. Completed task reports and
 query results are reused after recovery; ambiguous external calls can repeat and
@@ -445,13 +465,28 @@ investigation. Failed attempts also consume the shared budget. Before each
 investigation attempt the harness reserves calls for candidate synthesis,
 remaining diagnosis repair, and two review attempts (initial plus at most one
 output-contract repair). With revision enabled and a model-call cap of at least
-ten, the first phase additionally reserves five model calls and up to two tools
-for revision and re-review. The default cap is twelve model calls. Smaller
+ten, the first phase additionally reserves three model calls and up to two tools
+for a targeted evidence batch, revised synthesis and re-review. The default
+cap of twelve therefore allows five discovery attempts before the seven-call
+first-phase reserve. During revision only synthesis and one review are
+pre-reserved; optional format repairs use spare shared budget and can leave an
+explicitly unreviewed handoff when exhausted. Token reservations use the same
+phase rules. Smaller
 budgets may permit only a text correction or skip revision with an explicit
 `investigation.revision_skipped` event. Reservations do not guarantee enough
 wall-clock time for another round. Counters, permissions and the absolute
 deadline never reset. Runtime snapshots show the discovery allocation and
-reserved calls. Graph recursion limits count graph steps, not model turns.
+reserved calls. First reads of distinct retained evidence pages count as
+inspection progress even if intake already stored their previews; repeat reads
+and empty pages do not. This does not add incident evidence or relax hard limits.
+Initial previews interleave trace IDs and retain error/business-state controls;
+use their E handles for missing detail rather than re-fetching the same trace.
+For spans marked `timestamp_source=span_startTime`, `observed_at` is start and
+`span_window.end` is derived completion. Neither timestamps a final ERROR.
+An in-window start with out-of-window completion supports a later failed outcome,
+not an in-window failure assertion. Exception timestamps remain independent.
+HTTP/RPC outcomes belong to their recording operation and span kind; an internal
+status is not automatically the customer-facing response. Graph recursion limits count graph steps, not model turns.
 
 The verifier uses `TRACEMIND_VERIFIER_TIMEOUT_SECONDS` as the **first-output and
 idle timeout for each request**, independently of `TRACEMIND_AGENT_MODEL_TIMEOUT_SECONDS`.
@@ -467,11 +502,40 @@ streams internally, preserving reasoning for tool turns and terminal usage.
 OpenAI/Google use native streaming callbacks; unexposed internal reasoning cannot
 refresh a deadline. A stream ending without a terminal response is a transport
 failure, not a completed answer;
-`verification.started` records input size and remaining run time (null when
-disabled). Timed-out review returns an explicitly unreviewed candidate.
-The online verifier defaults to `high` reasoning; the investigator and offline
-Judge keep their separately configured reasoning levels. The default review
-output budget is 32768 tokens, including provider reasoning.
+`verification.started` records input size, context cap, input allowance, output
+reserve and remaining run time (null when disabled). Timed-out review returns an explicitly unreviewed candidate.
+The investigator and online verifier default to `deepseek-flash` with `low`
+reasoning and no fallback. The offline Judge remains separately configured.
+The investigator uses 65536 context tokens, reserving 16384 for output; the
+verifier independently uses `TRACEMIND_VERIFIER_CONTEXT_TOKENS=98304`, reserving
+32768 for output including provider reasoning. Its input allowance is 65536,
+not the investigator's 49152. Both first review and format repair check this
+independent cap. Old checkpoints without a verifier context field inherit their
+original run context; new runs save the explicit verifier policy for resume.
+
+Fixed manual profiles (K=1024 tokens; input estimates already include 20% and
+1024 framing tokens):
+
+| Role | Thinking | Total context | Input ceiling | Output reserve |
+| --- | --- | ---: | ---: | ---: |
+| Investigator | off | 57344 | 49152 | 8192 |
+| Investigator | low / high | 65536 | 49152 | 16384 |
+| Verifier | off | 73728 | 65536 | 8192 |
+| Verifier | low / high | 98304 | 65536 | 32768 |
+
+Change the role's thinking switch, context and output together. For off, set
+`DEEPSEEK_THINKING=false` (or `VERIFIER_DEEPSEEK_THINKING=false`); the effort
+setting is ignored. Do not use `none` in the effort environment field. There is
+no automatic mode selection, resizing or output reduction. These are starting
+budgets, not provider capacity or evidence of equal model quality. Other models
+need their own capacity/output-semantics check and recorded validation.
+
+Input ceilings are not fill targets: retain the investigator's existing bounded
+previews and detail readers. The verifier keeps every retained observation and
+counterexample, with lossless shared attributes and no summary compression.
+Oversized packets return an explicitly unreviewed report. A larger cap does not
+guarantee attention or semantic correctness. Per-request context is separate
+from the optional cumulative token cap and the shared ten-minute deadline.
 Provider-truncated/incomplete responses return `incomplete_output` without
 repeating the same request as a format repair; all candidate items remain
 explicitly unreviewed. Complete responses with invalid JSON/contracts can still
@@ -509,7 +573,26 @@ Badger backend, with seven-day span retention and the external Docker volume
 volume survives Demo `stop` (which otherwise removes Compose-owned volumes).
 `scripts/demo_scenario.py start` creates the volume if needed; direct Compose
 users can create it with `docker volume create tracemind-jaeger-data`.
-Do not delete it during ordinary teardown. See the
+For an intentional clean rebuild after an environment failure, use:
+
+```bash
+uv run python scripts/demo_scenario.py reset --purge-data \
+  --demo-path /path/to/opentelemetry-demo
+```
+
+Use `--dry-run` instead of `--purge-data` to inspect the targets first. If the
+active flag file lives outside this checkout, pass `--flag-config /path/to/active.flagd.json`.
+Reset targets the default `opentelemetry-demo` Compose project and preserves
+that file and its backup. It removes only containers belonging
+to this Demo checkout and their volumes, including mounted legacy Jaeger storage,
+and refuses volumes shared with other containers. It reuses locally available
+images, recreates the stack, and waits for services and telemetry backends.
+The shared Docker network, unrelated projects, and evaluation artifacts remain.
+Historical trace/log windows are deleted; collect new windows for subsequent
+live evaluations. This restores the environment but does not diagnose or fix
+its OOM cause.
+
+Do not delete storage during ordinary teardown. See the
 [version-pinned Badger sample](https://github.com/jaegertracing/jaeger/blob/v2.19.0/cmd/jaeger/config-badger.yaml).
 
 Switching an existing memory-only Jaeger requires recreating that container;

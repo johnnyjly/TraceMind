@@ -191,7 +191,7 @@ def test_dispatch_reserve_covers_verifier_repair(monkeypatch):
     )
     state = execute(service).state
     record = next(iter(state.collaboration.tasks.values()))
-    protected = (2 * limits.context_tokens
+    protected = (2 * state.verification_policy.context_tokens
                  + (1 + limits.diagnosis_repairs) * limits.context_tokens)
     # The scripted first coordinator used 15 tokens before dispatch.
     assert record.token_limit == limits.total_tokens - 15 - protected

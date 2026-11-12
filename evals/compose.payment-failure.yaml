@@ -29,6 +29,10 @@ services:
     volumes:
       - ${TRACEMIND_FLAGD_CONFIG}:/etc/flagd/demo.flagd.json:ro
   jaeger:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
     volumes:
       - ${TRACEMIND_JAEGER_CONFIG:?use scripts/demo_scenario.py}:/etc/jaeger/config.yml:ro
       - jaeger-data:/tmp

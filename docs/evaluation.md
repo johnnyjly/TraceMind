@@ -226,8 +226,8 @@ usage and answer quality alongside cache statistics.
 Runtime verification is enabled by default. Single-agent deployments can set
 `TRACEMIND_VERIFIER_ENABLED=false`; multi-agent mode always requires verification.
 The reviewer uses independent `TRACEMIND_VERIFIER_*` settings. Its code defaults
-are high reasoning, a 180-second first-output/idle timeout per request,
-524288 input bytes and 32768 output tokens. Meaningful streaming progress can
+are DeepSeek Flash / low, a 180-second first-output/idle timeout per request,
+98304 context tokens, 524288 input bytes and 32768 output tokens. Meaningful streaming progress can
 extend a request beyond its idle interval, but not the default 600-second
 absolute run deadline. Environment settings can override these defaults for
 newly admitted runs.
@@ -391,3 +391,42 @@ latency and usage separately. Fixed scripted responses verify control flow;
 quality conclusions require labeled cases and review of actual model outputs.
 Store experiment inputs, reports, logs and ledgers under ignored `artifacts/`
 or in Langfuse, rather than embedding individual run histories in this guide.
+
+
+## Shared local configuration
+
+Run evaluation commands from the TraceMind root, alongside API and worker.
+They load the same base `.env`; repeated `--env-file` paths are overlays in
+command order, so a Langfuse-only file does not replace the DeepSeek credential.
+`evaluate_diagnosis.py` now inherits mode and model settings unless `--mode` or
+an optional credential-free `--profile` explicitly overrides them. It no longer
+silently enables Langfuse: enable/configure that integration in an env file for
+Langfuse-backed experiments. Profiles are saved in trial records and reject API
+key fields; never use the credential-bearing `.env` as a profile.
+
+
+## Fixed model budgets for real-case runs
+
+The default online investigator and verifier use DeepSeek Flash / low, with no
+fallback. Use the manual off/low/high table in `.env.example` and
+`docs/operations.md`; changing effort alone never changes either numeric cap.
+The independent verifier cap is 98304 (65536 estimated input + 32768 output).
+These starting values came from retained Pro observations; Flash acceptance
+must be reported separately. Off-mode output 8192 also requires validation.
+
+Before each paid run, inspect the resolved `model_budgets` summary, not just the
+env filename: process environment can override files. The experiment CLIs print
+this credential-free summary to stderr before model admission and persist it in
+trial/experiment metadata. Keep model, thinking, total context, input allowance
+and output reserve for both roles with the source and input fingerprints.
+
+For this budget change, first replay the six saved review packets locally;
+record both historical estimates and current reserialization estimates because
+the rubric changed. Then compare off/low/high on the same real telemetry window
+and separately review the two previously oversized cart/payment packets. Retain
+failed attempts. Report admission, output completeness, elapsed time, reasoning
+and visible output usage, and evidence support separately. A completed review
+does not prove the conclusion correct or establish a production accuracy gain.
+Do not switch models, enlarge budgets, drop evidence or reset deadlines during
+an attempt. If live traces are absent, record failed preflight before any model
+call; frozen-packet review must be labeled separately from live investigation.

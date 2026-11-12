@@ -1,6 +1,7 @@
 """Prepare, activate and restore isolated OpenTelemetry Demo fault cases."""
 
 import argparse
+import json
 import logging
 import shutil
 import subprocess
@@ -48,8 +49,11 @@ def wait_for_backends(timeout_seconds: int = 300) -> None:
             try:
                 with urllib.request.urlopen(url, timeout=2) as response:
                     if response.status < 400:
+                        if name == "OpenSearch" and json.load(response).get(
+                                "status") not in {"green", "yellow"}:
+                            continue
                         pending.pop(name)
-            except (urllib.error.URLError, TimeoutError):
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
                 pass
         if pending:
             time.sleep(2)
@@ -60,6 +64,80 @@ def wait_for_backends(timeout_seconds: int = 300) -> None:
         )
 
 
+def reset_demo(
+    demo_path: Path, environment: dict[str, str], *, dry_run: bool = False,
+) -> None:
+    """Replace only this Demo's containers and data, keeping active flags."""
+    command = compose_command(demo_path, OVERRIDE_PATH, "status")[:-1]
+    command[2:2] = ["--project-name", "opentelemetry-demo"]
+
+    def run(arguments: list[str]) -> str:
+        return subprocess.run(
+            arguments, cwd=demo_path, env=environment, check=True,
+            capture_output=True, text=True,
+        ).stdout
+
+    config = json.loads(run(command + ["config", "--format", "json"]))
+    # Validate local images and configuration before deleting a working stack.
+    images = sorted({service["image"]
+                     for service in config["services"].values()})
+    run(["docker", "image", "inspect", *images])
+    container_ids = run(["docker", "ps", "--all", "--quiet"]).split()
+    containers = (json.loads(run(["docker", "inspect", *container_ids]))
+                  if container_ids else [])
+    targets = []
+    for container in containers:
+        labels = container["Config"].get("Labels") or {}
+        if labels.get("com.docker.compose.project") != config["name"]:
+            continue
+        working_dir = labels.get("com.docker.compose.project.working_dir")
+        if not working_dir or Path(working_dir).resolve() != demo_path.resolve():
+            raise RuntimeError("Demo project belongs to another checkout")
+        targets.append(container)
+
+    existing_volumes = set(run(["docker", "volume", "ls", "--quiet"]).split())
+    volumes = {mount["Name"] for container in targets
+               for mount in container["Mounts"] if mount["Type"] == "volume"}
+    declared = config.get("volumes", {}).values()
+    volumes.update(volume["name"] for volume in declared
+                   if volume["name"] in existing_volumes)
+    target_ids = {container["Id"] for container in targets}
+    for container in containers:
+        if container["Id"] in target_ids:
+            continue
+        shared = volumes.intersection(
+            mount["Name"] for mount in container["Mounts"]
+            if mount["Type"] == "volume")
+        if shared:
+            raise RuntimeError(
+                f"refusing to delete volumes used outside the Demo: {shared}")
+
+    logger.warning("Demo reset will remove %d containers and volumes: %s",
+                   len(targets), ", ".join(sorted(volumes)) or "(none)")
+    logger.info("Active flags are preserved: %s",
+                environment["TRACEMIND_FLAGD_CONFIG"])
+    if dry_run:
+        return
+    if targets:
+        run(["docker", "rm", "--force", "--volumes", *sorted(target_ids)])
+    # Container removal already deletes anonymous volumes. External Jaeger
+    # storage (including a mounted legacy volume) needs explicit deletion.
+    remaining = set(run(["docker", "volume", "ls", "--quiet"]).split())
+    for name in sorted(volumes & remaining):
+        run(["docker", "volume", "rm", name])
+    for volume in declared:
+        if volume.get("external"):
+            run(["docker", "volume", "create", volume["name"]])
+    start = compose_command(demo_path, OVERRIDE_PATH, "start")
+    start[2:2] = ["--project-name", "opentelemetry-demo"]
+    subprocess.run(
+        start + ["--pull", "never", "--wait", "--wait-timeout", "300"],
+        cwd=demo_path, env=environment, check=True,
+    )
+    wait_for_backends()
+    logger.info("Demo recreated; capture fresh incident windows before evaluation")
+
+
 def main() -> None:
     """Select a case while keeping status and stop free of file mutations."""
     parser = argparse.ArgumentParser(
@@ -67,19 +145,35 @@ def main() -> None:
     )
     parser.add_argument(
         "action", choices=("prepare", "start", "switch", "restore",
-                           "status", "stop")
+                           "status", "stop", "reset")
     )
     parser.add_argument("--scenario", choices=SCENARIO_NAMES,
                         default="payment_failure")
     parser.add_argument("--demo-path", type=Path, default=DEFAULT_DEMO_PATH)
+    parser.add_argument("--purge-data", action="store_true",
+                        help="confirm deletion of Demo data for reset")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="show reset targets without changing Docker")
+    parser.add_argument("--flag-config", type=Path,
+                        help="existing active flag file to preserve during reset")
     args = parser.parse_args()
+    if args.action == "reset":
+        if not (args.purge_data or args.dry_run):
+            parser.error("reset requires --purge-data (or --dry-run to inspect)")
+        active_flags = args.flag_config or GENERATED_FLAG_PATH
+        if not active_flags.is_file():
+            parser.error("reset needs an existing active --flag-config file")
+    else:
+        if args.purge_data or args.dry_run or args.flag_config:
+            parser.error("--purge-data, --dry-run and --flag-config require reset")
+        active_flags = GENERATED_FLAG_PATH
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
     verify_demo_commit(args.demo_path)
-    environment = docker_environment(GENERATED_FLAG_PATH)
+    environment = docker_environment(active_flags)
 
     if (args.action != "prepare" and
             shutil.which("docker", path=environment.get("PATH")) is None):
@@ -87,6 +181,10 @@ def main() -> None:
             "Docker CLI is unavailable. Install and start Docker Desktop, "
             "then check that docker is on PATH."
         )
+
+    if args.action == "reset":
+        reset_demo(args.demo_path, environment, dry_run=args.dry_run)
+        return
 
     if args.action in {"prepare", "start", "switch"}:
         if args.action == "switch" and not GENERATED_FLAG_PATH.exists():

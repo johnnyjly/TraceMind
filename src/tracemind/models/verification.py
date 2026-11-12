@@ -155,12 +155,13 @@ class ReviewSubject(BaseModel):
 
 class VerificationPolicy(BaseModel):
     provider: Literal["google", "openai", "deepseek"] = "deepseek"
-    model: str = Field(default="deepseek-v4-pro", min_length=1)
+    model: str = Field(default="deepseek-flash", min_length=1)
     deepseek_thinking: bool = True
-    deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    deepseek_reasoning_effort: Literal["low", "high", "max"] = "low"
     revise_on_rejection: bool = True
     timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     input_bytes: int = Field(default=524288, ge=1)
+    context_tokens: int = Field(default=98304, ge=1)
     output_tokens: int = Field(default=32768, ge=1)
 
 

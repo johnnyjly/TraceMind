@@ -19,7 +19,7 @@ def main():
     import torch
     import uvicorn
     from tracemind.rag.query_service import create_app
-    from tracemind.config import Settings
+    from tracemind.config import Settings, settings_files
     from tracemind.rag.config import RagSettings
     from tracemind.observability.langfuse import client_for
 
@@ -28,9 +28,9 @@ def main():
     torch.set_num_interop_threads(1)
     uvicorn.run(
         create_app(
-            RagSettings(_env_file=args.env_file or ".env"),
+            RagSettings(_env_file=settings_files(args.env_file)),
             langfuse_client=client_for(
-                Settings(_env_file=args.env_file or ".env")
+                Settings(_env_file=settings_files(args.env_file))
             ),
         ),
         host="127.0.0.1",

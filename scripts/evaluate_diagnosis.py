@@ -6,12 +6,13 @@ from datetime import UTC, datetime
 from hashlib import sha256
 import json
 import logging
+import sys
 import os
 from pathlib import Path
 from threading import Lock
 from time import monotonic
 
-from tracemind.config import Settings
+from tracemind.config import Settings, settings_files
 from tracemind.evaluation.preflight import verify_live_window
 from tracemind.evaluation.budget import ModelCallBudget
 from tracemind.evaluation.experiments import (
@@ -40,8 +41,11 @@ def load_profile(path):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         key, value = line.split("=", 1)
+        key = key.strip()
         if not key.startswith("TRACEMIND_"):
             raise ValueError("profile contains a non-application setting")
+        if key.upper().endswith("_KEY"):
+            raise ValueError("credentials belong in env files, not profiles")
         values[key] = value.strip().strip("'\"")
     os.environ.update(values)
     return values
@@ -101,9 +105,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--profile", type=Path, required=True)
-    p.add_argument("--env-file", type=Path, action="append", required=True)
-    p.add_argument("--mode", choices=["single", "multi"], required=True)
+    p.add_argument("--profile", type=Path,
+                   help="optional credential-free experiment overrides")
+    p.add_argument("--env-file", type=Path, action="append",
+                   help="overlay on .env; repeat for more files")
+    p.add_argument("--mode", choices=["single", "multi"],
+                   help="override the configured agent mode")
     p.add_argument("--max-model-calls", type=int, default=40)
     p.add_argument("--without-knowledge", action="store_true")
     args = p.parse_args()
@@ -122,18 +129,19 @@ def main():
             "trial output already exists; choose a new trial name"
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    profile = load_profile(args.profile)
+    profile = load_profile(args.profile) if args.profile else {}
     os.environ.update(
         NO_PROXY="localhost,127.0.0.1,::1", no_proxy="localhost,127.0.0.1,::1"
     )
     settings = Settings(
-        _env_file=args.env_file,
-        agent_mode=args.mode,
-        langfuse_enabled=True,
+        _env_file=settings_files(args.env_file),
+        **({"agent_mode": args.mode} if args.mode else {}),
         agent_trace_directory=args.output.parent / "runs",
         agent_run_database=args.output.parent / "runs.sqlite3",
         agent_checkpoint_database=args.output.parent / "checkpoints.sqlite3",
     )
+    print(json.dumps({"model_budgets": settings.model_budgets}),
+          file=sys.stderr)
     if args.without_knowledge:
         settings = settings.model_copy(
             update={
@@ -161,20 +169,23 @@ def main():
     client = client_for(settings, required=True)
     hashes = source_hashes()
     trial_name = (
-        f"{args.data.parent.parent.name}-{args.mode}-{args.output.stem}"
+        f"{args.data.parent.parent.name}-{settings.agent_mode}-"
+        f"{args.output.stem}"
     )
     record = {
         "name": trial_name,
-        "mode": args.mode,
+        "mode": settings.agent_mode,
         "started_at": datetime.now(UTC).isoformat(),
         "profile": profile,
         "knowledge": settings.agent_knowledge_enabled,
         "source_hashes": hashes,
-        "profile_sha256": sha256(args.profile.read_bytes()).hexdigest(),
+        "profile_sha256": (sha256(args.profile.read_bytes()).hexdigest()
+                           if args.profile else None),
         "mcp_url": str(settings.telemetry_mcp_url),
         "live_window": live_window,
         "data_sha256": sha256(args.data.read_bytes()).hexdigest(),
         "limits": settings.run_limits.model_dump(mode="json"),
+        "model_budgets": settings.model_budgets,
     }
     try:
         if not client.auth_check():

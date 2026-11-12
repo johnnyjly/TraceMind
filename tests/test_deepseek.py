@@ -20,7 +20,7 @@ def test_thinking_defaults_and_explicit_opt_out():
     model = create_chat_model(settings)
     assert isinstance(model, DeepSeekChat)
     assert model.extra_body == {"thinking": {"type": "enabled"}}
-    assert model.reasoning_effort == "high"
+    assert model.reasoning_effort == "low"
     disabled = create_chat_model(
         settings.model_copy(update={"deepseek_thinking": False})
     )

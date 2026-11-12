@@ -103,7 +103,7 @@ def test_diagnosis_endpoint_rejects_reversed_window() -> None:
 
 def test_diagnosis_endpoint_requires_selected_provider_key() -> None:
     async def override_settings():
-        return Settings(_env_file=None, google_api_key=None)
+        return Settings(_env_file=None, llm_provider="google", google_api_key=None)
 
     async def request_diagnosis():
         transport = ASGITransport(app=app)

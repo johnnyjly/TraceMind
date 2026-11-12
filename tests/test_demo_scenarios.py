@@ -217,3 +217,128 @@ def test_switch_recreates_only_flagd(demo, action):
         "flagd"]
     assert "--remove-orphans" not in cmd
     assert "--volumes" not in cmd
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_reset_scopes_deletion_preserves_flags_and_uses_local_images(
+    demo, monkeypatch, dry_run,
+):
+    cli = load_script("demo_scenario")
+    flags = demo / "active.json"
+    flags.write_text('{"unchanged":true}')
+    backup = demo / "previous.json"
+    backup.write_text("previous")
+    config = {"name": "opentelemetry-demo",
+              "services": {"jaeger": {"image": "jaeger:pinned"}},
+              "volumes": {"jaeger-data": {
+                  "name": "tracemind-jaeger-data", "external": True}}}
+    containers = [
+        {"Id": "demo-id", "Config": {"Labels": {
+            "com.docker.compose.project": "opentelemetry-demo",
+            "com.docker.compose.project.working_dir": str(demo)}},
+         "Mounts": [{"Type": "volume", "Name": "legacy-jaeger"},
+                    {"Type": "volume", "Name": "anonymous-db"}]},
+        {"Id": "rag-id", "Config": {"Labels": {
+            "com.docker.compose.project": "rag"}},
+         "Mounts": [{"Type": "volume", "Name": "rag-data"}]},
+    ]
+    calls = []
+    remaining = {"legacy-jaeger", "anonymous-db", "rag-data"}
+
+    def run(cmd, **kwargs):
+        from types import SimpleNamespace
+        calls.append(cmd)
+        if cmd[-3:] == ["config", "--format", "json"]:
+            output = json.dumps(config)
+        elif cmd == ["docker", "ps", "--all", "--quiet"]:
+            output = "demo-id\nrag-id\n"
+        elif cmd[:2] == ["docker", "inspect"]:
+            output = json.dumps(containers)
+        elif cmd == ["docker", "volume", "ls", "--quiet"]:
+            output = "\n".join(remaining)
+        else:
+            output = ""
+            if cmd[:4] == ["docker", "rm", "--force", "--volumes"]:
+                remaining.remove("anonymous-db")
+        return SimpleNamespace(stdout=output)
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    monkeypatch.setattr(cli, "wait_for_backends",
+                        lambda: calls.append(["ready"]))
+    cli.reset_demo(demo, {"TRACEMIND_FLAGD_CONFIG": str(flags)},
+                   dry_run=dry_run)
+    assert flags.read_text() == '{"unchanged":true}'
+    assert backup.read_text() == "previous"
+    deletes = [cmd for cmd in calls if cmd[1:2] == ["rm"]
+               or cmd[1:3] == ["volume", "rm"]]
+    if dry_run:
+        assert not deletes
+        assert ["ready"] not in calls
+    else:
+        assert deletes == [
+            ["docker", "rm", "--force", "--volumes", "demo-id"],
+            ["docker", "volume", "rm", "legacy-jaeger"],
+        ]
+        assert calls[-2][:4] == [
+            "docker", "compose", "--project-name", "opentelemetry-demo"]
+        assert calls[-2][-5:] == [
+            "--pull", "never", "--wait", "--wait-timeout", "300"]
+        assert calls[-1] == ["ready"]
+
+
+@pytest.mark.parametrize("failure", ["shared_volume", "wrong_checkout",
+                                     "volume_delete"])
+def test_reset_refuses_unsafe_targets_and_stops_on_delete_error(
+    demo, monkeypatch, failure,
+):
+    from types import SimpleNamespace
+    import subprocess
+
+    cli = load_script("demo_scenario")
+    containers = [{
+        "Id": "demo-id", "Config": {"Labels": {
+            "com.docker.compose.project": "opentelemetry-demo",
+            "com.docker.compose.project.working_dir": str(
+                demo / "other" if failure == "wrong_checkout" else demo)}},
+        "Mounts": [{"Type": "volume", "Name": "jaeger-data"}],
+    }]
+    if failure == "shared_volume":
+        containers.append({"Id": "other", "Config": {"Labels": {}},
+                           "Mounts": containers[0]["Mounts"]})
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[-3:] == ["config", "--format", "json"]:
+            output = json.dumps({"name": "opentelemetry-demo",
+                                 "services": {"jaeger": {"image": "pinned"}}})
+        elif cmd[1:2] == ["ps"]:
+            output = "demo-id other"
+        elif cmd[1:2] == ["inspect"]:
+            output = json.dumps(containers)
+        elif cmd == ["docker", "volume", "ls", "--quiet"]:
+            output = "jaeger-data"
+        elif cmd[1:3] == ["volume", "rm"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        else:
+            output = ""
+        return SimpleNamespace(stdout=output)
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    error = (subprocess.CalledProcessError if failure == "volume_delete"
+             else RuntimeError)
+    with pytest.raises(error):
+        cli.reset_demo(demo, {"TRACEMIND_FLAGD_CONFIG": "active.json"})
+    assert not any("up" in cmd for cmd in calls)
+    if failure != "volume_delete":
+        assert not any("rm" in cmd for cmd in calls)
+
+
+def test_reset_requires_explicit_purge_before_docker(monkeypatch):
+    cli = load_script("demo_scenario")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw:
+                        pytest.fail("must not run Docker before confirmation"))
+    monkeypatch.setattr("sys.argv", ["demo_scenario.py", "reset"])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2

@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 
 from tracemind.agent.runtime.rag_model_factory import create_rag_completion
-from tracemind.config import Settings
+from tracemind.config import Settings, settings_files
 from tracemind.rag.chunking import prepare_corpus
 from tracemind.rag.config import RagSettings
 from tracemind.rag.corpus import PARSER_VERSION, load_corpus
@@ -312,7 +312,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--k", type=int, default=5)
     args = parser.parse_args()
-    args.env_file = args.env_file or Path(".env")
+    args.env_file = settings_files(args.env_file)
     if args.action == "query" and not args.query:
         parser.error("query requires --query")
     if args.action == "evaluate" and (

@@ -39,17 +39,22 @@ uv sync --locked --dev
 cp .env.example .env
 ```
 
-示例配置使用 DeepSeek 进行诊断与验证，并配置 DeepSeek Flash 作为备用模型。在本地 `.env` 中填写对应密钥：
+API、worker 和验收脚本都从启动工作目录的 `.env` 读取同一份基础配置；
+请统一在 TraceMind 仓库根目录启动，避免 SQLite 数据库路径也随目录变化。
+`--env-file` 在基础 `.env` 后叠加实验配置，后面的文件覆盖前面的同名项；
+进程环境变量仍优先于文件。`.env.example` 不会自动加载。
+
+示例配置的调查与验证均使用 DeepSeek Flash／low，默认关闭备用模型。在本地 `.env` 中填写对应密钥：
 
 ```dotenv
 TRACEMIND_LLM_PROVIDER=deepseek
-TRACEMIND_LLM_MODEL=deepseek-v4-pro
+TRACEMIND_LLM_MODEL=deepseek-flash
 TRACEMIND_DEEPSEEK_API_KEY=your-deepseek-key
-TRACEMIND_AGENT_FALLBACK_PROVIDER=deepseek
-TRACEMIND_AGENT_FALLBACK_MODEL=deepseek-flash
+TRACEMIND_AGENT_FALLBACK_PROVIDER=none
+TRACEMIND_AGENT_FALLBACK_MODEL=none
 TRACEMIND_VERIFIER_ENABLED=true
 TRACEMIND_VERIFIER_PROVIDER=deepseek
-TRACEMIND_VERIFIER_MODEL=deepseek-v4-pro
+TRACEMIND_VERIFIER_MODEL=deepseek-flash
 ```
 
 诊断支持 `google`、`openai` 和 `deepseek`，分别配置对应模型与 `TRACEMIND_GOOGLE_API_KEY`、`TRACEMIND_OPENAI_API_KEY` 或 `TRACEMIND_DEEPSEEK_API_KEY`。切换供应商时，还需检查独立配置的备用模型与验证模型及其密钥；停用备用模型时需同时移除其 provider 和 model 配置。上述模型名来自仓库配置示例。
@@ -149,7 +154,7 @@ uv run python scripts/run_experiment.py --task agent --name payment-baseline \
   --env-file .env --env-file deploy/.env.langfuse --judge --max-model-calls 20
 ```
 
-完成验证器根据保留证据检查编号断言。单 Agent 模式默认使用 high 审核；断言被拒或初查目标未完成时，最多进行一轮修订，按需补查证据，再以全部当前材料独立复核。两轮共用默认 600 秒总截止时间和 12 次模型调用预算，修订或恢复不会重置预算。首稿和审核记录保留；复核仍被拒或超时时，交付已有且引用有效的调查内容，明确标注争议、未知项和后续检查。首次成稿前中断不能保证产生完整报告。多 Agent 模式仍使用其独立的有界反馈流程。机制尚不明确时，有证据支持的故障定位和具体下一步可以完成初查；审核通过不等于诊断正确性保证。详见[交付与审核语义](docs/operations.md#online-verifier-and-optional-langfuse)。
+完成验证器根据保留证据检查编号断言。单 Agent 模式默认使用 Flash／low 审核，验证器独立使用 96K 总上下文（64K 输入、32K 输出），调查 Agent 使用 64K（48K 输入、16K 输出）；断言被拒或初查目标未完成时，最多进行一轮修订，按需补查证据，再以全部当前材料独立复核。两轮共用默认 600 秒总截止时间和 12 次模型调用预算，修订或恢复不会重置预算。首稿和审核记录保留；复核仍被拒或超时时，交付已有且引用有效的调查内容，明确标注争议、未知项和后续检查。首次成稿前中断不能保证产生完整报告。多 Agent 模式仍使用其独立的有界反馈流程。机制尚不明确时，有证据支持的故障定位和具体下一步可以完成初查；审核通过不等于诊断正确性保证。详见[交付与审核语义](docs/operations.md#online-verifier-and-optional-langfuse)。
 
 模型质量结论需要来自受控评估，并保留失败、结论不足和超时的尝试。评估方法及其适用范围见[评估文档](docs/evaluation.md)。
 
@@ -232,18 +237,18 @@ uv sync --locked --dev
 cp .env.example .env
 ```
 
-The example configuration uses DeepSeek for diagnosis and verification, with
-DeepSeek Flash as the fallback. Set the matching key in your local `.env`:
+The example configuration uses DeepSeek Flash / low for both investigation
+and verification, with fallback disabled. Set the matching key in your local `.env`:
 
 ```dotenv
 TRACEMIND_LLM_PROVIDER=deepseek
-TRACEMIND_LLM_MODEL=deepseek-v4-pro
+TRACEMIND_LLM_MODEL=deepseek-flash
 TRACEMIND_DEEPSEEK_API_KEY=your-deepseek-key
-TRACEMIND_AGENT_FALLBACK_PROVIDER=deepseek
-TRACEMIND_AGENT_FALLBACK_MODEL=deepseek-flash
+TRACEMIND_AGENT_FALLBACK_PROVIDER=none
+TRACEMIND_AGENT_FALLBACK_MODEL=none
 TRACEMIND_VERIFIER_ENABLED=true
 TRACEMIND_VERIFIER_PROVIDER=deepseek
-TRACEMIND_VERIFIER_MODEL=deepseek-v4-pro
+TRACEMIND_VERIFIER_MODEL=deepseek-flash
 ```
 
 Diagnosis supports `google`, `openai` and `deepseek`; set the matching model and
@@ -386,7 +391,8 @@ observations. A supported location/propagation finding plus a concrete next
 inspection can complete triage without proving a unique root cause. Verification
 timeout returns a marked, unreviewed initial result when the candidate's
 citations are valid; it does not count as verification success. Single-agent
-review defaults to high reasoning. A rejected assertion or incomplete triage
+review defaults to Flash / low, with its own 96K context cap (64K input and
+32K output); investigation uses 64K (48K input and 16K output). A rejected assertion or incomplete triage
 objective can trigger one revision, targeted evidence collection and a full
 independent re-review. Both rounds share the default 600-second deadline and
 12-model-call budget; revision and recovery do not reset them. The original
